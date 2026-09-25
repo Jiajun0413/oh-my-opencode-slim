@@ -436,7 +436,7 @@ export type BackgroundTaskConcurrencyConfig = z.infer<
   typeof BackgroundTaskConcurrencyConfigSchema
 >;
 
-export const BackgroundJobsConfigSchema = z.object({
+export const BackgroundJobsConfigStrictSchema = z.object({
   strategy: z
     .enum(['latest', 'checkpoint-compatible'])
     .default('latest')
@@ -543,6 +543,61 @@ export const BackgroundJobsConfigSchema = z.object({
       'When true, intercept wait_for_user calls made while background tasks are still running and the orchestrator wake scheduler is enabled, returning guidance to end the turn instead of blocking on manual input. Default enabled.',
     ),
 });
+
+export const BACKGROUND_JOBS_INVALID_VALUE_MESSAGE =
+  'Invalid backgroundJobs config value; offending keys are dropped and defaults apply.';
+
+/** BackgroundJobs diagnostics are emitted at most once per process. */
+let backgroundJobsDiagnosticEmitted = false;
+
+/** Test seam: clears the once-per-process diagnostic gate. */
+export function resetBackgroundJobsDiagnostics(): void {
+  backgroundJobsDiagnosticEmitted = false;
+}
+
+function emitBackgroundJobsDiagnostic(message: string): void {
+  if (backgroundJobsDiagnosticEmitted) return;
+  backgroundJobsDiagnosticEmitted = true;
+  console.warn(`[oh-my-opencode-slim] ${message}`);
+}
+
+function invalidBackgroundJobsKeys(config: Record<string, unknown>): string[] {
+  const shape = BackgroundJobsConfigStrictSchema.shape;
+  const invalid: string[] = [];
+  for (const [key, value] of Object.entries(config)) {
+    const keySchema = (shape as Record<string, z.ZodTypeAny>)[key];
+    if (keySchema !== undefined && !keySchema.safeParse(value).success) {
+      invalid.push(key);
+    }
+  }
+  return invalid;
+}
+
+/** Issue #1291: drop invalid `backgroundJobs` keys instead of rejecting the whole config layer. */
+export function sanitizeBackgroundJobsConfig(value: unknown): unknown {
+  if (value === undefined) return value;
+  if (!isPlainConfigObject(value)) {
+    emitBackgroundJobsDiagnostic(
+      `${BACKGROUND_JOBS_INVALID_VALUE_MESSAGE} (backgroundJobs)`,
+    );
+    return {};
+  }
+  const invalid = invalidBackgroundJobsKeys(value);
+  if (invalid.length === 0) return value;
+  emitBackgroundJobsDiagnostic(
+    `${BACKGROUND_JOBS_INVALID_VALUE_MESSAGE} (invalid backgroundJobs keys: ${invalid.join(', ')})`,
+  );
+  const sanitized = { ...value };
+  for (const key of invalid) {
+    delete sanitized[key];
+  }
+  return sanitized;
+}
+
+export const BackgroundJobsConfigSchema = z.preprocess(
+  sanitizeBackgroundJobsConfig,
+  BackgroundJobsConfigStrictSchema,
+);
 
 export type BackgroundJobsConfig = z.infer<typeof BackgroundJobsConfigSchema>;
 
