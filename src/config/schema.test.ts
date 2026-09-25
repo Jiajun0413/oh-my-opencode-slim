@@ -490,6 +490,104 @@ describe('PluginConfigSchema backgroundJobs', () => {
     expect(warnSpy).toHaveBeenCalledTimes(1);
   });
 
+  it('preserves valid nested siblings when one nested value is invalid', () => {
+    const result = PluginConfigSchema.safeParse({
+      backgroundJobs: {
+        orchestratorWake: { enabled: false, intervalMs: 1_000 },
+        concurrency: {
+          defaultConcurrency: 4,
+          providerConcurrency: { openai: -1 },
+        },
+      },
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.backgroundJobs?.orchestratorWake?.enabled).toBe(false);
+      expect(result.data.backgroundJobs?.orchestratorWake?.intervalMs).toBe(
+        300_000,
+      );
+      expect(result.data.backgroundJobs?.concurrency?.defaultConcurrency).toBe(
+        4,
+      );
+      expect(
+        result.data.backgroundJobs?.concurrency?.providerConcurrency,
+      ).toEqual({});
+    }
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    const message = warnSpy.mock.calls[0]?.[0] as string;
+    expect(message).toContain('orchestratorWake.intervalMs');
+    expect(message).toContain('concurrency.providerConcurrency');
+  });
+
+  it('ignores keys that collide with inherited object members', () => {
+    const result = PluginConfigSchema.safeParse({
+      backgroundJobs: {
+        constructor: 'nope',
+        toString: 1,
+        maxSessionsPerAgent: 4,
+      },
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.backgroundJobs?.maxSessionsPerAgent).toBe(4);
+    }
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('ignores a JSON-parsed __proto__ own property without polluting prototypes', () => {
+    const raw = JSON.parse(
+      '{"backgroundJobs":{"__proto__":{"polluted":true},"maxSessionsPerAgent":4}}',
+    );
+    const result = PluginConfigSchema.safeParse(raw);
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.backgroundJobs?.maxSessionsPerAgent).toBe(4);
+    }
+    expect(warnSpy).not.toHaveBeenCalled();
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
+  it('drops a strict-nested concurrency block wholesale when it carries an unknown key', () => {
+    // Known residual (follow-up): inside the strict concurrency object an
+    // unknown key is not stripped, so the parent safeParse fails and the
+    // whole block is dropped — the diagnostic names the parent key only.
+    const result = PluginConfigSchema.safeParse({
+      backgroundJobs: {
+        strategy: 'checkpoint-compatible',
+        concurrency: { defaultConcurrency: 4, notAKey: 1 },
+      },
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.backgroundJobs?.strategy).toBe(
+        'checkpoint-compatible',
+      );
+      expect(result.data.backgroundJobs?.concurrency?.defaultConcurrency).toBe(
+        0,
+      );
+    }
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    const message = warnSpy.mock.calls[0]?.[0] as string;
+    expect(message).toContain('concurrency');
+    expect(message).not.toContain('notAKey');
+  });
+
+  it('does not mutate the raw config while sanitizing', () => {
+    const raw = {
+      backgroundJobs: {
+        maxSessionsPerAgent: 16,
+        orchestratorWake: { enabled: false, intervalMs: 1_000 },
+      },
+    };
+    const before = JSON.stringify(raw);
+    PluginConfigSchema.safeParse(raw);
+    expect(JSON.stringify(raw)).toBe(before);
+  });
+
   it('defaults board injection to the legacy latest strategy', () => {
     const result = PluginConfigSchema.safeParse({ backgroundJobs: {} });
 
