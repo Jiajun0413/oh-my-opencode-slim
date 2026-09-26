@@ -10,9 +10,8 @@ requires OpenCode v2.0.7+ on v2 hosts; older v2 hosts are unsupported.
 The adapter targets the v2 plugin API surface (see
 [The v2 plugin API surface](#the-v2-plugin-api-surface-this-adapter-uses)),
 and the compile-time mirror guard below is pinned to `@opencode/plugin`
-2.0.15 (revalidated: `bun run typecheck` passes against 2.0.15 with no
-official session-hook surface drift from the 2.0.12 pin. Transitive
-`@opencode/schema` 2.0.15 adds `session.metadata.updated`; the event
+2.0.18 (revalidated: `bun run typecheck` passes against 2.0.18 with no
+official session-hook surface drift from the 2.0.15 pin; the event
 adapter ignores unknown event types, so no new mapping is required.
 Live host verification remains the v2.0.7 baseline above).
 
@@ -65,9 +64,13 @@ Three builds are produced:
 | `./server` | `dist/server/index.js` | `build:v2` | jsdom only (self-contained for v2) |
 | `./tui` | `dist/tui2.js` | `build:tui` | same external set as `build:plugin` (composes the v1 TUI entry; inlines zod) |
 
-The optional `@opentui/*` peers track `@opencode/plugin`'s peer floor
-(`>=0.5.10`; pinned exactly at `0.5.11`) so the v2 TUI entry satisfies
-the stable host's peer range.
+The optional `@opentui/*` pins (0.5.11) provide the v2 TUI entry's rendering
+stack. `@opencode/plugin` 2.0.18 raised its (optional) peer floor to
+`>=0.5.12`; the floor is not enforced on the plugin loading path, so the
+pins deliberately stay at 0.5.11 until the live-verified host baseline
+moves past v2.0.7 and the TUI smoke is re-run. `@opentui/solid` pins
+`solid-js` exactly (0.5.12 still requires 1.9.12), so any future OpenTUI
+bump must re-check that pin.
 
 v2's plugin resolver tries the `server` subpath first
 (`subpaths: ["server", ""]`), which the exports map resolves directly to
@@ -101,7 +104,7 @@ orchestrator-wake children-driven degraded mode are exercised end-to-end
 on the stable host — live mock-driven re-verification on 2026-09-09
 included a queued wake firing after 60 s of parent idle with a stalled
 background child). v2 conformance is compile-time-pinned by the
-mirror-conformance guard against the `@opencode/plugin` 2.0.15
+mirror-conformance guard against the `@opencode/plugin` 2.0.18
 devDependency and exercised by the mock-driven bridge tests. Every v2
 API the adapter touches is
 capability-probed at runtime (`typeof ctx.mcp?.transform === 'function'`,
