@@ -119,7 +119,7 @@ Start it directly with:
    `.slim/deepwork/` in `.gitignore` and `!.slim/deepwork/` plus
    `!.slim/deepwork/**` in `.ignore`. This keeps state git-local while making it
    readable to OpenCode.
-2. Orchestrator creates a session artifact at `.slim/deepwork/<task>.md`
+2. Orchestrator creates a session artifact at `.slim/deepwork/<session-id>.md`
 3. Draft a phased implementation plan with a small number of coherent phases
    based on dependencies and natural delivery boundaries. Do not split work
    merely to make an Oracle review smaller.
@@ -136,7 +136,6 @@ Start it directly with:
 - Persistent session state in markdown files
 - Predictable Oracle reviews after each planned phase, declared before execution
 - V2 scheduler integration (dispatch specialists, wait for hook-driven completion, reconcile)
-- OpenCode todo lists for progress tracking
 - Flexible structure - orchestrator adapts format to task needs
 
 **When to use:** Large-scale refactoring, multi-file architectural changes, complex feature development spanning modules.
