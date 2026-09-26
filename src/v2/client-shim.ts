@@ -668,9 +668,6 @@ export function buildPluginInput(
         });
       },
     },
-    // Misc methods the plugin may touch; all graceful no-ops.
-    model: { list: async () => ({ data: [] }) },
-    provider: { list: async () => ({ data: [] }) },
   };
 
   const directory = resolveV2Directory(ctx);
