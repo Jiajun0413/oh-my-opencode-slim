@@ -16,9 +16,11 @@ export interface CustomSkill {
 
 /**
  * Registry of custom skills bundled in this repository — the single gate for
- * in-process skill registration. Note: `src/skills/loop-engineering` is
- * deliberately NOT registered; the `/loop` command hook drives that workflow
- * inline and the directory is reference material only.
+ * in-process skill registration. Note: `src/skills/loop-engineering` and
+ * `src/skills/deepwork` are deliberately NOT registered; the `/loop` and
+ * `/deepwork` command hooks drive those workflows. loop-engineering's
+ * directory is reference material only; deepwork's hook injects its SKILL.md
+ * body at invocation (single source, zero resident context).
  */
 export const CUSTOM_SKILLS: CustomSkill[] = [
   {
@@ -38,13 +40,6 @@ export const CUSTOM_SKILLS: CustomSkill[] = [
     description: 'Clone important dependency source for local inspection',
     allowedAgents: ['orchestrator'],
     sourcePath: 'src/skills/clonedeps',
-  },
-  {
-    name: 'deepwork',
-    description:
-      'Heavy/complex coding sessions and large modifications workflow',
-    allowedAgents: ['orchestrator'],
-    sourcePath: 'src/skills/deepwork',
   },
   {
     name: 'verification-planning',

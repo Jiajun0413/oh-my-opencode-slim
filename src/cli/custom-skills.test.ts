@@ -26,8 +26,8 @@ describe('buildBundledSkillInfos', () => {
     const root = tmpDir();
     writeSkill(
       root,
-      'deepwork',
-      '---\nname: deepwork\ndescription: Heavy workflow\n---\n\n# Deepwork\nbody',
+      'worktrees',
+      '---\nname: worktrees\ndescription: Heavy workflow\n---\n\n# Worktrees\nbody',
     );
     writeSkill(
       root,
@@ -37,13 +37,13 @@ describe('buildBundledSkillInfos', () => {
 
     const infos = buildBundledSkillInfos(root, ['reflect']);
     expect(infos).toHaveLength(1);
-    expect(infos[0].id).toBe('deepwork');
-    expect(infos[0].name).toBe('deepwork');
+    expect(infos[0].id).toBe('worktrees');
+    expect(infos[0].name).toBe('worktrees');
     expect(infos[0].description).toBe('Heavy workflow');
-    expect(infos[0].content).toBe('# Deepwork\nbody');
+    expect(infos[0].content).toBe('# Worktrees\nbody');
     expect(
       infos[0].path.endsWith(
-        path.join('src', 'skills', 'deepwork', 'SKILL.md'),
+        path.join('src', 'skills', 'worktrees', 'SKILL.md'),
       ),
     ).toBe(true);
   });
@@ -77,13 +77,13 @@ describe('buildBundledSkillInfos', () => {
 
   test('missing skill sources are skipped, disabled list wins', () => {
     const root = tmpDir();
-    writeSkill(root, 'deepwork', '---\nname: deepwork\n---\nbody');
+    writeSkill(root, 'worktrees', '---\nname: worktrees\n---\nbody');
     // 'reflect' listed in the registry but absent on disk
 
-    expect(buildBundledSkillInfos(root, ['deepwork'])).toEqual([]);
+    expect(buildBundledSkillInfos(root, ['worktrees'])).toEqual([]);
     const infos = buildBundledSkillInfos(root, ['reflect']);
     expect(infos).toHaveLength(1);
-    expect(infos[0].id).toBe('deepwork');
+    expect(infos[0].id).toBe('worktrees');
   });
 });
 

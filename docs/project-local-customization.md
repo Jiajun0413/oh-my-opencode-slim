@@ -58,7 +58,7 @@ The `skills` array is replacement-based: when a project config defines `agents.<
 {
   "agents": {
     "oracle": {
-      "skills": ["codemap", "deepwork"]
+      "skills": ["codemap", "simplify"]
     }
   }
 }
@@ -75,7 +75,7 @@ The `skills` array is replacement-based: when a project config defines `agents.<
 }
 ```
 
-Effective result: `codemap`, `deepwork`, `project-architecture`, `project-testing` — the global list is not duplicated.
+Effective result: `codemap`, `simplify`, `project-architecture`, `project-testing` — the global list is not duplicated.
 
 Resolution order is deterministic: resolve the inherited/configured `skills` list, then apply `skills_add`, then apply `skills_remove`. Duplicates are removed (first occurrence wins), and `skills_remove` wins over `skills_add` for the same skill. When the effective list contains `"*"`, removals are expressed with the existing `!name` exclusion syntax (e.g. effective `["*", "!codemap"]`). The directives are folded into `skills` during agent resolution — after all layers (user config, project config, presets, runtime `/preset` switching) have determined the effective `skills` value — and stripped from the final agent configuration, so agent definitions and hooks only ever see a plain `skills` list. On an agent without a `skills` list, directives resolve against that agent's default grants, so `skills_add` keeps the defaults and appends.
 
