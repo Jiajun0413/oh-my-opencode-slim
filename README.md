@@ -571,13 +571,10 @@ If any agent fails to respond, check your provider authentication and config fil
 Skills are prompt-based instructions injected into an agent's system prompt to
 guide decisions, workflows, and tool use. Unlike MCPs (which are running
 servers), a skill runs no process — it is a focused playbook an agent activates
-when the task calls for it. The installer bundles eight skills and keeps them
-updated on plugin auto-update; local customizations are preserved.
-
-> [!TIP]
-> To discard local bundled-skill customizations and receive package updates, run
-> `bunx oh-my-opencode-slim install --skills=force`. This deliberately replaces
-> installed bundled skills with the package versions.
+when the task calls for it. The plugin registers its eight bundled skills
+in-process at load — updates apply on restart, nothing is copied to disk. A
+same-named skill directory under `~/.config/opencode/skills/` overrides the
+bundled version.
 
 | Skill | Purpose | Default agent | How to invoke |
 |:-----:|---------|---------------|---------------|

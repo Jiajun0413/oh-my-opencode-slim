@@ -5,10 +5,11 @@ Unlike MCPs (which are running servers), skills are **prompt-based instructions*
 injected into an agent's system prompt to guide decisions, workflows, and, when
 relevant, tool use.
 
-Bundled skills are installed by the `oh-my-opencode-slim` installer and safely
-reconciled on plugin startup/auto-update. Local customizations are preserved;
-new bundled versions for customized skills are staged under
-`~/.config/opencode/.oh-my-opencode-slim/skill-updates/` for manual review.
+Bundled skills are registered in-process by the plugin at load (never copied to
+disk); plugin updates apply on the next OpenCode restart. Skills listed in
+`disabled_skills` are not registered. To override a bundled skill, create a
+same-named directory under `~/.config/opencode/skills/` — directory skills take
+precedence over the bundled registration.
 
 ---
 

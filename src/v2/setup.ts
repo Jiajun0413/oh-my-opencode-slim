@@ -14,9 +14,15 @@
  * (agent/tool/mcp/command) stay independently try/catch-guarded.
  */
 
+import path from 'node:path';
+import {
+  buildBundledSkillInfos,
+  removeLegacySkillSyncState,
+} from '../cli/custom-skills';
 import { loadPluginConfig } from '../config/loader';
 import { InterviewConfigSchema } from '../config/schema';
 import { getBuildInfo } from '../generated/build-info';
+import { getCurrentRuntimePackageJsonPath } from '../hooks/auto-update-checker/checker';
 import {
   isTaggedPart,
   isVolatileTaggedMessage,
@@ -1664,6 +1670,70 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         disposers.push(() => reg.dispose());
       } catch (err) {
         log('[v2] interview command registration failed', String(err));
+      }
+
+      // ── Bundled skills (ctx.skill.transform — in-process, never disk-copied) ──
+      try {
+        if (typeof ctx.skill?.transform === 'function') {
+          const runtimePackageJson = getCurrentRuntimePackageJsonPath();
+          if (!runtimePackageJson) {
+            log(
+              '[v2] bundled skill registration skipped: runtime package.json unresolved',
+            );
+          } else {
+            const packageRoot = path.dirname(runtimePackageJson);
+            const disabled = [
+              ...(loadPluginConfig(directory).disabled_skills ?? []),
+            ];
+            const infos = buildBundledSkillInfos(packageRoot, disabled);
+            if (infos.length === 0) {
+              log(
+                '[v2] bundled skill registration produced no skills (check package root)',
+                { packageRoot },
+              );
+            }
+            let registered = false;
+            const reg = await ctx.skill.transform((draft) => {
+              // v1-era drafts expose {source,list}, not add — probe before use.
+              if (typeof draft.add !== 'function') return;
+              for (const info of infos) draft.add(info);
+              registered = true;
+            });
+            if (registered) {
+              if (typeof reg?.dispose === 'function') {
+                disposers.push(() => reg.dispose());
+              }
+              // Retire the legacy disk-copy state only after registration
+              // succeeded, so hosts without a working add() keep their copies.
+              const legacy = removeLegacySkillSyncState(undefined, disabled);
+              if (legacy.kept.length > 0 || legacy.backedUp.length > 0) {
+                log(
+                  '[v2] legacy skill copies: kept customized (shadow the in-process registration), backed up disabled',
+                  { kept: legacy.kept, backedUp: legacy.backedUp },
+                );
+              }
+              if (legacy.manifestUnreadable) {
+                log(
+                  '[v2] legacy skills manifest unreadable — stale copies may shadow registrations; remove ~/.config/opencode/.oh-my-opencode-slim manually',
+                );
+              }
+              log('[v2] bundled skills registered in-process', {
+                count: infos.length,
+                disabled: disabled.length,
+              });
+            } else {
+              log(
+                '[v2] ctx.skill draft lacks add(); bundled skills not registered',
+              );
+            }
+          }
+        } else {
+          log(
+            '[v2] ctx.skill.transform unavailable; bundled skills not registered',
+          );
+        }
+      } catch (err) {
+        log('[v2] bundled skill registration failed', String(err));
       }
 
       // ── Session context hook: command markers + system/messages transforms ──
