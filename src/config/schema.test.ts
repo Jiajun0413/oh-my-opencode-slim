@@ -684,6 +684,22 @@ describe('PluginConfigSchema backgroundJobs', () => {
     }
   });
 
+  it('defaults boardInjection to enabled and accepts an explicit off', () => {
+    const defaults = PluginConfigSchema.safeParse({ backgroundJobs: {} });
+    expect(defaults.success).toBe(true);
+    if (defaults.success) {
+      expect(defaults.data.backgroundJobs?.boardInjection).toBe(true);
+    }
+
+    const off = PluginConfigSchema.safeParse({
+      backgroundJobs: { boardInjection: false },
+    });
+    expect(off.success).toBe(true);
+    if (off.success) {
+      expect(off.data.backgroundJobs?.boardInjection).toBe(false);
+    }
+  });
+
   it('defaults background task concurrency limits to disabled', () => {
     const result = PluginConfigSchema.safeParse({ backgroundJobs: {} });
 
