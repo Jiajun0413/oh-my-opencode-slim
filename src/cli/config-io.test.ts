@@ -877,7 +877,6 @@ describe('config-io', () => {
     paths.ensureConfigDir();
 
     const result = writeLiteConfig({
-      installCustomSkills: false,
       reset: false,
     });
     expect(result.success).toBe(true);
@@ -896,7 +895,6 @@ describe('config-io', () => {
     paths.ensureConfigDir();
 
     const result = writeLiteConfig({
-      installCustomSkills: false,
       preset: 'opencode-go',
       reset: false,
     });

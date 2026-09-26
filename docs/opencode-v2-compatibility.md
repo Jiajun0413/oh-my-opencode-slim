@@ -7,6 +7,10 @@ register it.
 
 The verified compatibility baseline is **OpenCode v2.0.7**. The plugin
 requires OpenCode v2.0.7+ on v2 hosts; older v2 hosts are unsupported.
+Bundled-skill delivery requires the host's in-process skill registration
+channel (a `ctx.skill` draft with `add`), available on OpenCode v2 hosts. On
+v1 hosts bundled skills are **not** delivered: the legacy disk-copy sync was
+removed, and v1-era skill drafts expose `{source, list}` rather than `add`.
 The adapter targets the v2 plugin API surface (see
 [The v2 plugin API surface](#the-v2-plugin-api-surface-this-adapter-uses)),
 and the compile-time mirror guard below is pinned to `@opencode/plugin`
