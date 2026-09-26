@@ -542,6 +542,12 @@ export const BackgroundJobsConfigSchema = z.object({
     .describe(
       'When true, intercept wait_for_user calls made while background tasks are still running and the orchestrator wake scheduler is enabled, returning guidance to end the turn instead of blocking on manual input. Default enabled.',
     ),
+  boardInjection: z
+    .boolean()
+    .default(true)
+    .describe(
+      'When false, the Background Job Board reminder is never injected into prompts. Background task tracking, wake, and task_status all keep working; the orchestrator simply no longer passively sees the board. Default enabled.',
+    ),
   childInputWake: z
     .boolean()
     .default(true)

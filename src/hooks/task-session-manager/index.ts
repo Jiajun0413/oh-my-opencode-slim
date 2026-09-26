@@ -185,6 +185,8 @@ export function createTaskSessionManagerHook(
     hostOutcomeClock?: 'shared-unix-ms';
     backgroundJobSupervisor?: BackgroundJobSupervisor;
     backgroundTaskConcurrency?: BackgroundTaskConcurrency;
+    /** When false, board reminder injection is fully disabled (#1314 thread). */
+    boardInjection?: boolean;
     /** Shared by plugin generations for one admission runtime. */
     pendingCallTracker?: PendingCallTracker;
     getModelForAgent?: (
@@ -489,6 +491,7 @@ export function createTaskSessionManagerHook(
     terminalGate,
     maxRetainedSnapshots: options.maxRetainedSnapshots,
     strategy: options.strategy ?? 'latest',
+    boardInjection: options.boardInjection !== false,
     lifecycleLedger: rehydrateState,
     processedInjectedCompletions: rehydrateState.processedInjectedCompletions,
     processedInjectedCompletionOrder:
