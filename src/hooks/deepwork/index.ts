@@ -7,11 +7,11 @@ import { registerCommandHook } from '../command-hook-utils';
 
 const COMMAND_NAME = 'deepwork';
 
-// SKILL.md is the single contract source. deepwork ships as command-injected
-// content rather than a resident skill (#1332): the body is bundled at build
-// time and reaches model context only when /deepwork runs. Same posture the
-// registry sanctions for loop-engineering, minus the duplication — the
-// injected text is the SKILL.md body itself.
+// SKILL.md is the single contract source. The /deepwork command is
+// self-contained: it injects the full body (bundled at build time) plus the
+// pinned per-session path, so it works regardless of whether the resident
+// skill is registered — listing `deepwork` in disabled_skills removes the
+// resident listing without losing the command (#1332).
 const instructions = stripFrontmatter(skillMarkdown).trim();
 
 function activationPrompt(task: string, sessionID: string): string {

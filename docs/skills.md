@@ -30,6 +30,7 @@ broader evidence only when the change's risk or uncertainty warrants it.
 | [`simplify`](#simplify) | Behavior-preserving code simplification | `oracle` |
 | [`codemap`](#codemap) | Repository codemap generation | `orchestrator` |
 | [`clonedeps`](#clonedeps) | Local dependency source cloning | `orchestrator` |
+| [`deepwork`](#deepwork) | Heavy/complex coding sessions workflow | `orchestrator` |
 | [`verification-planning`](#verification-planning) | Design project-specific evidence before implementation | `orchestrator` |
 | [`reflect`](#reflect) | Review repeated work and suggest reusable workflow improvements | `orchestrator` |
 | [`worktrees`](#worktrees) | Safe Git worktree lane management | `orchestrator` |
@@ -104,7 +105,7 @@ See **[Clonedeps](clonedeps.md)** for the full workflow and file layout.
 
 **Heavy/complex coding sessions and large modifications workflow.**
 
-`deepwork` is a user-invoked workflow delivered by the `/deepwork` command: its full instructions are injected at invocation (single source: the bundled `SKILL.md`), so it occupies no session context until used. It structures deep architectural work, multi-phase implementations, and complex refactoring with risk-based review gates while keeping planning flexible.
+`deepwork` is an orchestrator workflow for deep architectural work, multi-phase implementations, and complex refactoring, with risk-based review gates and flexible planning. It is surfaced two ways: as a resident bundled skill (so the model can auto-activate it when a task clearly warrants it) and via the self-contained `/deepwork <task>` command, which injects the full bundled `SKILL.md` instructions directly. The command does not depend on skill registration — users who prefer minimal resident context can list `deepwork` in `disabled_skills` without losing `/deepwork`.
 
 Start it directly with:
 
