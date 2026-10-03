@@ -128,6 +128,21 @@ export async function flushLoggerForTesting(): Promise<void> {
   await writeChain;
 }
 
+/**
+ * Env-gated diagnostics for the board-injection gate chain
+ * (OMOS_DEBUG_CACHE=1). Silent by default; log lines never enter model
+ * context. Discriminates a lost config flag (H1: gate logs show
+ * flag=true/undefined) from an ungated injection path (H2: frames appear
+ * with no gate logs at all).
+ */
+export function debugInjection(
+  site: string,
+  data: Record<string, unknown>,
+): void {
+  if (process.env.OMOS_DEBUG_CACHE !== '1') return;
+  log(`[board-injection] ${site}`, data);
+}
+
 export function log(message: string, data?: unknown): void {
   try {
     const sink = currentSink;

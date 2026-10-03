@@ -25,6 +25,7 @@ import {
   fetchChildTranscript,
 } from '../../utils/child-transcript';
 import { isRecord as isObjectRecord } from '../../utils/guards';
+import { debugInjection } from '../../utils/logger';
 import { getClient } from '../../utils/opencode-client';
 import { withTimeout } from '../../utils/session';
 import {
@@ -604,6 +605,11 @@ export function createTaskSessionManagerHook(
     retainedBoardSnapshots: new Map(),
     retainedTailBoards: new Map(),
   };
+  debugInjection('injection-state-constructed', {
+    raw: options.boardInjection ?? null,
+    normalized: injectionState.boardInjection,
+    strategy: injectionState.strategy,
+  });
 
   // Early session.created registrations belong to the pending native call,
   // not to the factory-local board that first observed them. Move them before

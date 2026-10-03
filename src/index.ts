@@ -133,7 +133,7 @@ import {
   isNativeBackgroundTaskNotification,
 } from './utils/internal-initiator';
 import { probeJSDOM } from './utils/jsdom';
-import { initLogger, log } from './utils/logger';
+import { debugInjection, initLogger, log } from './utils/logger';
 import { SessionMetadataStore } from './utils/session-metadata';
 import {
   createSessionSelectionReader,
@@ -770,6 +770,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     }
 
     runtime = RuntimeConfig.get(ctx.directory);
+    debugInjection('config-resolved', {
+      configValue: config.backgroundJobs?.boardInjection ?? null,
+      runtimeValue: runtime.backgroundJobs.boardInjection,
+    });
     const activePresetName = runtime.getRuntimePreset() ?? config.preset;
     selectedMarketplacePackageIds = resolveDesiredMarketplacePackageIds(
       config,

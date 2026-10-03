@@ -29,7 +29,7 @@ import {
 } from '../../utils';
 import type { BackgroundJobTerminalGate } from '../../utils/background-job-terminal-gate';
 import { isRecord } from '../../utils/guards';
-import { log } from '../../utils/logger';
+import { debugInjection, log } from '../../utils/logger';
 import {
   appendTaggedSyntheticPart,
   appendTrailingVolatileMessage,
@@ -193,6 +193,7 @@ function deliverReopenCorrections(
 ): void {
   // Off stops every board-flavored injection, correction notice included
   // (#1314 thread).
+  debugInjection('gate-corrections', { flag: state.boardInjection ?? null });
   if (state.boardInjection === false) return;
   const reported = state.reportedTerminalRunsByParent?.get(parentSessionID);
   if (!reported || reported.size === 0) return;
@@ -1301,6 +1302,10 @@ export async function injectBackgroundJobBoard(
   _input: Record<string, never>,
   output: { messages?: unknown },
 ): Promise<void> {
+  debugInjection('inject-dispatch', {
+    flag: state.boardInjection ?? null,
+    strategy: state.strategy,
+  });
   const messages = Array.isArray(output.messages) ? output.messages : [];
 
   if (state.strategy === 'checkpoint-compatible') {
@@ -1382,6 +1387,7 @@ function injectLatestBoard(state: InjectionState, messages: unknown[]): void {
     reconcileConsumedTerminalJobs(state, sessionID, shapeKey);
   }
 
+  debugInjection('gate-latest', { flag: state.boardInjection ?? null });
   const boardMeta =
     state.boardInjection === false
       ? undefined
@@ -1758,6 +1764,7 @@ function injectCheckpointBoard(
 
   if (canSurface) reconcileConsumedTerminalJobs(state, sessionID, shapeKey);
 
+  debugInjection('gate-checkpoint', { flag: state.boardInjection ?? null });
   const boardMeta =
     state.boardInjection === false
       ? undefined

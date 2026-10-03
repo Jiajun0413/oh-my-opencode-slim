@@ -23,8 +23,13 @@
  * cache-safe zone and retained snapshots are replayed on every qualifying
  * request.
  */
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { describe, expect, mock, test } from 'bun:test';
+import { loadPluginConfig } from '../../config';
 import { DEFAULT_MAX_RETAINED_SNAPSHOTS } from '../../config/constants';
+import { RuntimeConfig } from '../../config/runtime';
 import { createInternalAgentTextPart } from '../../utils';
 import { BackgroundJobBoard } from '../../utils/background-job-fixture';
 import { createTaskSessionManagerHook } from './index';
@@ -542,4 +547,151 @@ describe('backgroundJobs.boardInjection switch (#1314 thread)', () => {
     ]);
     expect(turn.transformBytes).toContain('Background Job Board');
   });
+
+  test('off via the real config wiring: zero board bytes reach any request', async () => {
+    // End-to-end pin for the #1314 disable semantics. A live counterexample
+    // (every config-chain link verified, frames still injected) proved that
+    // pinning direct construction is not enough: the flag must survive the
+    // full wiring (config file -> loadPluginConfig -> RuntimeConfig seed ->
+    // hook options -> InjectionState -> gates) and the FINAL serialized
+    // request must contain zero board bytes.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-pin-'));
+    fs.mkdirSync(path.join(dir, '.opencode'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, '.opencode', 'oh-my-opencode-slim.jsonc'),
+      JSON.stringify({ backgroundJobs: { boardInjection: false } }),
+    );
+    try {
+      const config = loadPluginConfig(dir);
+      expect(config.backgroundJobs?.boardInjection).toBe(false);
+      RuntimeConfig.init(dir, config);
+      const runtime = RuntimeConfig.get(dir);
+      expect(runtime.backgroundJobs.boardInjection).toBe(false);
+
+      const board = new BackgroundJobBoard();
+      board.registerLaunch({
+        taskID: 'child-1',
+        parentSessionID: SESSION,
+        agent: 'explorer',
+        description: 'map hooks',
+      });
+      const hook = createTaskSessionManagerHook(
+        {
+          client: { session: { status: mock(async () => ({ data: {} })) } },
+          directory: dir,
+          worktree: dir,
+        } as never,
+        {
+          maxSessionsPerAgent: 4,
+          maxRetainedSnapshots: DEFAULT_MAX_RETAINED_SNAPSHOTS,
+          strategy: 'latest',
+          boardInjection: runtime.backgroundJobs.boardInjection,
+          backgroundJobBoard: board,
+          shouldManageSession: () => true,
+        },
+      );
+
+      const u1 = userMsg(
+        'msg_u_pin1',
+        'Coordinate the refactor work',
+        BASE_TIME,
+      );
+      const u2 = userMsg(
+        'msg_u_pin2',
+        'Coordinate the refactor work',
+        BASE_TIME + 1,
+      );
+      const first = await runTurn(hook, [u1]);
+      // Board state changes between turns: a fresh render would surface it.
+      await board.updateStatus({
+        taskID: 'child-1',
+        state: 'completed',
+        resultSummary: 'mapped hooks',
+      });
+      const second = await runTurn(hook, [u1, u2]);
+
+      for (const [label, turn] of [
+        ['first', first],
+        ['second', second],
+      ] as const) {
+        expect(turn.transformBytes, `${label} transform`).not.toContain(
+          'Background Job Board',
+        );
+        expect(turn.transformBytes, `${label} sentinel`).not.toContain(
+          'SENTINEL: background-job-board-v2',
+        );
+        expect(turn.providerBytes, `${label} provider`).not.toContain(
+          'Background Job Board',
+        );
+        expect(
+          turn.injected.some((message) =>
+            (
+              message as {
+                parts?: Array<{ metadata?: Record<string, unknown> }>;
+              }
+            ).parts?.some(
+              (part) =>
+                part.metadata?.['oh-my-opencode-slim.backgroundJobBoard'] ===
+                true,
+            ),
+          ),
+          `${label} tagged parts`,
+        ).toBe(false);
+      }
+
+      // Freshness probe: with the flag off and stable input, consecutive
+      // requests must be byte-identical (no Elapsed-style volatile drift).
+      const third = await runTurn(hook, [u1, u2]);
+      expect(third.transformBytes).toBe(second.transformBytes);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  test('on via the real config wiring: boards still reach the request (control)', async () => {
+    // Control for the off-pin above: the same wiring with the flag on must
+    // produce boards, proving the pin is not vacuously green on a broken
+    // harness.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-pin-'));
+    fs.mkdirSync(path.join(dir, '.opencode'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, '.opencode', 'oh-my-opencode-slim.jsonc'),
+      JSON.stringify({ backgroundJobs: { boardInjection: true } }),
+    );
+    try {
+      const config = loadPluginConfig(dir);
+      RuntimeConfig.init(dir, config);
+      const runtime = RuntimeConfig.get(dir);
+      expect(runtime.backgroundJobs.boardInjection).toBe(true);
+
+      const board = new BackgroundJobBoard();
+      board.registerLaunch({
+        taskID: 'child-1',
+        parentSessionID: SESSION,
+        agent: 'explorer',
+        description: 'map hooks',
+      });
+      const hook = createTaskSessionManagerHook(
+        {
+          client: { session: { status: mock(async () => ({ data: {} })) } },
+          directory: dir,
+          worktree: dir,
+        } as never,
+        {
+          maxSessionsPerAgent: 4,
+          maxRetainedSnapshots: DEFAULT_MAX_RETAINED_SNAPSHOTS,
+          strategy: 'latest',
+          boardInjection: runtime.backgroundJobs.boardInjection,
+          backgroundJobBoard: board,
+          shouldManageSession: () => true,
+        },
+      );
+      const turn = await runTurn(hook, [
+        userMsg('msg_u_pin_on', 'Coordinate the refactor work', BASE_TIME),
+      ]);
+      expect(turn.transformBytes).toContain('Background Job Board');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
 });
