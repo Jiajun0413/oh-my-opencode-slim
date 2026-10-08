@@ -20,6 +20,7 @@ import {
   type ResolvedAgentRegistry,
 } from './agents/registry';
 import type { RegistryFactoryBridge } from './agents/registry-bridge';
+import { roleHasWriteCapability } from './agents/role-definitions';
 import {
   CompanionManager,
   companionSessionIdForDirectory,
@@ -1189,6 +1190,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       isFallbackInProgress: (sessionID) =>
         foregroundFallback.isFallbackInProgress(sessionID),
       resolveSelection: lifecycleSelectionResolver,
+      // C2 writer-lane predicate: the queued child's agent from the board
+      // record, graded by its role's write permission data. A missing
+      // record/agent reads as writer (fail-safe, verdict defaults to
+      // attaching the verification sentence).
+      isWriterLaneTask: (taskID) =>
+        roleHasWriteCapability(backgroundJobCoordinator.get(taskID)?.agent),
       isStoppedJobRecoveryCurrent: (taskID, generation) => {
         const record = backgroundJobCoordinator.get(taskID);
         return (
