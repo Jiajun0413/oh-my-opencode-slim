@@ -157,6 +157,16 @@ export function formatStoppedJobDelta(record: {
   return `<stopped-job>\nalias: ${record.alias}\ntask: ${record.taskID}\ngeneration: ${record.generation}\nstate: ${record.state}\nreason: ${record.reason}\n</stopped-job>`;
 }
 
+/** Host-attributed stop outcome (shared with the stopped-recovery wake
+ * gate in src/index.ts): the host's own report that it interrupted or
+ * cancelled the run, committed by the terminal gate as a terminal result
+ * summary. Anchor of both the honest recovery reason below and the
+ * native-delivers skip (a stop the host reported is a stop the host's
+ * native notifier already delivers to the parent on tool-launched
+ * generations). */
+export const HOST_ATTRIBUTED_STOP_OUTCOME =
+  /^Host reported outcome: (interrupted|cancelled)\./;
+
 /** Reason line for a stopped-job recovery delta. A stop committed from a
  * host-attributed interruption/cancellation DOES carry a terminal result
  * (the host's own outcome report); blaming a missing result misinforms
@@ -168,7 +178,7 @@ export function stoppedJobRecoveryReason(record: {
 }): string {
   if (record.timedOut) return 'wall-clock deadline exceeded';
   if (record.statusUncertain) return 'runtime status uncertain';
-  const attributed = /^Host reported outcome: (interrupted|cancelled)\./.exec(
+  const attributed = HOST_ATTRIBUTED_STOP_OUTCOME.exec(
     record.resultSummary ?? '',
   );
   if (attributed) {

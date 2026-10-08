@@ -58,6 +58,7 @@ import {
   type ForegroundFallbackModel,
   formatChildInputWaitDelta,
   formatStoppedJobDelta,
+  HOST_ATTRIBUTED_STOP_OUTCOME,
   SessionLifecycle,
   stoppedJobRecoveryReason,
 } from './hooks';
@@ -1235,6 +1236,32 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           trigger: 'stopped-job-recovery',
           verdict: 'skipped',
           reason: 'revived-tracker-owns-delivery',
+        });
+        return;
+      }
+      // Host-attributed double-delivery gate: a stop the host itself
+      // reported (interrupted/cancelled — the terminal gate's own result
+      // summary, same anchor as stoppedJobRecoveryReason) is already
+      // delivered to the parent by the host's native notifier for a
+      // tool-launched generation, so a recovery wake beside it would
+      // queue a second admission for one stop. The revived-run tracker is
+      // the complementary view: when it owns this generation's delivery
+      // (task_revive lineage), omos stays the wake's author and the skip
+      // does not apply. Tracker without a record for this (taskID,
+      // generation) reads as false → only host-attributed stops fall to
+      // the native side (error-safe: at worst a redundant wake is
+      // dropped); every other stop keeps its recovery wake.
+      if (
+        HOST_ATTRIBUTED_STOP_OUTCOME.test(record.resultSummary ?? '') &&
+        !revivedRunTracker.willNotifyParent(record.taskID, record.generation)
+      ) {
+        log('[orchestrator-wake] stopped-job recovery wake skipped', {
+          sessionID: record.parentSessionID,
+          taskID: record.taskID,
+          generation: record.generation,
+          trigger: 'stopped-job-recovery',
+          verdict: 'skipped',
+          reason: 'native-delivers-host-attributed-stop',
         });
         return;
       }
