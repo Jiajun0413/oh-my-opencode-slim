@@ -4326,7 +4326,10 @@ describe('C2 v2 wake anti-forgery suffix and writer-lane grading', () => {
       }),
       'ses_child1:que_1',
     );
-    await clock.advance(0);
+    // Upstream settle window (CHILD_INPUT_WAKE_SETTLE_MS): host/UI
+    // auto-repliers get a chance to answer the ask before the parent is
+    // woken, so the wake lands only after the window elapses.
+    await clock.advance(CHILD_INPUT_WAKE_SETTLE_MS);
 
     expect(promptAsync).toHaveBeenCalledTimes(1);
     const text = wakeText(promptAsync, 0);
