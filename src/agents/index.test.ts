@@ -763,6 +763,56 @@ describe('orchestrator agent', () => {
     ).toBe('allow');
   });
 
+  test('interview_submit_state is allowed for the primary agent only', () => {
+    const agents = createAgents(
+      runtimeFor({
+        disabled_agents: [],
+        council: councilConfig(),
+        agents: { reviewer: { model: 'test/reviewer' } },
+        acpAgents: {
+          bridge: {
+            command: 'bridge-acp',
+            args: [],
+            env: {},
+            timeoutMs: 0,
+            permissionMode: 'ask',
+          },
+        },
+      }),
+    );
+
+    const permission = (name: string) => {
+      const agent = agents.find((candidate) => candidate.name === name);
+      return (
+        agent as { config: { permission: Record<string, unknown> } } | undefined
+      )?.config.permission.interview_submit_state;
+    };
+
+    expect(permission('orchestrator')).toBe('allow');
+    for (const name of SUBAGENT_NAMES) {
+      if (name === 'council' || name === 'councillor') continue;
+      expect(permission(name)).toBe('deny');
+    }
+    // Custom and ACP agents are subagents: denied unless explicitly allowed.
+    expect(permission('reviewer')).toBe('deny');
+    expect(permission('bridge')).toBe('deny');
+  });
+
+  test('interview_submit_state honors an explicit agent permission', () => {
+    const agents = createAgents(
+      runtimeFor({
+        agents: {
+          explorer: { permission: { interview_submit_state: 'allow' } },
+        },
+      }),
+    );
+    const explorer = agents.find((a) => a.name === 'explorer');
+    expect(
+      (explorer as { config: { permission: Record<string, unknown> } }).config
+        .permission.interview_submit_state,
+    ).toBe('allow');
+  });
+
   test('orchestrator accepts overrides', () => {
     const config: PluginConfig = {
       agents: {
@@ -1159,6 +1209,8 @@ describe('tool permissions', () => {
     expect(permission.write).toBe('deny');
     expect(permission.apply_patch).toBe('deny');
     expect(permission.ast_grep_replace).toBe('deny');
+    // Default (v1 or observer disabled) keeps the pre-PR blanket deny; the
+    // observer-only pattern is pinned by councillor.test with enabled=true.
     expect(permission.task).toBe('deny');
   });
 });
@@ -2261,5 +2313,37 @@ describe('createAgents with malformed disabled_tools', () => {
     expect(orchestrator?.config.prompt).not.toContain(
       '`wait_for_user` is disabled',
     );
+  });
+});
+
+describe('observer dispatch instruction injection', () => {
+  test('advisory prompts gain the dispatch line only on v2 with observer enabled', () => {
+    const enabled = createAgents(runtimeFor({ disabled_agents: [] }), {
+      hostFlavor: 'v2',
+    });
+    const oracleOn = enabled.find((a) => a.name === 'oracle');
+    expect(oracleOn?.config.prompt).toContain(
+      'dispatch @observer with the file path',
+    );
+
+    // v1 never gains the line, even with observer enabled: the host has no
+    // depth limit and children keep their pre-PR toolsets.
+    const v1 = createAgents(runtimeFor({ disabled_agents: [] }));
+    const oracleV1 = v1.find((a) => a.name === 'oracle');
+    expect(oracleV1?.config.prompt).not.toContain(
+      'dispatch @observer with the file path',
+    );
+
+    const disabledSet = createAgents(
+      runtimeFor({ disabled_agents: ['observer'] }),
+      { hostFlavor: 'v2' },
+    );
+    const oracleOff = disabledSet.find((a) => a.name === 'oracle');
+    expect(oracleOff?.config.prompt).not.toContain(
+      'dispatch @observer with the file path',
+    );
+    // Non-advisory roles never gain the line.
+    const fixer = disabledSet.find((a) => a.name === 'fixer');
+    expect(fixer?.config.prompt).not.toContain('dispatch @observer');
   });
 });
