@@ -1263,7 +1263,18 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // generation) reads as false → only host-attributed stops fall to
       // the native side (error-safe: at worst a redundant wake is
       // dropped); every other stop keeps its recovery wake.
+      // First-publication only (terminalRevision === 1): the native
+      // observer is armed per tool-launched run, and every
+      // tool-launched relaunch resets the revision (board recordLaunch
+      // bumps the generation and zeroes terminalRevision), so a
+      // revision-1 host-attributed stop is always a fresh tool-launched
+      // run the native notifier covers. A later publication (rev > 1)
+      // means the child ran again WITHOUT a tool launch — e.g. a direct
+      // prompt after completion — where no native observer exists for
+      // the new run and this recovery wake is the only notification the
+      // parent gets. Skipping there would lose the stop entirely.
       if (
+        record.terminalRevision === 1 &&
         HOST_ATTRIBUTED_STOP_OUTCOME.test(record.resultSummary ?? '') &&
         !revivedRunTracker.willNotifyParent(record.taskID, record.generation)
       ) {
