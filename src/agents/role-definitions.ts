@@ -41,7 +41,7 @@ export const ROLE_DEFINITIONS: Readonly<
     // Routing criteria live in the routing data / slim <Agents> lines; the
     // description (native dynamic subagent list) stays a single
     // non-duplicating identifier.
-    description: 'Fast codebase search and pattern matching.'
+    description: 'Fast codebase search and pattern matching.',
   }),
   librarian: Object.freeze({
     id: 'librarian',
