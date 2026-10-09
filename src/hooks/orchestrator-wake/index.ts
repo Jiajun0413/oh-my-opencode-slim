@@ -184,7 +184,7 @@ export function stoppedJobRecoveryReason(record: {
  * The child parks with no tokens moving and never finishes on its own; the
  * parent's turn already ended, so without this wake nobody ever answers. */
 export const ORCHESTRATOR_CHILD_INPUT_WAKE_TEXT =
-  '<system-reminder>\nA background child task is waiting for input and cannot proceed until the pending request is handled. Review the pending request below. Use task_reply for permission requests and for question requests only when the host exposes a supported question reply API. On OpenCode v2, form-created question requests are observable but not answerable through the pinned plugin context; answer/cancel them in the host UI if available, otherwise leave the child waiting or cancel the task. Do not respond to this reminder.\n</system-reminder>';
+  '<system-reminder>\nHandle the pending request below, then continue the task.\n</system-reminder>';
 
 /** Self-contained delta for a child input-wait wake (same rationale as
  * formatStoppedJobDelta: the wake carries the facts inline). Deduplicated

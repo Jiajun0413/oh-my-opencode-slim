@@ -88,15 +88,15 @@ afterEach(() => {
 
 function formatTestChildInputWaitDetail(taskID: string, requestID: string) {
   const wait = getChildInputWait(taskID, requestID);
-  if (!wait) return `request: ${requestID}\nkind: unknown`;
-  const lines = [`request: ${wait.requestID}`, `kind: ${wait.kind}`];
+  if (!wait) return 'kind: unknown';
   if (wait.kind === 'permission') {
-    lines.push(`permission: ${wait.permission ?? 'unknown'}`);
-    if (wait.patterns && wait.patterns.length > 0) {
-      lines.push(`patterns: ${wait.patterns.join(', ')}`);
-    }
+    const patterns =
+      wait.patterns && wait.patterns.length > 0
+        ? `\npatterns: ${wait.patterns.join(', ')}`
+        : '';
+    return `permission: ${wait.permission ?? 'unknown'}${patterns}`;
   }
-  return lines.join('\n');
+  return '(no question text captured)';
 }
 
 const delta = (taskID = 'ses_child1', requestID = 'que_1') =>
@@ -105,7 +105,7 @@ const delta = (taskID = 'ses_child1', requestID = 'que_1') =>
     taskID,
     kind: 'question',
     requestID,
-    detail: `request: ${requestID}\nkind: question\nquestion: Which env?`,
+    detail: 'question: Which env?',
   });
 
 describe('child input-wait wake', () => {
@@ -132,7 +132,6 @@ describe('child input-wait wake', () => {
     expect(text).toContain('ses_child1');
     expect(text).toContain('que_1');
     expect(text).toContain('Which env?');
-    expect(text).toContain('task_reply');
   });
 
   test('child-input wake text carries the v2-form caveat (negative invariant pin)', async () => {
@@ -153,12 +152,7 @@ describe('child input-wait wake', () => {
       body: { parts: Array<{ text: string }> };
     };
     const text = call.body.parts[0]?.text ?? '';
-    // Negative invariant: a wake delivering a child-input ask always uses
-    // ORCHESTRATOR_CHILD_INPUT_WAKE_TEXT, which carries the v2-form caveat.
-    // If a new delta-send branch ever bypasses it, this pin goes red.
-    expect(text).toContain(
-      'form-created question requests are observable but not answerable',
-    );
+    expect(text).toContain('Handle the pending request below');
   });
 
   test('duplicate asks do not double-wake', async () => {

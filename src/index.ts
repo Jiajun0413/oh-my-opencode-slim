@@ -632,18 +632,17 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
    * summary).
    */
   function formatChildInputWaitDetail(wait: ChildInputWaitRecord): string {
-    const lines = [`request: ${wait.requestID}`, `kind: ${wait.kind}`];
     if (wait.kind === 'permission') {
-      lines.push(`permission: ${wait.permission ?? 'unknown'}`);
-      if (wait.patterns && wait.patterns.length > 0) {
-        lines.push(`patterns: ${wait.patterns.join(', ')}`);
-      }
-      return lines.join('\n');
+      const patterns =
+        wait.patterns && wait.patterns.length > 0
+          ? `\npatterns: ${wait.patterns.join(', ')}`
+          : '';
+      return `permission: ${wait.permission ?? 'unknown'}${patterns}`;
     }
     if (!wait.questions || wait.questions.length === 0) {
-      lines.push('(no question text captured)');
-      return lines.join('\n');
+      return '(no question text captured)';
     }
+    const lines: string[] = [];
     for (const entry of wait.questions) {
       lines.push(`question: ${entry.question || entry.header}`);
       for (const option of entry.options) {
