@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  armBackgroundDefaultFlip,
+  disarmBackgroundDefaultFlip,
+  isBackgroundDefaultFlipArmed,
   SUBAGENT_BACKGROUND_DEFAULT_DESCRIPTION,
   subagentArgsToV1,
   toolNameToV1,
@@ -94,5 +97,16 @@ describe('SUBAGENT_BACKGROUND_DEFAULT_DESCRIPTION (background-default flip wordi
     );
     // Native description is six lines; the flip must not grow the surface.
     expect(SUBAGENT_BACKGROUND_DEFAULT_DESCRIPTION.split('\n')).toHaveLength(5);
+  });
+});
+
+describe('background-default flip pairing state', () => {
+  test('mechanism half is inert until armed, and disarm restores inertness', () => {
+    disarmBackgroundDefaultFlip();
+    expect(isBackgroundDefaultFlipArmed()).toBe(false);
+    armBackgroundDefaultFlip();
+    expect(isBackgroundDefaultFlipArmed()).toBe(true);
+    disarmBackgroundDefaultFlip();
+    expect(isBackgroundDefaultFlipArmed()).toBe(false);
   });
 });

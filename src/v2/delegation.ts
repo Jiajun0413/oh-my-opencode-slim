@@ -92,3 +92,29 @@ export const SUBAGENT_BACKGROUND_DEFAULT_DESCRIPTION = [
   'Background (default) launches it asynchronously and returns immediately; you are notified when it finishes.',
   'Foreground (background: false) runs the subagent to completion and returns its final response — use it only when the result is the direct input to your next step.',
 ].join('\n');
+
+/** Pairing state for the background-default flip: the mechanism half (the
+ * args rewrite in tool-execute-hooks) only runs once the wording half (the
+ * description rewrite in v2 setup) has verifiably landed. Both halves state
+ * one contract — if the description rewrite fails or never runs (setup
+ * failure, missing native tool), the rewrite stays inert and the native
+ * foreground default keeps operating end-to-end. Process-global: setup runs
+ * once per host process and disarms on teardown. */
+let backgroundDefaultFlipArmed = false;
+
+/** Arm the mechanism half — call only after the description rewrite was
+ * verified in place (setup probes the flipped description via draft.get). */
+export function armBackgroundDefaultFlip(): void {
+  backgroundDefaultFlipArmed = true;
+}
+
+/** Disarm on setup teardown so a disposed-and-rebuilt host never keeps a
+ * stale armed mechanism without its wording half. */
+export function disarmBackgroundDefaultFlip(): void {
+  backgroundDefaultFlipArmed = false;
+}
+
+/** Whether the flip's mechanism half may rewrite omitted `background`. */
+export function isBackgroundDefaultFlipArmed(): boolean {
+  return backgroundDefaultFlipArmed;
+}

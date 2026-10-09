@@ -66,7 +66,9 @@ import {
   watchPluginConfigFiles,
 } from './config-watch';
 import {
+  armBackgroundDefaultFlip,
   DELEGATION_TOOL_V2,
+  disarmBackgroundDefaultFlip,
   SUBAGENT_BACKGROUND_DEFAULT_DESCRIPTION,
   subagentArgsToV1,
   toolNameToV1,
@@ -2773,28 +2775,35 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
           }
           // Background-default flip, wording half: rewrite the native
           // `subagent` description to state the default the execute.before
-          // bridge now enforces, so prose and mechanism declare one
-          // contract. Same-registration lifetime as the flip's mechanism
-          // half: applied only after the execute.before hook registered,
-          // so a failed bridge registration leaves the native wording
-          // (and behavior) untouched. A missing tool id is ignored by the
-          // host; verify the flip landed and surface it if not.
+          // rewrite applies, so prose and mechanism declare one contract.
+          // Pairing: the mechanism half (the args rewrite in
+          // tool-execute-hooks) is inert until armBackgroundDefaultFlip()
+          // runs below — and that only happens after this description
+          // rewrite verifiably landed (draft.get probe). Any failure on
+          // either path (transform throws, native tool absent, hook
+          // registration failed) leaves BOTH halves off and the native
+          // foreground default keeps operating end-to-end with its
+          // native wording — no semantic mismatch is possible.
           if (before) {
             try {
+              let flipVerified = false;
               const reg = await ctx.tool.transform((draft) => {
                 draft.update(DELEGATION_TOOL_V2, (tool) => {
                   tool.description = SUBAGENT_BACKGROUND_DEFAULT_DESCRIPTION;
                 });
                 const flipped = draft.get(DELEGATION_TOOL_V2);
-                if (
-                  !flipped ||
-                  flipped.description !==
-                    SUBAGENT_BACKGROUND_DEFAULT_DESCRIPTION
-                ) {
+                flipVerified =
+                  flipped?.description ===
+                  SUBAGENT_BACKGROUND_DEFAULT_DESCRIPTION;
+                if (!flipVerified) {
                   log('[v2] subagent description flip missed (tool absent)');
                 }
               });
-              disposers.push(() => reg.dispose());
+              if (flipVerified) armBackgroundDefaultFlip();
+              disposers.push(() => {
+                reg.dispose();
+                disarmBackgroundDefaultFlip();
+              });
             } catch (err) {
               log('[v2] subagent description flip failed', String(err));
             }

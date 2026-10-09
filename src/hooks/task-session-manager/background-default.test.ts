@@ -1,6 +1,10 @@
-import { describe, expect, spyOn, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { BackgroundJobBoard } from '../../utils/background-job-board';
 import * as logger from '../../utils/logger';
+import {
+  armBackgroundDefaultFlip,
+  disarmBackgroundDefaultFlip,
+} from '../../v2/delegation';
 import { handleToolExecuteBefore } from './tool-execute-hooks';
 
 const PARENT = 'ses_parent';
@@ -23,48 +27,73 @@ function deps(hostFlavor?: string, managed = true) {
 
 function call(args: Record<string, unknown>, hostFlavor?: string) {
   const output = { args };
-  return {
+  const promise = handleToolExecuteBefore(
+    { tool: 'task', sessionID: PARENT, callID: 'call_flip' },
     output,
-    promise: handleToolExecuteBefore(
-      { tool: 'task', sessionID: PARENT, callID: 'call_flip' },
-      output,
-      deps(hostFlavor),
-    ),
-  };
+    deps(hostFlavor),
+  );
+  return { output, promise };
 }
 
 describe('v2 background-default flip', () => {
-  test('v2: omitted background is rewritten to true', async () => {
-    const { output } = call({ subagent_type: 'fixer', prompt: 'work' }, 'v2');
-    await output.promise;
+  // The mechanism half only runs once the wording half verifiably landed
+  // (v2 setup arms it after the description rewrite probe). Arm for the
+  // flip tests; the un-armed case is pinned below.
+  afterEach(() => {
+    disarmBackgroundDefaultFlip();
+  });
+
+  test('v2 armed: omitted background is rewritten to true', async () => {
+    armBackgroundDefaultFlip();
+    const { output, promise } = call(
+      { subagent_type: 'fixer', prompt: 'work' },
+      'v2',
+    );
+    await promise;
     expect(output.args.background).toBe(true);
   });
 
-  test('v2: explicit false passes through untouched', async () => {
-    const { output } = call(
+  test('v2 armed: explicit false passes through untouched', async () => {
+    armBackgroundDefaultFlip();
+    const { output, promise } = call(
       { subagent_type: 'fixer', prompt: 'work', background: false },
       'v2',
     );
-    await output.promise;
+    await promise;
     expect(output.args.background).toBe(false);
   });
 
-  test('v2: explicit true stays true', async () => {
-    const { output } = call(
+  test('v2 armed: explicit true stays true', async () => {
+    armBackgroundDefaultFlip();
+    const { output, promise } = call(
       { subagent_type: 'fixer', prompt: 'work', background: true },
       'v2',
     );
-    await output.promise;
+    await promise;
     expect(output.args.background).toBe(true);
   });
 
+  test('not armed: the native omitted default operates (wording/mechanism pairing)', async () => {
+    const { output, promise } = call(
+      { subagent_type: 'fixer', prompt: 'work' },
+      'v2',
+    );
+    await promise;
+    expect(output.args.background).toBeUndefined();
+  });
+
   test('non-v2 hosts keep the native omitted default (no rewrite)', async () => {
-    const { output } = call({ subagent_type: 'fixer', prompt: 'work' });
-    await output.promise;
+    armBackgroundDefaultFlip();
+    const { output, promise } = call({
+      subagent_type: 'fixer',
+      prompt: 'work',
+    });
+    await promise;
     expect(output.args.background).toBeUndefined();
   });
 
   test('unmanaged sessions never reach the flip', async () => {
+    armBackgroundDefaultFlip();
     const output = { args: { subagent_type: 'fixer', prompt: 'work' } };
     await handleToolExecuteBefore(
       { tool: 'task', sessionID: PARENT, callID: 'call_flip' },
@@ -76,7 +105,12 @@ describe('v2 background-default flip', () => {
 });
 
 describe('v2 background explicit-lane observation', () => {
+  afterEach(() => {
+    disarmBackgroundDefaultFlip();
+  });
+
   test('explicit false and true each log their raw value (dependent-lane health)', async () => {
+    armBackgroundDefaultFlip();
     const logSpy = spyOn(logger, 'log');
     try {
       const falseLane = {
