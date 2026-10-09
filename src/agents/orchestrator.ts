@@ -70,6 +70,7 @@ export function buildOrchestratorPrompt(
       disabledAgents,
       excludeDescriptions,
       waitForUserEnabled,
+      wakeSchedulerEnabled,
     );
   }
   // Native delegation vocabulary: `subagent(...)` with `agent` on v2 hosts,
@@ -303,19 +304,24 @@ When user's approach seems problematic:
  * vocabulary baked in and the branch set reduced to the two that change
  * bytes: `waitForUserEnabled` (question-blocking fallback), and
  * `disabledAgents` / `excludeDescriptions` (routing-line filters). The
- * wake-scheduler and board-injection branches are gone — the slim wording
- * is true in both states ("completion notifications and the wake
- * scheduler resume you"; `task_status` is the pull channel regardless of
- * board injection). Routing criteria come from the shared routing data
- * (one line per agent, no parallel name list); the agents' `description`
- * fields stay non-duplicating for the native dynamic subagent list. The
- * template is a construction-time constant per host (cache-safe). v1
- * hosts keep byte-identical wording through buildOrchestratorPrompt.
+ * board-injection branch is gone — `task_status` is the pull channel
+ * regardless of board injection. `wakeSchedulerEnabled` stays conditional:
+ * unlike the v2-derived periodic gate (which only disables periodic
+ * evaluation), the user-facing `backgroundJobs.orchestratorWake.enabled`
+ * master switch disables ALL scheduler wakes (recovery, publication,
+ * child-input), so the resume promise must drop the scheduler when it is
+ * off — native completion notices still arrive without it. Routing
+ * criteria come from the shared routing data (one line per agent, no
+ * parallel name list); the agents' `description` fields stay
+ * non-duplicating for the native dynamic subagent list. The template is
+ * a construction-time constant per host (cache-safe). v1 hosts keep
+ * byte-identical wording through buildOrchestratorPrompt.
  */
 export function buildOrchestratorPromptV2(
   disabledAgents?: ReadonlySet<string>,
   excludeDescriptions?: string[],
   waitForUserEnabled = true,
+  wakeSchedulerEnabled = true,
 ): string {
   // Filter by the same routing keys as the v1 block so disabled agents and
   // description exclusions behave identically; a routing key without a
@@ -330,6 +336,13 @@ export function buildOrchestratorPromptV2(
   const externalManualWaitInstruction = waitForUserEnabled
     ? '- If work must pause for an external manual step by the user: give concrete steps, call `wait_for_user` as the final action, and end the turn. Never use it for background tasks.'
     : '- If work must pause for an external manual step by the user: give concrete steps, use the `question` tool as the blocking boundary and ask them to respond when finished, then end the turn. `wait_for_user` is disabled — never reference or call it. Background tasks are never external manual work.';
+  // Master switch semantics: `backgroundJobs.orchestratorWake.enabled`
+  // disables ALL scheduler wakes (recovery, publication, child-input) —
+  // unlike the v2-derived periodic gate. Native completion notices still
+  // arrive without the scheduler, so they stay promised in both states.
+  const resumeChannel = wakeSchedulerEnabled
+    ? 'completion notifications and the wake scheduler resume you'
+    : 'completion notifications resume you';
 
   return `<Role>
 You are a workflow manager for coding work: plan, delegate, monitor, reconcile, and verify specialist work. You are not the default implementation worker. Delegate non-trivial work to specialists; act directly only for one isolated, clear, low-risk action where delegation costs more than doing it.
@@ -342,7 +355,7 @@ ${enabledAgents}
 <Workflow>
 - Split work into independent lanes and dispatch in parallel (multiple \`subagent\` calls in one message); respect dependencies; parallel writers must not share write scopes.
 - Every delegation names its scope and validation owner. Reference paths/lines instead of pasting file contents; note task IDs; brief the user in one line per dispatch.
-- Prefer \`subagent(..., background: true)\` for independent work. After dispatching, do non-overlapping work, then end the turn with a brief status — completion notifications and the wake scheduler resume you. Never restate background status in visible replies.
+- Prefer \`subagent(..., background: true)\` for independent work. After dispatching, do non-overlapping work, then end the turn with a brief status — ${resumeChannel}. Never restate background status in visible replies.
 - Set \`model\` only when the user asks; look up IDs with the models tool first.
 
 **File Operations Rules**:

@@ -210,7 +210,7 @@ describe('v2 slim prompt (buildOrchestratorPromptV2)', () => {
     expect(v2.config.prompt).not.toContain('Delegation Check');
   });
 
-  test('does not branch on wake scheduler or board injection (both states are always true)', () => {
+  test('board injection never changes v2 bytes; scheduler-off does (master switch semantics)', () => {
     const v2 = createOrchestratorAgent(
       undefined,
       undefined,
@@ -221,17 +221,6 @@ describe('v2 slim prompt (buildOrchestratorPromptV2)', () => {
       true,
       'v2',
     );
-    const schedulerOff = createOrchestratorAgent(
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      true,
-      false,
-      'v2',
-    );
-    expect(schedulerOff.config.prompt).toBe(v2.config.prompt);
     const boardOff = createOrchestratorAgent(
       undefined,
       undefined,
@@ -244,13 +233,32 @@ describe('v2 slim prompt (buildOrchestratorPromptV2)', () => {
       false,
     );
     expect(boardOff.config.prompt).toBe(v2.config.prompt);
-    // Both states' wording is the always-true one.
+    // Board injection never changes v2 bytes; the wake-scheduler master
+    // switch does (it disables ALL scheduler wakes, unlike the periodic
+    // gate), and is covered by its own test below.
     expect(v2.config.prompt).toContain(
       'completion notifications and the wake scheduler resume you',
     );
     expect(v2.config.prompt).toContain(
       'check `task_status` for an existing task covering the objective',
     );
+  });
+
+  test('wake scheduler disabled drops the scheduler from the resume promise', () => {
+    const enabled = buildOrchestratorPromptV2();
+    const disabled = buildOrchestratorPromptV2(
+      undefined,
+      undefined,
+      true,
+      false,
+    );
+
+    expect(enabled).toContain(
+      'completion notifications and the wake scheduler resume you',
+    );
+    expect(disabled).toContain('completion notifications resume you');
+    expect(disabled).not.toContain('wake scheduler resume you');
+    expect(disabled).not.toBe(enabled);
   });
 
   test('waitForUser disabled swaps the manual-wait line for the question boundary', () => {

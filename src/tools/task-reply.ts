@@ -202,7 +202,7 @@ export function createTaskReplyTool(options: {
         (options.input as { hostFlavor?: string }).hostFlavor === 'v2'
       ) {
         throw new Error(
-          "Question replies are not supported on this host — the child's question can be answered in the host UI, or steer/cancel the child instead.",
+          "Question replies are not supported on this host — answer the child's question in the host UI, or cancel the child with task_cancel instead.",
         );
       }
 

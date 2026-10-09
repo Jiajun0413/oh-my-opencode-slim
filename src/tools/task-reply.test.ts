@@ -774,7 +774,7 @@ describe('task_reply', () => {
       backgroundJobBoard: board,
     });
     const expected =
-      "Question replies are not supported on this host — the child's question can be answered in the host UI, or steer/cancel the child instead.";
+      "Question replies are not supported on this host — answer the child's question in the host UI, or cancel the child with task_cancel instead.";
     // reply path (answers supplied) AND reject path (answers omitted)
     await expect(
       task_reply.execute(
@@ -1076,7 +1076,7 @@ describe('task_reply v2 event transport integration', () => {
           { sessionID: 'parent-1' } as never,
         ),
       ).rejects.toThrow(
-        "Question replies are not supported on this host — the child's question can be answered in the host UI, or steer/cancel the child instead.",
+        "Question replies are not supported on this host — answer the child's question in the host UI, or cancel the child with task_cancel instead.",
       );
       expect(getChildInputWait('ses_child1', 'form_1')).not.toBeUndefined();
     } finally {
