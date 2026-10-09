@@ -36,6 +36,7 @@ import {
 } from '../hooks/chat-headers';
 import { isCommandEnabled } from '../hooks/command-hook-utils';
 import { COUNCIL_INJECT_METADATA_KEY } from '../hooks/council-inject';
+import { GOAL_POINTER_METADATA_KEY } from '../hooks/deepwork-goal';
 import type { ForegroundFallbackManager } from '../hooks/foreground-fallback';
 import { PHASE_REMINDER_METADATA_KEY } from '../hooks/phase-reminder';
 import { BACKGROUND_JOB_BOARD_METADATA_KEY } from '../hooks/task-session-manager/board-injection';
@@ -198,18 +199,18 @@ export function createCommandRegistration(
   draft.add(definition);
 }
 
-/** Register the v1 synth commands on a v2 command draft. `interview` is
- * owned by the interview bridge's own registration (whose context hook owns
- * the interview marker), so it is skipped here — a duplicate `draft.add`
- * would break `/interview` on host builds that are first-wins or throw on
- * duplicates. */
+/** Register the v1 synth commands on a v2 command draft. `interview` and
+ * `implement` are owned by the interview bridge's own registration (whose
+ * context hook owns their markers), so they are skipped here — a duplicate
+ * `draft.add` would break those commands on host builds that are first-wins
+ * or throw on duplicates. */
 export function registerSynthCommands(
   draft: V2CommandDraft,
   entries: Array<[string, { description?: string }]>,
   submit: V2CommandSubmit,
 ): void {
   for (const [name, cmd] of entries) {
-    if (name === 'interview') continue; // owned by the interview bridge registration below
+    if (name === 'interview' || name === 'implement') continue;
     try {
       createCommandRegistration(draft, name, cmd, submit);
     } catch (err) {
@@ -440,7 +441,15 @@ export function createSessionContextHandler(
       try {
         const v1messages = event.messages.map((m) => ({
           info: m,
-          parts: m.content,
+          parts: m.content.map((part) =>
+            ((part.type === 'tool-call' || part.type === 'tool-result') &&
+              part.toolName === 'interview_submit_state') ||
+            (part.type === 'text' &&
+              typeof part.text === 'string' &&
+              part.text.includes('<interview_state'))
+              ? { ...part }
+              : part,
+          ),
         }));
         await deps.messagesTransform({}, { messages: v1messages });
         event.messages = v1messages.map((m) => {
@@ -679,16 +688,17 @@ export function createChatHeadersBridge(
 
 /**
  * Metadata keys whose tagged synthetic parts the compaction bridge
- * strips: phase reminders and the keyword-triggered Council Mode block
- * are regenerated on the next turn (pure-function re-derivation over the
- * surviving message history). Background job boards must survive to tell
- * the summary which jobs are running; internal wakes do not receive fresh
- * boards. Untagged synthetic parts (e.g. command-marker expansions) are
- * also conversation content.
+ * strips: phase reminders, the keyword-triggered Council Mode block, and
+ * the deepwork goal pointer are regenerated on the next turn
+ * (pure-function re-derivation over the surviving message history).
+ * Background job boards must survive to tell the summary which jobs are
+ * running; internal wakes do not receive fresh boards. Untagged synthetic
+ * parts (e.g. command-marker expansions) are also conversation content.
  */
 const COMPACTION_STRIP_METADATA_KEYS: readonly string[] = [
   PHASE_REMINDER_METADATA_KEY,
   COUNCIL_INJECT_METADATA_KEY,
+  GOAL_POINTER_METADATA_KEY,
 ];
 
 /**
@@ -2027,7 +2037,18 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       log('[v2] ctx.generate.text', {
         available: typeof generateText === 'function',
       });
-      const pluginInput = buildPluginInput(ctx, generateChannel);
+      // Capability probe: the v2 model registry (`ctx.model`) resolves the
+      // catalog ⊕ config view the host itself uses for media gating. Powers
+      // capability-aware image routing; hosts without the domain keep the
+      // conservative default.
+      const modelDomain = (ctx as V2Context).model?.list
+        ? (ctx as V2Context).model
+        : undefined;
+      log('[v2] ctx.model', { available: Boolean(modelDomain) });
+      const pluginInput = buildPluginInput(ctx, {
+        ...(generateChannel ?? {}),
+        ...(modelDomain ? { modelDomain } : {}),
+      });
       log('[v2] calling OhMyOpenCodeLite...');
       v1Hooks = (await OhMyOpenCodeLite(
         pluginInput as never,
@@ -2065,13 +2086,26 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       const interviewConfig = InterviewConfigSchema.parse(
         pluginConfig.interview ?? {},
       );
+      const disabledCommands = new Set(pluginConfig.disabled_commands ?? []);
       const interviewCommandEnabled = isCommandEnabled('interview', {
-        disabledCommands: new Set(pluginConfig.disabled_commands ?? []),
+        disabledCommands,
+      });
+      const implementCommandEnabled = isCommandEnabled('implement', {
+        disabledCommands,
       });
       const interviewBridge = createV2InterviewBridge(ctx, interviewConfig, {
         commandEnabled: interviewCommandEnabled,
+        implementEnabled: implementCommandEnabled,
       });
       disposers.push(() => interviewBridge.dispose());
+      // The submit tool and text-complete fallback are built inside the v1
+      // factory against the v1 interview manager. On v2 the bridge owns the
+      // live transcript and active interviews, so point them at its service.
+      (
+        v1Hooks as {
+          'v2.setInterviewService'?: (service: unknown) => void;
+        }
+      )['v2.setInterviewService']?.(interviewBridge.service);
 
       // Commands do not depend on agent finalization or host state.
       let finalizedRegistry:
@@ -2444,7 +2478,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       try {
         const reg = await ctx.command.transform((draft) => {
           try {
-            if (interviewCommandEnabled) {
+            if (interviewCommandEnabled || implementCommandEnabled) {
               interviewBridge.registerCommand(draft);
             }
           } catch (err) {
