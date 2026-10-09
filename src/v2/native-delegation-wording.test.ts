@@ -95,7 +95,11 @@ describe('buildOrchestratorPrompt delegation vocabulary', () => {
     );
 
     expect(prompt).toContain('`subagent(agent, sessionID, prompt)`');
-    expect(prompt).toContain('Prefer `subagent(..., background: true)`');
+    // Background-default flip: the Prefer-background line is gone — the
+    // flipped subagent description owns the default; the slim prompt keeps
+    // only the post-dispatch discipline.
+    expect(prompt).not.toContain('Prefer `subagent(..., background: true)`');
+    expect(prompt).toContain('After dispatching, do non-overlapping work');
     expect(prompt).toContain('multiple `subagent` calls in one message');
     expect(prompt).not.toContain('subagent_type');
     expect(prompt).not.toContain('task(');

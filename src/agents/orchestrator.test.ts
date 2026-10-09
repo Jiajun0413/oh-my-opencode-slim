@@ -307,3 +307,17 @@ describe('v2 slim prompt (buildOrchestratorPromptV2)', () => {
     ).toMatchSnapshot();
   });
 });
+
+describe('background-default flip prompt alignment', () => {
+  test('v2 slim drops the Prefer-background line (the flipped subagent description owns the default)', () => {
+    const prompt = buildOrchestratorPromptV2();
+    expect(prompt).not.toContain('Prefer `subagent(..., background: true)`');
+    // The end-of-turn discipline the line carried stays.
+    expect(prompt).toContain('After dispatching, do non-overlapping work');
+  });
+
+  test('v1 render keeps its own background guidance byte-identically', () => {
+    const prompt = buildOrchestratorPrompt();
+    expect(prompt).toContain('background: true');
+  });
+});

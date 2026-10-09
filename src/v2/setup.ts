@@ -65,7 +65,13 @@ import {
   createProfileRefreshRunner,
   watchPluginConfigFiles,
 } from './config-watch';
-import { subagentArgsToV1, toolNameToV1, v1ArgsToSubagent } from './delegation';
+import {
+  DELEGATION_TOOL_V2,
+  SUBAGENT_BACKGROUND_DEFAULT_DESCRIPTION,
+  subagentArgsToV1,
+  toolNameToV1,
+  v1ArgsToSubagent,
+} from './delegation';
 import { mapV2EventToV1 } from './event-adapter';
 import {
   INTERNAL_SYNTHETIC_MESSAGE_PREFIX,
@@ -2764,6 +2770,34 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
               }
             });
             disposers.push(() => reg.dispose());
+          }
+          // Background-default flip, wording half: rewrite the native
+          // `subagent` description to state the default the execute.before
+          // bridge now enforces, so prose and mechanism declare one
+          // contract. Same-registration lifetime as the flip's mechanism
+          // half: applied only after the execute.before hook registered,
+          // so a failed bridge registration leaves the native wording
+          // (and behavior) untouched. A missing tool id is ignored by the
+          // host; verify the flip landed and surface it if not.
+          if (before) {
+            try {
+              const reg = await ctx.tool.transform((draft) => {
+                draft.update(DELEGATION_TOOL_V2, (tool) => {
+                  tool.description = SUBAGENT_BACKGROUND_DEFAULT_DESCRIPTION;
+                });
+                const flipped = draft.get(DELEGATION_TOOL_V2);
+                if (
+                  !flipped ||
+                  flipped.description !==
+                    SUBAGENT_BACKGROUND_DEFAULT_DESCRIPTION
+                ) {
+                  log('[v2] subagent description flip missed (tool absent)');
+                }
+              });
+              disposers.push(() => reg.dispose());
+            } catch (err) {
+              log('[v2] subagent description flip failed', String(err));
+            }
           }
           log('[v2] tool hooks registered', {
             before: !!before,

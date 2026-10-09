@@ -355,7 +355,7 @@ ${enabledAgents}
 <Workflow>
 - Split work into independent lanes and dispatch in parallel (multiple \`subagent\` calls in one message); respect dependencies; parallel writers must not share write scopes.
 - Every delegation names its scope and validation owner. Reference paths/lines instead of pasting file contents; note task IDs; brief the user in one line per dispatch.
-- Prefer \`subagent(..., background: true)\` for independent work. After dispatching, do non-overlapping work, then end the turn with a brief status — ${resumeChannel}. Never restate background status in visible replies.
+- After dispatching, do non-overlapping work, then end the turn with a brief status — ${resumeChannel}. Never restate background status in visible replies.
 - Set \`model\` only when the user asks; look up IDs with the models tool first.
 
 **File Operations Rules**:

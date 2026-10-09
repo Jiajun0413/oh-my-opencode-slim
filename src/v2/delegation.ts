@@ -76,3 +76,19 @@ export function delegationWording(
   const { tool, agentParam, resumeParam } = delegationVocabulary(hostFlavor);
   return { tool, agentParam, resumeParam };
 }
+
+/** Rewritten native `subagent` description for the background-default flip
+ * (v2 only): the native prose anchors the omitted-parameter default to the
+ * foreground ("Foreground (default)…", "Use background only for…") and
+ * fights the wake-based orchestration loop this plugin ships. The flipped
+ * text states the mechanism the execute.before bridge enforces (omitted
+ * `background` launches asynchronously), teaches `background: false` as the
+ * dependent-work escape hatch, and is one line shorter than the native
+ * text so the swap never grows the tool surface. */
+export const SUBAGENT_BACKGROUND_DEFAULT_DESCRIPTION = [
+  'Spawns an agent in a child session to work on the specified task.',
+  'The output includes a sessionID you can pass back later to continue that specific conversation with the subagent.',
+  "New child sessions start with fresh context, so include all relevant context and instructions when you don't pass a sessionID.",
+  'Background (default) launches it asynchronously and returns immediately; you are notified when it finishes.',
+  'Foreground (background: false) runs the subagent to completion and returns its final response — use it only when the result is the direct input to your next step.',
+].join('\n');
