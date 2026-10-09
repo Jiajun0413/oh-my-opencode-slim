@@ -1926,6 +1926,12 @@ describe('plugin reload generation cleanup', () => {
     resultSummary: string;
     pluginConfig?: Record<string, unknown>;
     forceWillNotifyParent?: boolean;
+    /** Simulate a direct (non-tool) prompt re-running the child after its
+     * first terminal publication: the board record goes back to running
+     * (terminalRevision bumps, generation unchanged — no recordLaunch, no
+     * fresh native observer) and the next stop publishes a later
+     * revision. */
+    republishAfterDirectPrompt?: boolean;
   }) {
     const wake = mock(() => {});
     const createScheduler = wakeHooks.createOrchestratorWakeScheduler;
@@ -1972,7 +1978,28 @@ describe('plugin reload generation cleanup', () => {
         state: 'stopped',
         terminalUnreconciled: true,
       });
-      for (const [listener] of subscriptions.mock.calls) listener(stopped);
+      let terminal = stopped;
+      if (record.republishAfterDirectPrompt) {
+        // Observed revision must match the record's current revision for the
+        // live-busy observation to restart the record (the undefined
+        // default reads as a stale observation and only bumps lastLiveBusyAt).
+        const rerunning = board.markRunningFromLiveSession(
+          launch.taskID,
+          300,
+          undefined,
+          stopped.terminalRevision,
+        );
+        expect(rerunning?.state).toBe('running');
+        const restopped = board.markStopped(
+          launch.taskID,
+          record.resultSummary,
+          400,
+        );
+        if (!restopped) throw new Error('missing restopped record');
+        expect(restopped.terminalRevision).toBeGreaterThan(1);
+        terminal = restopped;
+      }
+      for (const [listener] of subscriptions.mock.calls) listener(terminal);
       const skipLogs = logSpy.mock.calls.filter(
         ([message]) =>
           message === '[orchestrator-wake] stopped-job recovery wake skipped',
@@ -2026,6 +2053,22 @@ describe('plugin reload generation cleanup', () => {
     const delta = String(wake.mock.calls[0]?.[1]);
     expect(delta).toContain('<stopped-job>');
     expect(delta).toContain('stopped without a terminal result');
+    expect(skipLogs).toHaveLength(0);
+  });
+
+  test('C3: later publication after a direct prompt keeps its recovery wake (no native observer for the re-run)', async () => {
+    const { wake, skipLogs } = await emitStoppedRecovery({
+      resultSummary: HOST_INTERRUPTED_SUMMARY,
+      pluginConfig: { hostFlavor: 'v2' },
+      republishAfterDirectPrompt: true,
+    });
+
+    // rev > 1: the child ran again WITHOUT a tool launch, so no native
+    // observer covers the re-run's stop — this recovery wake is the only
+    // notification the parent gets and must not be skipped.
+    expect(wake).toHaveBeenCalledTimes(1);
+    expect(wake.mock.calls[0]?.[0]).toBe('parent-1');
+    expect(String(wake.mock.calls[0]?.[1])).toContain('<stopped-job>');
     expect(skipLogs).toHaveLength(0);
   });
 
