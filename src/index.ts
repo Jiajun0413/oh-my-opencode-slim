@@ -182,7 +182,11 @@ import {
 import { createTuiReusableProjection } from './utils/tui-reusable-projection';
 import { createV2Setup } from './v2';
 import { parseModelRef } from './v2/adapters';
-import { delegationWording } from './v2/delegation';
+import {
+  type BackgroundDefaultFlipState,
+  createBackgroundDefaultFlipState,
+  delegationWording,
+} from './v2/delegation';
 import {
   isInternalAdmission,
   recordInternalAdmission,
@@ -726,6 +730,11 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     }
   };
 
+  // Per-instance pairing state for the background-default flip (v2): the
+  // setup arms it only after its description rewrite verifiably landed,
+  // so prose and mechanism state one contract per location. Inert on v1
+  // (hostFlavor gate) and until armed.
+  const backgroundDefaultFlip = createBackgroundDefaultFlipState();
   try {
     // Directory scope (multi-instance): the host loads this plugin once per
     // location and broadcasts every event to every instance in the process.
@@ -1096,6 +1105,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     });
     taskSessionManagerHook = createTaskSessionManagerHook(ctx, {
       terminalGate,
+      // Flip mechanism half reads the per-instance box declared above.
+      isBackgroundDefaultFlipArmed: backgroundDefaultFlip.isArmed,
       strategy: runtime.backgroundJobs.strategy,
       maxSessionsPerAgent: runtime.backgroundJobs.maxSessionsPerAgent,
       maxRetainedSnapshots: runtime.backgroundJobs.maxRetainedSnapshots,
@@ -2016,6 +2027,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     'v2.refreshProfiles': refreshProfilesFromDisk,
     'v2.foreignTaskEvent': observeForeignTaskEvent,
     'v2.resolveDelegatedModel': resolveV2DelegatedModel,
+    // Per-instance background-default flip handle: v2 setup arms it after
+    // its description rewrite verifies and disarms it with its teardown.
+    'v2.backgroundDefaultFlip': backgroundDefaultFlip,
     'v2.session.retry':
       foregroundFallback.handleV2Retry.bind(foregroundFallback),
     // v2 owns its own interview bridge/service; point the submit tool and
@@ -3191,6 +3205,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     'v2.foreignTaskEvent': typeof observeForeignTaskEvent;
     'v2.refreshProfiles': typeof refreshProfilesFromDisk;
     'v2.resolveDelegatedModel': typeof resolveV2DelegatedModel;
+    'v2.backgroundDefaultFlip': BackgroundDefaultFlipState;
   };
 
   return hooks;

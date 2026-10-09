@@ -24,11 +24,7 @@ import type { BackgroundJobTerminalGate } from '../../utils/background-job-termi
 import { isRecord as isObjectRecord } from '../../utils/guards';
 import { log } from '../../utils/logger';
 import { controlParamName } from '../../v2/adapters';
-import {
-  type DelegationWording,
-  delegationWording,
-  isBackgroundDefaultFlipArmed,
-} from '../../v2/delegation';
+import { type DelegationWording, delegationWording } from '../../v2/delegation';
 import { isMissingRememberedSessionError } from './board-injection';
 import type { PendingTaskCall } from './pending-call-tracker';
 import { convertSameProviderBackgroundTask } from './same-provider-policy';
@@ -156,6 +152,9 @@ export async function handleToolExecuteBefore(
      * delegation vocabulary for model-visible refusal guidance. Defaults to
      * v1 wording. */
     hostFlavor?: string;
+    /** Per-instance pairing flag for the background-default flip: true only
+     * after this setup's v2 description rewrite verifiably landed. */
+    isBackgroundDefaultFlipArmed?: () => boolean;
     recoverRetainedSession?: (request: {
       parentSessionID: string;
       requested: string;
@@ -196,12 +195,12 @@ export async function handleToolExecuteBefore(
   // measured 2:1 foreground habit even in orchestration sessions. Flip the
   // omitted-parameter default to background for managed sessions; explicit
   // `false` (dependent work) and explicit `true` pass through untouched.
-  // Gated on the pairing flag: the flip only runs once the v2 setup has
-  // verifiably rewritten the native description to state the same default
-  // (armBackgroundDefaultFlip) — otherwise the native foreground default
+  // Gated on the per-instance pairing flag: the flip only runs once this
+  // setup's v2 description rewrite verifiably landed (arm via
+  // 'v2.backgroundDefaultFlip') — otherwise the native foreground default
   // keeps operating end-to-end with its native wording intact. v1 hosts
   // keep the full native behavior (no flavor gate entry).
-  if (deps.hostFlavor === 'v2' && isBackgroundDefaultFlipArmed()) {
+  if (deps.hostFlavor === 'v2' && deps.isBackgroundDefaultFlipArmed?.()) {
     if (args.background === undefined) {
       args.background = true;
       log('[task-session-manager] v2 background default applied', {

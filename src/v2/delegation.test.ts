@@ -1,8 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  armBackgroundDefaultFlip,
-  disarmBackgroundDefaultFlip,
-  isBackgroundDefaultFlipArmed,
+  createBackgroundDefaultFlipState,
   SUBAGENT_BACKGROUND_DEFAULT_DESCRIPTION,
   subagentArgsToV1,
   toolNameToV1,
@@ -101,12 +99,19 @@ describe('SUBAGENT_BACKGROUND_DEFAULT_DESCRIPTION (background-default flip wordi
 });
 
 describe('background-default flip pairing state', () => {
-  test('mechanism half is inert until armed, and disarm restores inertness', () => {
-    disarmBackgroundDefaultFlip();
-    expect(isBackgroundDefaultFlipArmed()).toBe(false);
-    armBackgroundDefaultFlip();
-    expect(isBackgroundDefaultFlipArmed()).toBe(true);
-    disarmBackgroundDefaultFlip();
-    expect(isBackgroundDefaultFlipArmed()).toBe(false);
+  test('inert until armed; disarm restores inertness; instances stay isolated', () => {
+    const flip = createBackgroundDefaultFlipState();
+    expect(flip.isArmed()).toBe(false);
+    flip.arm();
+    expect(flip.isArmed()).toBe(true);
+    flip.disarm();
+    expect(flip.isArmed()).toBe(false);
+    // One instance's state never crosses another (host loads one plugin
+    // per project in one process).
+    const other = createBackgroundDefaultFlipState();
+    flip.arm();
+    expect(other.isArmed()).toBe(false);
+    flip.disarm();
+    expect(other.isArmed()).toBe(false);
   });
 });

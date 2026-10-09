@@ -1,13 +1,14 @@
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { BackgroundJobBoard } from '../../utils/background-job-board';
 import * as logger from '../../utils/logger';
-import {
-  armBackgroundDefaultFlip,
-  disarmBackgroundDefaultFlip,
-} from '../../v2/delegation';
+import { createBackgroundDefaultFlipState } from '../../v2/delegation';
 import { handleToolExecuteBefore } from './tool-execute-hooks';
 
 const PARENT = 'ses_parent';
+
+/** One flip instance per describe block (disarmed between tests), mirroring
+ * one per plugin setup in production. */
+const flip = createBackgroundDefaultFlipState();
 
 /** Minimal deps for the background-default flip: the guard chain up to the
  * flip needs a managed session, a board, and a pending-call tracker. */
@@ -21,6 +22,7 @@ function deps(hostFlavor?: string, managed = true) {
       pendingCallId: () => 'call_flip',
     },
     taskContextTracker: { pendingManagedTaskIds: new Set<string>() },
+    isBackgroundDefaultFlipArmed: flip.isArmed,
     hostFlavor,
   };
 }
@@ -40,11 +42,11 @@ describe('v2 background-default flip', () => {
   // (v2 setup arms it after the description rewrite probe). Arm for the
   // flip tests; the un-armed case is pinned below.
   afterEach(() => {
-    disarmBackgroundDefaultFlip();
+    flip.disarm();
   });
 
   test('v2 armed: omitted background is rewritten to true', async () => {
-    armBackgroundDefaultFlip();
+    flip.arm();
     const { output, promise } = call(
       { subagent_type: 'fixer', prompt: 'work' },
       'v2',
@@ -54,7 +56,7 @@ describe('v2 background-default flip', () => {
   });
 
   test('v2 armed: explicit false passes through untouched', async () => {
-    armBackgroundDefaultFlip();
+    flip.arm();
     const { output, promise } = call(
       { subagent_type: 'fixer', prompt: 'work', background: false },
       'v2',
@@ -64,7 +66,7 @@ describe('v2 background-default flip', () => {
   });
 
   test('v2 armed: explicit true stays true', async () => {
-    armBackgroundDefaultFlip();
+    flip.arm();
     const { output, promise } = call(
       { subagent_type: 'fixer', prompt: 'work', background: true },
       'v2',
@@ -83,7 +85,7 @@ describe('v2 background-default flip', () => {
   });
 
   test('non-v2 hosts keep the native omitted default (no rewrite)', async () => {
-    armBackgroundDefaultFlip();
+    flip.arm();
     const { output, promise } = call({
       subagent_type: 'fixer',
       prompt: 'work',
@@ -93,7 +95,7 @@ describe('v2 background-default flip', () => {
   });
 
   test('unmanaged sessions never reach the flip', async () => {
-    armBackgroundDefaultFlip();
+    flip.arm();
     const output = { args: { subagent_type: 'fixer', prompt: 'work' } };
     await handleToolExecuteBefore(
       { tool: 'task', sessionID: PARENT, callID: 'call_flip' },
@@ -102,15 +104,48 @@ describe('v2 background-default flip', () => {
     );
     expect(output.args.background).toBeUndefined();
   });
+
+  test('per-instance state: another setup arming or disarming never crosses locations', async () => {
+    // The host loads one plugin instance per project in one process; the
+    // armed flag must stay scoped to the setup whose description rewrite
+    // landed (Greptile: disposing one project must not disarm the other).
+    const flipA = createBackgroundDefaultFlipState();
+    const flipB = createBackgroundDefaultFlipState();
+    const outputA = { args: { subagent_type: 'fixer', prompt: 'work' } };
+    const outputB = { args: { subagent_type: 'fixer', prompt: 'work' } };
+
+    flipA.arm();
+    await handleToolExecuteBefore(
+      { tool: 'task', sessionID: PARENT, callID: 'c_a' },
+      outputA,
+      { ...deps('v2'), isBackgroundDefaultFlipArmed: flipA.isArmed },
+    );
+    await handleToolExecuteBefore(
+      { tool: 'task', sessionID: PARENT, callID: 'c_b' },
+      outputB,
+      { ...deps('v2'), isBackgroundDefaultFlipArmed: flipB.isArmed },
+    );
+    expect(outputA.args.background).toBe(true);
+    expect(outputB.args.background).toBeUndefined();
+
+    flipA.disarm();
+    const outputA2 = { args: { subagent_type: 'fixer', prompt: 'work' } };
+    await handleToolExecuteBefore(
+      { tool: 'task', sessionID: PARENT, callID: 'c_a2' },
+      outputA2,
+      { ...deps('v2'), isBackgroundDefaultFlipArmed: flipA.isArmed },
+    );
+    expect(outputA2.args.background).toBeUndefined();
+  });
 });
 
 describe('v2 background explicit-lane observation', () => {
   afterEach(() => {
-    disarmBackgroundDefaultFlip();
+    flip.disarm();
   });
 
   test('explicit false and true each log their raw value (dependent-lane health)', async () => {
-    armBackgroundDefaultFlip();
+    flip.arm();
     const logSpy = spyOn(logger, 'log');
     try {
       const falseLane = {
