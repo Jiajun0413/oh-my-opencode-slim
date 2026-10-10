@@ -418,6 +418,12 @@ currently break this plugin:
   in the orchestrator prompt's `<Agents>` block) and offers
   `routingBlock: false` to drop that block on v2 — the roster keeps
   identity, the block's Delegate/Don't criteria are the documented cost.
+  One flavor caveat: the `hidden` filter is v2-only — as of opencode
+  1.18.35, v1's `agents.list()` and the task tool's `describeTask` filter
+  by mode and permissions but not `hidden`, so hidden agents (omos
+  councillors included) do surface in the v1 task roster, while the
+  orchestrator's inline seat list remains the only always-present seat
+  source on v2.
 
 - **Event payloads ride under `data`, not `properties`.** The v2
   event stream (SSE and `ctx.event.subscribe()`) frames each event as
