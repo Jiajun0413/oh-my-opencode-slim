@@ -1074,6 +1074,7 @@ export function createAgents(
     runtime.backgroundJobs.orchestratorWake.enabled,
     options?.hostFlavor,
     runtime.backgroundJobs.boardInjection,
+    runtime.routingBlock,
   );
 
   const inlineOrchestratorPrompt = orchestratorOverride?.prompt;
