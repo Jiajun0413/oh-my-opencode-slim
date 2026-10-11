@@ -75,9 +75,12 @@ export function buildOrchestratorPrompt(
       routingBlockEnabled,
     );
   }
-  // routingBlockEnabled is intentionally not consumed on the v1 path: the
-  // v1 body is a frozen byte-parity template (pinned by orchestrator.test),
-  // and v1 hosts reshape routing via an orchestrator.md override instead.
+  // `routingBlockEnabled` is intentionally not consumed on the v1 path:
+  // `routingBlock` only toggles the v2 slim builder. v1's `<Agents>` content
+  // now matches v2's (`ROLE_ROUTING_SLIM_LINES`), but v1 has no switch to
+  // remove it — the rest of the v1 body is still the frozen byte-parity
+  // template (pinned by orchestrator.test), and v1 hosts reshape routing via
+  // an orchestrator.md override instead.
 
   // Native delegation vocabulary: `subagent(...)` with `agent` on v2 hosts,
   // `task(...)` with `subagent_type` on v1. Construction-time constant per
@@ -99,10 +102,16 @@ export function buildOrchestratorPrompt(
     ? 'the Background Job Board and current conversation'
     : '`task_status` and the current conversation';
   // Filter agent descriptions
+  // Shared with buildOrchestratorPromptV2's enabledAgents pipeline below —
+  // intentionally not extracted to a common helper in this change (keeps
+  // this PR's diff limited to one seam: v1's prompt source, not v1/v2's
+  // pipeline structure). A future PR may collapse both into one renderer
+  // in role-routing.ts if the two drift apart.
   const enabledAgents = Object.entries(ROLE_ROUTING_BLOCKS)
     .filter(([name]) => !disabledAgents?.has(name))
     .filter(([name]) => !excludeDescriptions?.includes(name))
-    .map(([, desc]) => desc)
+    .map(([name]) => ROLE_ROUTING_SLIM_LINES[name])
+    .filter((line): line is string => line !== undefined)
     .join('\n\n');
 
   // Filter parallel delegation examples - remove lines mentioning any disabled agent

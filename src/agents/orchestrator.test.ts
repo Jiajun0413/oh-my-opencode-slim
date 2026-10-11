@@ -147,7 +147,9 @@ describe('v1 prompt byte parity (frozen template)', () => {
   test('default render is byte-identical across invocations and host flavors', () => {
     const noFlavor = buildOrchestratorPrompt();
     // 'v1' and unknown flavors must not move a byte from the no-flavor
-    // (v1 default) render — the slim v2 template must never leak in.
+    // (v1 default) render — v1 now renders the same ROLE_ROUTING_SLIM_LINES
+    // content as v2, but through its own frozen wrapper template — the v2
+    // wrapper (`<Role>`/`<Workflow>` wording) must still never leak in.
     expect(
       buildOrchestratorPrompt(undefined, undefined, true, true, 'v1'),
     ).toBe(noFlavor);
@@ -185,6 +187,47 @@ describe('v1 prompt byte parity (frozen template)', () => {
       'v1',
     );
     expect(explicitV1.config.prompt).toBe(buildOrchestratorPrompt());
+  });
+
+  test('default v1 render sources its <Agents> block from the slim routing lines', () => {
+    const prompt = buildOrchestratorPrompt();
+
+    for (const line of Object.values(ROLE_ROUTING_SLIM_LINES)) {
+      expect(prompt).toContain(line);
+    }
+    // The full routing block is gone: Stats/Capabilities are prose the
+    // orchestrator can never execute, and the Delegate/Don't criteria —
+    // the only routing-bearing content — survive in the slim lines.
+    expect(prompt).not.toContain('Stats:');
+    expect(prompt).not.toContain('Capabilities:');
+    expect(prompt).not.toContain('- Lane:');
+  });
+
+  test('default v1 render keeps a well-formed <Agents> wrapper around the slim lines', () => {
+    const prompt = buildOrchestratorPrompt();
+
+    const agentsBlock = /<Agents>([\s\S]*?)<\/Agents>/.exec(prompt);
+    expect(agentsBlock).not.toBeNull();
+    expect(agentsBlock![1].trim()).toContain(ROLE_ROUTING_SLIM_LINES.designer);
+    // Exactly one wrapper element — no duplicated or unclosed tag.
+    expect(prompt.match(/<Agents>/g)?.length).toBe(1);
+    expect(prompt.match(/<\/Agents>/g)?.length).toBe(1);
+  });
+
+  test('v1 and v2 render the same <Agents> routing content', () => {
+    const v1Block = /<Agents>([\s\S]*?)<\/Agents>/.exec(
+      buildOrchestratorPrompt(),
+    );
+    const v2Block = /<Agents>([\s\S]*?)<\/Agents>/.exec(
+      buildOrchestratorPromptV2(),
+    );
+    expect(v1Block).not.toBeNull();
+    expect(v2Block).not.toBeNull();
+    // Both builders join the same ROLE_ROUTING_SLIM_LINES values with
+    // '\n\n'. Only the wrapper padding differs: v1 uses
+    // `<Agents>\n\n${enabledAgents}\n\n</Agents>` (frozen template wording),
+    // v2 uses `<Agents>\n${enabledAgents}\n</Agents>` — hence the trim.
+    expect(v1Block![1].trim()).toBe(v2Block![1].trim());
   });
 });
 

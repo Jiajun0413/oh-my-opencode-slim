@@ -12,7 +12,7 @@ import {
   roleHasWriteCapability,
   SPECIALIST_ROLES,
 } from './role-definitions';
-import { ROLE_ROUTING_BLOCKS } from './role-routing';
+import { ROLE_ROUTING_BLOCKS, ROLE_ROUTING_SLIM_LINES } from './role-routing';
 
 const FACTORIES = {
   explorer: createExplorerAgent,
@@ -62,14 +62,14 @@ describe('specialist role definitions', () => {
     );
   });
 
-  test('keeps routing blocks available for specialists and council', () => {
+  test('keeps routing lines available for specialists and council', () => {
     const prompt = buildOrchestratorPrompt();
     for (const role of SPECIALIST_ROLES) {
-      expect(prompt).toContain(ROLE_ROUTING_BLOCKS[role]);
+      expect(prompt).toContain(ROLE_ROUTING_SLIM_LINES[role]);
     }
-    expect(prompt).toContain(ROLE_ROUTING_BLOCKS.council);
+    expect(prompt).toContain(ROLE_ROUTING_SLIM_LINES.council);
     expect(buildOrchestratorPrompt(new Set(['explorer']))).not.toContain(
-      ROLE_ROUTING_BLOCKS.explorer,
+      ROLE_ROUTING_SLIM_LINES.explorer,
     );
   });
   test('keeps behavioral steering while fixing local prompt inconsistencies', () => {
