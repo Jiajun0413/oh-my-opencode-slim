@@ -367,6 +367,8 @@ describe('task_reply', () => {
       backgroundJobBoard: board,
     });
 
+    expect(Object.keys(task_reply.args)).toContain('answers');
+
     const output = await task_reply.execute(
       {
         task_id: 'ses_child1',
@@ -410,12 +412,14 @@ describe('task_reply', () => {
     });
 
     expect(Object.keys(task_reply.args)).toContain('sessionID');
-    // The tool description must keep the v2-form caveat: forms are not
-    // answerable here, and callers are redirected to the host UI/cancel.
-    expect(task_reply.description).toMatch(/v2 forms?/i);
-    expect(task_reply.description).toMatch(/cannot be answered/i);
-    expect(task_reply.description).toMatch(/host UI/i);
-    expect(task_reply.description).toContain('task_cancel');
+    // v2 advertises only what it can do: the pinned plugin context has no
+    // form.reply, so the answers arg is absent there and the description
+    // carries no caveat to offset it — the execute gate below refuses
+    // forms with the host-UI/cancel redirect.
+    expect(Object.keys(task_reply.args)).not.toContain('answers');
+    expect(task_reply.description).toBe(
+      'Reply to a tracked child request by task ID/alias and request ID.',
+    );
 
     // C4: both identifier forms still resolve the task and its open ask on
     // v2, but the question path refuses before any transport attempt — the

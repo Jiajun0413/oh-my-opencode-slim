@@ -93,26 +93,38 @@ export function createTaskReplyTool(options: {
   const delegation = delegationWording(
     typeof hostFlavor === 'string' ? hostFlavor : undefined,
   );
+  const replyArgs = {
+    ...taskRefArgs(idParam),
+    request_id: z
+      .string()
+      .describe('Open question/permission request ID to answer'),
+    answers: z
+      .array(z.string().max(MAX_ANSWER_LENGTH))
+      .optional()
+      .describe(
+        'Answers for a question request, in question order (each entry selects option labels). Omit to reject the request instead of answering it.',
+      ),
+    reply: z
+      .enum(['once', 'always', 'reject'])
+      .optional()
+      .describe(
+        'Response for a permission request: once, always, or reject. Defaults to once.',
+      ),
+  };
+  // v2 has no form.reply in the pinned plugin context, so advertising
+  // question answers there can only invite calls the execute gate
+  // refuses. Drop the arg from the v2 schema; v1 and unknown flavors
+  // (which fail toward the capable side) keep the full surface. The
+  // static type keeps `answers` optional — the v2 gate below refuses
+  // question kinds before any answers access, so the absent key is
+  // never read there.
+  if (hostFlavor === 'v2') {
+    delete (replyArgs as Partial<typeof replyArgs>).answers;
+  }
   const task_reply = tool({
-    description: `Reply to a tracked child request by task ID/alias and request ID.${hostFlavor === 'v2' ? ' V2 forms cannot be answered here; use host UI, wait, or task_cancel.' : ''}`,
-    args: {
-      ...taskRefArgs(idParam),
-      request_id: z
-        .string()
-        .describe('Open question/permission request ID to answer'),
-      answers: z
-        .array(z.string().max(MAX_ANSWER_LENGTH))
-        .optional()
-        .describe(
-          'Answers for a question request, in question order (each entry selects option labels). Omit to reject the request instead of answering it.',
-        ),
-      reply: z
-        .enum(['once', 'always', 'reject'])
-        .optional()
-        .describe(
-          'Response for a permission request: once, always, or reject. Defaults to once.',
-        ),
-    },
+    description:
+      'Reply to a tracked child request by task ID/alias and request ID.',
+    args: replyArgs,
     async execute(args, toolContext) {
       const parentSessionID = toolContext?.sessionID;
       if (!parentSessionID) throw new Error('task_reply requires sessionID');
@@ -208,10 +220,7 @@ export function createTaskReplyTool(options: {
       // exit here never reaches clearChildInputWait: the ask stays open
       // and answerable where it actually is. Permission requests are not
       // gated; v1 hosts (no hostFlavor) keep the full path untouched.
-      if (
-        openWait.kind === 'question' &&
-        (options.input as { hostFlavor?: string }).hostFlavor === 'v2'
-      ) {
+      if (openWait.kind === 'question' && hostFlavor === 'v2') {
         throw new Error(
           "Question replies are not supported on this host — answer the child's question in the host UI, or cancel the child with task_cancel instead.",
         );
