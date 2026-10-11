@@ -16,7 +16,6 @@ import {
   OBSERVER_PROMPT,
   ORACLE_PROMPT,
 } from './role-prompts';
-import { ROLE_ROUTING_BLOCKS } from './role-routing';
 
 export interface SpecialistRoleDefinition {
   readonly id: SpecialistRole;
@@ -76,22 +75,35 @@ export const ROLE_DEFINITIONS: Readonly<
 });
 
 /**
- * Write-capability verdict for a specialist role (C2 wake grading),
- * derived from the role's permission row in the routing data
- * (`- Permissions: ...`). A role that grants `write_files` is a writer
- * lane; a role with an explicit non-write permission row is not. An
- * unknown agent, a missing permission row, or an undeterminable agent
- * name fails safe to writer — the graded verification instruction is
- * attached rather than omitted (an extra sentence costs less than a
- * missing instruction). No agent names are hardcoded.
+ * Write-capability verdict for a specialist role (C2 wake grading).
+ *
+ * A hand-written table, not a live derivation from the routing prose —
+ * `roleHasWriteCapability` is called on every wake-grading path and must
+ * not re-parse a paragraph per call. The table mirrors the
+ * `- Permissions:` row in each role's ROLE_ROUTING_BLOCKS entry; a
+ * drift-guard test (role-definitions.test.ts) cross-checks the two on
+ * every run so this table cannot silently drift from the routing prose.
+ * `librarian` has no Permissions row in the prose (the role predates the
+ * convention) — omitted here too, so it falls through to the same
+ * fail-safe `true` as any undetermined agent. No agent names are
+ * hardcoded beyond this table: an unknown agent, or a missing/undeterminable
+ * name, fails safe to writer (an extra verification sentence costs less
+ * than a missing one).
  */
+export const ROLE_WRITE_CAPABILITY: Readonly<Record<string, boolean>> =
+  Object.freeze({
+    explorer: false,
+    oracle: false,
+    designer: true,
+    fixer: true,
+    council: false,
+    observer: false,
+    // librarian: intentionally absent — fails safe to true, see doc comment.
+  });
+
 export function roleHasWriteCapability(agent: string | undefined): boolean {
   if (!agent) return true;
-  const routingBlock = ROLE_ROUTING_BLOCKS[agent];
-  if (!routingBlock) return true;
-  const permissions = /^- Permissions: (.+)$/m.exec(routingBlock);
-  if (!permissions) return true;
-  return permissions[1].includes('write_files');
+  return ROLE_WRITE_CAPABILITY[agent] ?? true;
 }
 
 export function createRoleAgent(

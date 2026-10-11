@@ -9,6 +9,7 @@ import { createOracleAgent } from './oracle';
 import { buildOrchestratorPrompt } from './orchestrator';
 import {
   ROLE_DEFINITIONS,
+  ROLE_WRITE_CAPABILITY,
   roleHasWriteCapability,
   SPECIALIST_ROLES,
 } from './role-definitions';
@@ -113,6 +114,23 @@ describe('roleHasWriteCapability', () => {
     expect(roleHasWriteCapability('custom-unknown')).toBe(true);
     expect(roleHasWriteCapability(undefined)).toBe(true);
     expect(roleHasWriteCapability('')).toBe(true);
+  });
+});
+
+describe('roleHasWriteCapability drift guard', () => {
+  test('hand-written table matches the Permissions row in routing prose', () => {
+    for (const [role, expectedWrite] of Object.entries(ROLE_WRITE_CAPABILITY)) {
+      const permissions = /^- Permissions: (.+)$/m.exec(
+        ROLE_ROUTING_BLOCKS[role],
+      );
+      expect(permissions).not.toBeNull();
+      expect(permissions![1].includes('write_files')).toBe(expectedWrite);
+    }
+  });
+
+  test('librarian has no Permissions row (table omission is intentional)', () => {
+    expect(ROLE_ROUTING_BLOCKS.librarian).not.toContain('Permissions:');
+    expect('librarian' in ROLE_WRITE_CAPABILITY).toBe(false);
   });
 });
 

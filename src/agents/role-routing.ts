@@ -5,6 +5,18 @@ export interface RoleRoutingDefinition {
   readonly routingBlock: string;
 }
 
+/**
+ * @deprecated as a prompt-rendering source. Neither orchestrator builder
+ * reads this anymore (v1 and v2 both render `ROLE_ROUTING_SLIM_LINES`);
+ * `roleHasWriteCapability` now reads a hand-written table, not this
+ * object's prose. The sole remaining consumer is marketplace inheritance
+ * (`src/marketplace/routing.ts`), which copies a `routingBlock` string
+ * into package metadata/contract output — not into any prompt. New
+ * internal consumers should read `ROLE_ROUTING_SLIM_LINES` or add a
+ * hand-written table instead of parsing this prose. Not actually
+ * removable: marketplace contract/test fixtures still depend on its full
+ * text.
+ */
 export const ROLE_ROUTING_BLOCKS: Readonly<Record<string, string>> =
   Object.freeze({
     explorer: `@explorer
