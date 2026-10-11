@@ -118,19 +118,28 @@ describe('roleHasWriteCapability', () => {
 });
 
 describe('roleHasWriteCapability drift guard', () => {
-  test('hand-written table matches the Permissions row in routing prose', () => {
-    for (const [role, expectedWrite] of Object.entries(ROLE_WRITE_CAPABILITY)) {
-      const permissions = /^- Permissions: (.+)$/m.exec(
-        ROLE_ROUTING_BLOCKS[role],
-      );
-      expect(permissions).not.toBeNull();
-      expect(permissions![1].includes('write_files')).toBe(expectedWrite);
+  test('table and Permissions rows in routing prose cover each other exactly', () => {
+    for (const [role, block] of Object.entries(ROLE_ROUTING_BLOCKS)) {
+      const permissions = /^- Permissions: (.+)$/m.exec(block);
+      if (permissions) {
+        // A role with a prose row must be in the table with a matching
+        // verdict — a new read-only role omitted from the table would
+        // otherwise fail safe to writer without a failing test.
+        expect(ROLE_WRITE_CAPABILITY[role]).toBe(
+          permissions[1].includes('write_files'),
+        );
+      } else {
+        // The explicit exception: librarian has no Permissions row (the
+        // role predates the convention) and stays omitted from the table
+        // so it fails safe to writer like any undetermined agent.
+        expect(role).toBe('librarian');
+        expect(role in ROLE_WRITE_CAPABILITY).toBe(false);
+      }
     }
-  });
-
-  test('librarian has no Permissions row (table omission is intentional)', () => {
-    expect(ROLE_ROUTING_BLOCKS.librarian).not.toContain('Permissions:');
-    expect('librarian' in ROLE_WRITE_CAPABILITY).toBe(false);
+    // No stale table entries for roles absent from the routing data.
+    for (const role of Object.keys(ROLE_WRITE_CAPABILITY)) {
+      expect(role in ROLE_ROUTING_BLOCKS).toBe(true);
+    }
   });
 });
 
