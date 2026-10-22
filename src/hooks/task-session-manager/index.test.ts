@@ -654,8 +654,8 @@ describe('task-session-manager hook', () => {
 
     const secondBoard = new BackgroundJobBoard();
     // The assembly, not the after-hook, owns terminal capacity release.
-    secondBoard.setTerminalPublicationHandler((taskID) =>
-      concurrency.releaseTask(taskID),
+    secondBoard.addTerminalOutcomeListener((record) =>
+      concurrency.releaseTask(record.taskID),
     );
     const secondGeneration = createHook({
       backgroundJobBoard: secondBoard,
@@ -7434,7 +7434,7 @@ describe('task-session-manager hook', () => {
       };
       const onLaunch = mock(() => {});
       const terminal = mock(() => {});
-      board.setTerminalPublicationHandler(terminal);
+      board.addTerminalOutcomeListener(terminal);
       const { task_revive } = createTaskReviveTool({
         input: {
           directory: '/tmp',
@@ -7617,7 +7617,7 @@ describe('task-session-manager hook', () => {
       description: 'late completion',
     });
     const listener = mock(() => {});
-    board.setTerminalPublicationHandler(listener);
+    board.addTerminalOutcomeListener(listener);
     const { hook } = createHook({
       backgroundJobBoard: board,
       shouldManageSession: (id) => id === 'parent-1',
@@ -7931,7 +7931,7 @@ describe('task-session-manager hook', () => {
     const coordinator = new SessionLifecycle(() => {});
     const board = new BackgroundJobBoard();
     const terminalListener = mock(() => {});
-    board.setTerminalPublicationHandler(terminalListener);
+    board.addTerminalOutcomeListener(terminalListener);
     const first = createHook({
       backgroundJobBoard: board,
       coordinator,
@@ -8074,7 +8074,7 @@ describe('task-session-manager hook', () => {
     const coordinator = new SessionLifecycle(() => {});
     const board = new BackgroundJobBoard();
     const terminalListener = mock(() => {});
-    board.setTerminalPublicationHandler(terminalListener);
+    board.addTerminalOutcomeListener(terminalListener);
     const first = createHook({
       backgroundJobBoard: board,
       coordinator,
@@ -8255,7 +8255,7 @@ describe('task-session-manager hook', () => {
   test('allows an observed synthetic completion in the same generation', async () => {
     const board = new BackgroundJobBoard();
     const terminalListener = mock(() => {});
-    board.setTerminalPublicationHandler(terminalListener);
+    board.addTerminalOutcomeListener(terminalListener);
     const { hook, complete } = createHook({
       backgroundJobBoard: board,
       runtimeStatusReconcileDelayMs: 60_000,
@@ -8311,7 +8311,7 @@ describe('task-session-manager hook', () => {
     const coordinator = new SessionLifecycle(() => {});
     const board = new BackgroundJobBoard();
     const terminalListener = mock(() => {});
-    board.setTerminalPublicationHandler(terminalListener);
+    board.addTerminalOutcomeListener(terminalListener);
     const first = createHook({
       backgroundJobBoard: board,
       coordinator,
@@ -8583,7 +8583,7 @@ describe('task-session-manager hook', () => {
   test('keeps unobserved legacy and host-message completions fail-closed after deletion', async () => {
     const board = new BackgroundJobBoard();
     const terminalListener = mock(() => {});
-    board.setTerminalPublicationHandler(terminalListener);
+    board.addTerminalOutcomeListener(terminalListener);
     const { hook } = createHook({
       backgroundJobBoard: board,
       runtimeStatusReconcileDelayMs: 60_000,
@@ -8660,7 +8660,7 @@ describe('task-session-manager hook', () => {
   test('accepts a host messageID occurrence in the current generation', async () => {
     const board = new BackgroundJobBoard();
     const terminalListener = mock(() => {});
-    board.setTerminalPublicationHandler(terminalListener);
+    board.addTerminalOutcomeListener(terminalListener);
     const { hook, complete } = createHook({
       backgroundJobBoard: board,
       runtimeStatusReconcileDelayMs: 60_000,
@@ -8733,7 +8733,7 @@ describe('task-session-manager hook', () => {
   test('keeps a host completion without observed provenance fail-closed', async () => {
     const board = new BackgroundJobBoard();
     const terminalListener = mock(() => {});
-    board.setTerminalPublicationHandler(terminalListener);
+    board.addTerminalOutcomeListener(terminalListener);
     const { hook } = createHook({
       backgroundJobBoard: board,
       runtimeStatusReconcileDelayMs: 60_000,
@@ -8781,7 +8781,7 @@ describe('task-session-manager hook', () => {
   test('keeps an exact explicit ID collision independent from host provenance', async () => {
     const board = new BackgroundJobBoard();
     const terminalListener = mock(() => {});
-    board.setTerminalPublicationHandler(terminalListener);
+    board.addTerminalOutcomeListener(terminalListener);
     const { hook, complete } = createHook({
       backgroundJobBoard: board,
       runtimeStatusReconcileDelayMs: 60_000,
@@ -8870,7 +8870,7 @@ describe('task-session-manager hook', () => {
   test('rejects weak provenance after relaunch without session deletion', async () => {
     const board = new BackgroundJobBoard();
     const terminalListener = mock(() => {});
-    board.setTerminalPublicationHandler(terminalListener);
+    board.addTerminalOutcomeListener(terminalListener);
     const { hook } = createHook({
       backgroundJobBoard: board,
       runtimeStatusReconcileDelayMs: 60_000,
@@ -8938,7 +8938,7 @@ describe('task-session-manager hook', () => {
   test('does not reject weak provenance after an unrelated task deletion', async () => {
     const board = new BackgroundJobBoard();
     const terminalListener = mock(() => {});
-    board.setTerminalPublicationHandler(terminalListener);
+    board.addTerminalOutcomeListener(terminalListener);
     const { hook, complete } = createHook({
       backgroundJobBoard: board,
       runtimeStatusReconcileDelayMs: 60_000,
@@ -9005,7 +9005,7 @@ describe('task-session-manager hook', () => {
   test('keeps a distinct weak origin after processing the first one fail-closed', async () => {
     const board = new BackgroundJobBoard();
     const terminalListener = mock(() => {});
-    board.setTerminalPublicationHandler(terminalListener);
+    board.addTerminalOutcomeListener(terminalListener);
     const { hook, complete } = createHook({
       backgroundJobBoard: board,
       runtimeStatusReconcileDelayMs: 60_000,
@@ -9081,7 +9081,7 @@ describe('task-session-manager hook', () => {
   test('keeps multiple current-generation host messageID origins fail-closed', async () => {
     const board = new BackgroundJobBoard();
     const terminalListener = mock(() => {});
-    board.setTerminalPublicationHandler(terminalListener);
+    board.addTerminalOutcomeListener(terminalListener);
     const { hook } = createHook({
       backgroundJobBoard: board,
       runtimeStatusReconcileDelayMs: 60_000,
@@ -9142,7 +9142,7 @@ describe('task-session-manager hook', () => {
   test('retains an old occurrence provenance after more than 500 later occurrences', async () => {
     const board = new BackgroundJobBoard();
     const terminalListener = mock(() => {});
-    board.setTerminalPublicationHandler(terminalListener);
+    board.addTerminalOutcomeListener(terminalListener);
     const { hook } = createHook({
       backgroundJobBoard: board,
       runtimeStatusReconcileDelayMs: 60_000,

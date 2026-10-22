@@ -134,7 +134,6 @@ import {
 } from './tui-state';
 import {
   BackgroundJobBoard,
-  BackgroundJobCoordinator,
   BackgroundJobSupervisor,
   type BackgroundTaskConcurrency,
   createDisplayNameMentionRewriter,
@@ -895,10 +894,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     );
     backgroundTaskConcurrency = admissionRuntimeLease.backgroundTaskConcurrency;
 
-    // Initialize coordinator as the sole writer to the board
-    const backgroundJobCoordinator = new BackgroundJobCoordinator(
-      backgroundJobBoard,
-    );
     // Project launch identity (alias↔session) into TUI state so the
     // clickable sidebar can label active subagent sessions. Best-effort:
     // a failed tui-state write must never fail a launch.
@@ -910,7 +905,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       board: backgroundJobBoard,
       projectDir: ctx.directory,
     });
-    backgroundJobCoordinator.addLaunchIdentityListener((event) => {
+    backgroundJobBoard.addLaunchIdentityListener((event) => {
       const directory = tuiActivityDirectory(event.taskID);
       if (event.kind === 'registered') {
         if (event.parentSessionID && event.parentSessionID !== event.taskID) {
@@ -930,7 +925,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       }
     });
     terminalGate = createBackgroundJobTerminalGate({
-      backgroundJobBoard: backgroundJobCoordinator,
+      backgroundJobBoard,
       input: ctx,
       // Configurable stop-confirmation grace (backgroundJobs.
       // stopConfirmationMs); the default equals
@@ -968,7 +963,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       },
     });
     backgroundJobSupervisor = new BackgroundJobSupervisor({
-      backgroundJobStore: backgroundJobCoordinator,
+      backgroundJobStore: backgroundJobBoard,
       terminalGate,
       wallClockTimeoutMs: runtime.backgroundJobs.wallClockTimeoutMs,
       abortGraceMs: runtime.backgroundJobs.abortGraceMs,
@@ -977,15 +972,15 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           path: { id: taskID },
         }),
     });
-    backgroundJobCoordinator.addTerminalOutcomeListener((record) => {
-      const current = backgroundJobCoordinator.get(record.taskID);
+    backgroundJobBoard.addTerminalOutcomeListener((record) => {
+      const current = backgroundJobBoard.get(record.taskID);
       if (
         current?.generation !== record.generation ||
         current.terminalRevision !== record.terminalRevision ||
         current.state === 'running'
       )
         return;
-      backgroundJobCoordinator.addContext(
+      backgroundJobBoard.addContext(
         record.taskID,
         getRevivedContextFiles(record.taskID),
       );
@@ -996,7 +991,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     });
     revivedRunTracker = createRevivedRunTracker({
       input: ctx,
-      backgroundJobBoard: backgroundJobCoordinator,
+      backgroundJobBoard,
       terminalGate,
       backgroundJobSupervisor,
       resolveSelection: lifecycleSelectionResolver,
@@ -1008,7 +1003,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         markPersistedBackgroundChildDelivered(
           taskID,
           Date.now(),
-          runStartedAt ?? backgroundJobCoordinator.get(taskID)?.runStartedAt,
+          runStartedAt ?? backgroundJobBoard.get(taskID)?.runStartedAt,
         );
       },
       // Degraded-fallback wiring (revived-lineage strand): when every
@@ -1028,7 +1023,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         runStartedAt,
       ) => {
         void (async () => {
-          const record = backgroundJobCoordinator.get(taskID);
+          const record = backgroundJobBoard.get(taskID);
           const delivered =
             await orchestratorWakeScheduler?.triggerTerminalPublicationWake(
               parentSessionID,
@@ -1046,7 +1041,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         })().catch(() => undefined);
       },
     });
-    backgroundJobCoordinator.addTerminalOutcomeListener((record) => {
+    backgroundJobBoard.addTerminalOutcomeListener((record) => {
       revivedRunTracker.onTerminal(record);
       // Sidebar activity bookkeeping only: pane lifecycle runs in the client
       // (TUI) process, never here.
@@ -1080,7 +1075,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // acceptance, reject() withdraws on failure; see
     // fallback-observation-transfer.ts.
     const backgroundFallbackHandoff = createBackgroundFallbackHandoff({
-      backgroundJobBoard: backgroundJobCoordinator,
+      backgroundJobBoard,
       revivedRunTracker,
     });
     // The current v2 host interface has no per-turn/atomic conditional
@@ -1126,10 +1121,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // termination, so handoff preparation rejects a delayed stale replay.
       // Undefined remains exclusive to foreground/unmanaged sessions.
       (sessionID) => {
-        const record = backgroundJobCoordinator.get(sessionID);
+        const record = backgroundJobBoard.get(sessionID);
         return record?.background === true ? record.generation : undefined;
       },
-      (sessionID) => backgroundJobCoordinator.hasRunning(sessionID),
+      (sessionID) => backgroundJobBoard.hasRunning(sessionID),
       v2RetryEnabled,
     );
 
@@ -1138,7 +1133,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     loopCommandHook = createLoopCommandHook();
     const recoverRetainedSession = createSessionRecovery({
       input: ctx,
-      backgroundJobBoard: backgroundJobCoordinator,
+      backgroundJobBoard,
       isDisposed: () => instanceDisposed,
       hostFlavor,
     });
@@ -1155,7 +1150,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // v1-only honoured switch (forced false on v2 at RuntimeConfig).
       boardInjection: runtime.backgroundJobs.boardInjection,
       maxSessionsPerAgent: runtime.backgroundJobs.maxSessionsPerAgent,
-      backgroundJobBoard: backgroundJobCoordinator,
+      backgroundJobBoard,
       backgroundJobSupervisor,
       backgroundTaskConcurrency,
       pendingCallTracker: admissionRuntimeLease.pendingCallTracker,
@@ -1197,7 +1192,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       coordinator: sessionLifecycle,
       revivedRunTracker,
       onChildInputWait: (notification) => {
-        const record = backgroundJobCoordinator.get(notification.taskID);
+        const record = backgroundJobBoard.get(notification.taskID);
         if (record?.state !== 'running') {
           return;
         }
@@ -1244,9 +1239,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // record/agent reads as writer (fail-safe, verdict defaults to
       // attaching the verification sentence).
       isWriterLaneTask: (taskID) =>
-        roleHasWriteCapability(backgroundJobCoordinator.get(taskID)?.agent),
+        roleHasWriteCapability(backgroundJobBoard.get(taskID)?.agent),
       isStoppedJobRecoveryCurrent: (taskID, generation) => {
-        const record = backgroundJobCoordinator.get(taskID);
+        const record = backgroundJobBoard.get(taskID);
         return (
           record?.generation === generation &&
           record.state === 'stopped' &&
@@ -1254,17 +1249,17 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         );
       },
       isChildInputWaitCurrent: (taskID, requestID) => {
-        const record = backgroundJobCoordinator.get(taskID);
+        const record = backgroundJobBoard.get(taskID);
         return (
           record?.state === 'running' &&
           getChildInputWait(taskID, requestID) !== undefined
         );
       },
       hasPendingDelegatedWork: (sessionID) =>
-        backgroundJobCoordinator.hasRunning(sessionID) ||
-        backgroundJobCoordinator.hasTerminalUnreconciled(sessionID),
+        backgroundJobBoard.hasRunning(sessionID) ||
+        backgroundJobBoard.hasTerminalUnreconciled(sessionID),
       isPublicationCurrent: (publication) => {
-        const record = backgroundJobCoordinator.get(publication.taskID);
+        const record = backgroundJobBoard.get(publication.taskID);
         return (
           record !== undefined &&
           record.state !== 'running' &&
@@ -1275,7 +1270,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         );
       },
       onPublicationAccepted: (publication) => {
-        const record = backgroundJobCoordinator.get(publication.taskID);
+        const record = backgroundJobBoard.get(publication.taskID);
         markPersistedBackgroundChildDelivered(
           publication.taskID,
           Date.now(),
@@ -1290,7 +1285,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // in the scanner: parent launch evidence is required before adoption.
     void recoverSubagentSessionsAtStartup({
       input: ctx,
-      backgroundJobBoard: backgroundJobCoordinator,
+      backgroundJobBoard,
       shouldManageSession: (sessionID) =>
         sessionMetadata.getAgent(sessionID) === 'orchestrator' ||
         sessionMetadata.isTaskManaged(sessionID),
@@ -1315,7 +1310,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         );
       },
       onRecoveredTerminal: async (parentSessionID, taskID) => {
-        const record = backgroundJobCoordinator.get(taskID);
+        const record = backgroundJobBoard.get(taskID);
         if (!record) return false;
         return (
           (await orchestratorWakeScheduler?.triggerTerminalPublicationWake(
@@ -1331,7 +1326,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         error: error instanceof Error ? error.message : String(error),
       });
     });
-    backgroundJobCoordinator.addTerminalOutcomeListener((record) => {
+    backgroundJobBoard.addTerminalOutcomeListener((record) => {
       // A placeholder is not delegated work; its stop is not recoverable
       // by the parent until a task launch has attributed the session.
       if (record.provisional === true) return;
@@ -1420,7 +1415,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // parent is skipped inside the trigger: the native steer already
     // delivered the first completion, so a queued wake would
     // double-notify.
-    backgroundJobCoordinator.addTerminalOutcomeListener((record) => {
+    backgroundJobBoard.addTerminalOutcomeListener((record) => {
       // Unattributed child sessions are not delegated work, just as in
       // stopped-job recovery; their owner controls parent notifications.
       if (record.provisional === true) return;
@@ -1586,7 +1581,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     );
     taskCancelTools = createCancelTaskTool({
       input: ctx,
-      backgroundJobBoard: backgroundJobCoordinator,
+      backgroundJobBoard,
       terminalGate,
       shouldManageSession: (sessionID) =>
         sessionMetadata.getAgent(sessionID) === 'orchestrator' ||
@@ -1597,19 +1592,19 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     });
     taskMessageTools = createTaskMessageTool({
       input: ctx,
-      backgroundJobBoard: backgroundJobCoordinator,
+      backgroundJobBoard,
       resolveCanonicalTaskRef: aliasAuthority.resolveCanonical,
       isDisposed: () => instanceDisposed,
     });
     taskReplyTools = createTaskReplyTool({
       input: ctx,
-      backgroundJobBoard: backgroundJobCoordinator,
+      backgroundJobBoard,
       resolveCanonicalTaskRef: aliasAuthority.resolveCanonical,
       isDisposed: () => instanceDisposed,
     });
     taskStatusTools = createTaskStatusTool({
       input: ctx,
-      backgroundJobBoard: backgroundJobCoordinator,
+      backgroundJobBoard,
       activityTracker: taskActivityTracker,
       terminalGate,
       resolveCanonicalTaskRef: aliasAuthority.resolveCanonical,
@@ -1620,7 +1615,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       ...(hostFlavor !== 'v2' && { registerIntent: registerV1DelegatedIntent }),
       terminalGate,
       input: ctx,
-      backgroundJobBoard: backgroundJobCoordinator,
+      backgroundJobBoard,
       shouldManageSession: (sessionID) =>
         sessionMetadata.getAgent(sessionID) === 'orchestrator' ||
         sessionMetadata.isTaskManaged(sessionID),
@@ -1645,7 +1640,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       waitForUserGuardEnabled: runtime.backgroundJobs.waitForUserGuard,
       hasOutstandingBackgroundTasks: (sessionID) =>
         runtime.backgroundJobs.orchestratorWake.enabled &&
-        backgroundJobCoordinator.hasRunning(sessionID),
+        backgroundJobBoard.hasRunning(sessionID),
     });
 
     // v2 hosts skip wait_for_user: the native `question` tool covers the
