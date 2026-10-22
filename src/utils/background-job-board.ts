@@ -281,15 +281,7 @@ export interface WallClockTimeoutFinalizeInput {
   resultSummary: string;
 }
 
-type TerminalStateListener = (taskID: string) => void;
 type MutationListener = () => void;
-
-export class BackgroundJobLaunchConflictError extends Error {
-  constructor(taskID: string, message: string) {
-    super(`Cannot register launch for ${taskID}: ${message}`);
-    this.name = 'BackgroundJobLaunchConflictError';
-  }
-}
 
 const CANONICAL_TERMINAL_STATES = new Set<TaskOutputState>([
   'completed',
@@ -301,14 +293,14 @@ const CANONICAL_TERMINAL_STATES = new Set<TaskOutputState>([
  * Unconfirmable-runtime age after which a running job leaves the board
  * render (#1314). No existing stale/TTL constant family fits this scale.
  */
-export const STATUS_UNCERTAIN_DEMOTE_AFTER_MS = 30 * 60_000;
+const STATUS_UNCERTAIN_DEMOTE_AFTER_MS = 30 * 60_000;
 
 /**
  * Render-only discoverability window (store survives for reconciler/revive;
  * only real retrieval via markUsed refreshes it, rendering never does).
  * Different layer than STATUS_UNCERTAIN_DEMOTE_AFTER_MS (lifecycle grace).
  */
-export const AGED_ENTRY_RENDER_TTL_MS = 6 * 60 * 60_000;
+const AGED_ENTRY_RENDER_TTL_MS = 6 * 60 * 60_000;
 
 const AGENT_PREFIX: Record<string, string> = {
   council: 'cou',
@@ -337,8 +329,8 @@ export class BackgroundJobBoard implements BackgroundJobStore {
   private readonly counters = new Map<string, number>();
   private executionSequence = 0;
   private leaseSequence = 0;
-  private terminalStateListeners: TerminalStateListener[] = [];
   private mutationListeners: MutationListener[] = [];
+  private terminalPublicationHandler?: (taskID: string) => void;
 
   private readonly maxReusablePerAgent: number;
   private readonly delegationTool: string;
@@ -372,23 +364,14 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     if (createdAt >= this.startedAt) this.freshParents.add(sessionID);
   }
 
-  addTerminalStateListener(listener: TerminalStateListener): void {
-    this.terminalStateListeners.push(listener);
-  }
-
-  removeTerminalStateListener(listener: TerminalStateListener): void {
-    this.terminalStateListeners = this.terminalStateListeners.filter(
-      (entry) => entry !== listener,
-    );
-  }
-
-  setTerminalStateListener(listener?: TerminalStateListener): void {
-    this.terminalStateListeners = listener ? [listener] : [];
+  /** Single-owner hook for a canonical terminal publication. The coordinator
+   * installs it; the dead public listener chain is gone. */
+  setTerminalPublicationHandler(handler?: (taskID: string) => void): void {
+    this.terminalPublicationHandler = handler;
   }
 
   /** Subscribe to ANY board mutation (set/delete/trim/drop). The listener
-   * receives no payload: re-derive from the board's read-only queries.
-   * Same style as addTerminalStateListener; fires after the mutation. */
+   * receives no payload: re-derive from the board's read-only queries. */
   addMutationListener(listener: MutationListener): void {
     this.mutationListeners.push(listener);
   }
@@ -411,16 +394,14 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     }
   }
 
-  private notifyTerminalStateListeners(taskID: string): void {
-    for (const listener of this.terminalStateListeners) {
-      try {
-        listener(taskID);
-      } catch (error) {
-        log('Board terminal state listener threw', {
-          taskID,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
+  private notifyTerminalPublication(taskID: string): void {
+    try {
+      this.terminalPublicationHandler?.(taskID);
+    } catch (error) {
+      log('Board terminal publication handler threw', {
+        taskID,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 
@@ -437,9 +418,8 @@ export class BackgroundJobBoard implements BackgroundJobStore {
         requestedLease.taskID !== input.taskID ||
         existing?.generation !== requestedLease.generation
       ) {
-        throw new BackgroundJobLaunchConflictError(
-          input.taskID,
-          'the relaunch lease is missing, stale, or belongs to another generation',
+        throw new Error(
+          `Cannot register launch for ${input.taskID}: the relaunch lease is missing, stale, or belongs to another generation`,
         );
       }
     }
@@ -450,9 +430,8 @@ export class BackgroundJobBoard implements BackgroundJobStore {
         requestedLease === undefined ||
         !this.validateLease(requestedLease)
       ) {
-        throw new BackgroundJobLaunchConflictError(
-          input.taskID,
-          `a ${liveLease.kind} lease already owns this session`,
+        throw new Error(
+          `Cannot register launch for ${input.taskID}: a ${liveLease.kind} lease already owns this session`,
         );
       }
     }
@@ -471,7 +450,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
           this.setJob(promoted);
           // The stop-time notification skipped this record while it was
           // still provisional; the attributed record owes the wake.
-          this.notifyTerminalStateListeners(input.taskID);
+          this.notifyTerminalPublication(input.taskID);
           return promoted;
         }
         const observed = {
@@ -801,7 +780,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
 
     this.setJob(updated);
     this.trimReusable(input.taskID);
-    if (notifyTerminal) this.notifyTerminalStateListeners(input.taskID);
+    if (notifyTerminal) this.notifyTerminalPublication(input.taskID);
     return updated;
   }
 
@@ -915,30 +894,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       stopConfirmationStartedAt: undefined,
     };
     this.setJob(updated);
-    this.notifyTerminalStateListeners(taskID);
-    return updated;
-  }
-
-  noteStopConfirmation(
-    taskID: string,
-    startedAt: number,
-    expectedGeneration?: number,
-  ): BackgroundJobRecord | undefined {
-    const existing = this.jobs.get(taskID);
-    if (existing?.state !== 'running') return existing;
-    if (
-      expectedGeneration !== undefined &&
-      existing.generation !== expectedGeneration
-    ) {
-      return existing;
-    }
-    if (existing.stopConfirmationStartedAt !== undefined) return existing;
-
-    const updated: BackgroundJobRecord = {
-      ...existing,
-      stopConfirmationStartedAt: startedAt,
-    };
-    this.setJob(updated);
+    this.notifyTerminalPublication(taskID);
     return updated;
   }
 
@@ -1074,9 +1030,6 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       if (isCanonicalTerminalState(existing.state)) return existing;
     }
 
-    const notifyTerminal =
-      !isCanonicalTerminalState(existing.state) &&
-      existing.state !== 'reconciled';
     const summary = normalizeCancelReason(reason);
     const updated: BackgroundJobRecord = {
       ...existing,
@@ -1096,7 +1049,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     };
 
     this.setJob(updated);
-    if (notifyTerminal) this.notifyTerminalStateListeners(taskID);
+    this.notifyTerminalPublication(taskID);
     return updated;
   }
 
@@ -1255,10 +1208,6 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     return this.field(taskID, 'resultSummary');
   }
 
-  getLastLiveBusyAt(taskID: string): number | undefined {
-    return this.field(taskID, 'lastLiveBusyAt');
-  }
-
   claimWallClockDeadline(
     input: WallClockTimeoutClaimInput,
   ): BackgroundJobRecord | undefined {
@@ -1323,7 +1272,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       stopConfirmationStartedAt: undefined,
     };
     this.setJob(updated);
-    this.notifyTerminalStateListeners(input.taskID);
+    this.notifyTerminalPublication(input.taskID);
     return updated;
   }
 
@@ -1497,17 +1446,9 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     if (promoted.state !== 'running') {
       // The stop-time notification skipped this record while it was
       // still provisional; the attributed record owes the wake.
-      this.notifyTerminalStateListeners(taskID);
+      this.notifyTerminalPublication(taskID);
     }
     return promoted;
-  }
-
-  hasConvergenceSignals(taskID: string, threshold = 3): boolean {
-    const job = this.jobs.get(taskID);
-    if (!job) return false;
-    const errors = job.totalErrors ?? 0;
-    const timeouts = job.timeoutCount ?? 0;
-    return errors >= threshold || timeouts >= threshold;
   }
 
   private listReusable(parent?: string): BackgroundJobRecord[] {
@@ -1657,10 +1598,6 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     return { text, terminalUnreconciledTaskIDs };
   }
 
-  formatForPrompt(parentSessionID: string, now?: number): string | undefined {
-    return this.formatForPromptWithMetadata(parentSessionID, now)?.text;
-  }
-
   clearParent(parentSessionID: string): void {
     // A deleted parent's life ends; a restored copy (export/import emits no
     // session.created) carries numbers this board never issued.
@@ -1683,20 +1620,6 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       record ? terminalResultPayloadOf(record) : undefined,
     );
     this.deleteJob(taskID);
-  }
-
-  // ── Lifecycle policy (board = no policy, always close) ───────────
-
-  deferIfRunning(_sessionId: string): boolean {
-    return false; // ponytail: safe default - don't close
-  }
-
-  retryDeferredClose(_sessionId: string): boolean {
-    return false; // Nothing deferred at board level
-  }
-
-  clearDeferredClose(_sessionId: string): void {
-    // No-op at board level
   }
 
   /** Single eviction path for the retention trims: suppression, delete,

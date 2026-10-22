@@ -2087,7 +2087,9 @@ describe('plugin reload generation cleanup', () => {
         expect(wake).toHaveBeenCalledTimes(kind === 'provisional' ? 0 : 1);
         if (kind !== 'provisional') {
           expect(wake.mock.calls[0]?.[0]).toBe('parent-1');
-          expect(board.formatForPrompt('parent-1')).toContain(launch.taskID);
+          expect(board.formatForPromptWithMetadata('parent-1')?.text).toContain(
+            launch.taskID,
+          );
         }
       } finally {
         await hooks?.dispose?.();

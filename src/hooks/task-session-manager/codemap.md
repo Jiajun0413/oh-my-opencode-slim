@@ -108,7 +108,7 @@ All modules depend on `BackgroundJobBoard` from `src/utils/background-job-board.
 ```
 User task call → tool.execute.before → PendingTaskCall created → task ID resolved/reused
 → tool.execute.after → BackgroundJobBoard.registerLaunch() → context validated/added
-→ Message transform → BackgroundJobBoard.formatForPrompt() injected as a system-reminder message part
+→ Message transform → BackgroundJobBoard.formatForPromptWithMetadata() injected as a system-reminder message part
 → session.idle → reconcileInjectedTerminalJobs() → BackgroundJobBoard.markReconciled()
 → opt-in continuation evaluator (same idle cycle, existing guards)
 ```

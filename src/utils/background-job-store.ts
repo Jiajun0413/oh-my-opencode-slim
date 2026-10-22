@@ -242,11 +242,6 @@ export interface BackgroundJobStore {
     expectedGeneration?: number,
     observedTerminalRevision?: number,
   ): BackgroundJobRecord | undefined;
-  noteStopConfirmation(
-    taskID: string,
-    startedAt: number,
-    expectedGeneration?: number,
-  ): BackgroundJobRecord | undefined;
   markStatusUncertain(
     taskID: string,
     lastStatusError: string,
@@ -277,7 +272,6 @@ export interface BackgroundJobStore {
   isRunning(taskID: string): boolean;
   isTerminalUnreconciled(taskID: string): boolean;
   getResultSummary(taskID: string): string | undefined;
-  getLastLiveBusyAt(taskID: string): number | undefined;
   getParentSessionID(taskID: string): string | undefined;
   getState(taskID: string): BackgroundJobRecord['state'] | undefined;
   resolve(
@@ -312,19 +306,8 @@ export interface BackgroundJobStore {
       background?: boolean;
     },
   ): BackgroundJobRecord | undefined;
-  hasConvergenceSignals(taskID: string, threshold?: number): boolean;
-  formatForPrompt(parentSessionID: string, now?: number): string | undefined;
   formatForPromptWithMetadata(
     parentSessionID: string,
     now?: number,
   ): BackgroundJobPromptMetadata | undefined;
-
-  // ── Lifecycle policy ─────────────────────────────────────────────
-  /** Evaluate close policy. Returns true if session should close now.
-   *  Mutates deferred state: adds to deferred set if running, removes if not. */
-  deferIfRunning(sessionId: string): boolean;
-  /** Retry closing a deferred session. Returns true if session should now close. */
-  retryDeferredClose(sessionId: string): boolean;
-  /** Clear deferred close state for a session being deleted. */
-  clearDeferredClose(sessionId: string): void;
 }

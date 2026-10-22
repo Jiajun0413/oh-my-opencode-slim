@@ -231,7 +231,7 @@ describe('BackgroundJobSupervisor', () => {
       terminalUnreconciled: true,
       statusUncertain: false,
     });
-    expect(board.formatForPrompt('parent')).toContain(
+    expect(board.formatForPromptWithMetadata('parent')?.text).toContain(
       'error, unreconciled, timed out',
     );
     board.markReconciled(job.taskID, 130);

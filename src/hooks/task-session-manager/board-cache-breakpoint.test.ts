@@ -232,7 +232,7 @@ describe('background job board cache breakpoint stability', () => {
     // CONTRAST: the OLD separate-message placement establishes no readable
     // prefix — its only breakpoints sit on the merged tool_result+board turn
     // and the board turn, both of which N+1 does not reproduce at that offset.
-    const oldReminder = board.formatForPrompt(SESSION) ?? '';
+    const oldReminder = board.formatForPromptWithMetadata(SESSION)?.text ?? '';
     const oldN = withSeparateBoardMessage(
       [userMsg('u1', 'Coordinate'), ...toolTurn('t1', 'result-1')],
       oldReminder,
