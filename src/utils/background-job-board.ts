@@ -92,8 +92,6 @@ export interface BackgroundJobRecord {
   taskGeneration: number;
   /** First launch observation for the current generation. */
   runStartedAt: number;
-  /** Persistent hard wall-clock marker; distinct from external task wait timeout. */
-  deadlineExceededAt?: number;
   updatedAt: number;
   lastLiveBusyAt?: number;
   /** First non-busy runtime observation for the current stop-confirmation grace. */
@@ -256,27 +254,12 @@ export interface BackgroundJobAdoptionInput {
   updatedAt: number;
 }
 
-export interface WallClockTimeoutClaimInput {
-  taskID: string;
-  generation: number;
-  now?: number;
-  resultSummary?: string;
-}
-
 export interface BackgroundJobTerminalInput {
   taskID: string;
   state: 'completed' | 'error' | 'cancelled' | 'stopped';
   resultSummary: string;
   cancellationLease?: BackgroundJobLease;
   now?: number;
-}
-
-export interface WallClockTimeoutFinalizeInput {
-  taskID: string;
-  generation: number;
-  now?: number;
-  statusUncertain: boolean;
-  resultSummary: string;
 }
 
 type MutationListener = () => void;
@@ -713,7 +696,6 @@ export class BackgroundJobBoard {
         recoveredWithoutPrompt: undefined,
         lastLaunchedAt: now,
         runStartedAt: now,
-        deadlineExceededAt: undefined,
         lastLiveBusyAt: now,
         stopConfirmationStartedAt: undefined,
         lastUsedAt: now,
@@ -889,15 +871,6 @@ export class BackgroundJobBoard {
     const existing = this.jobs.get(input.taskID);
     if (existing?.state !== 'running' || existing.generation !== generation)
       return existing;
-    if (existing.deadlineExceededAt !== undefined) {
-      return this.finalizeWallClockTimeout({
-        taskID: input.taskID,
-        generation: existing.generation,
-        statusUncertain: false,
-        resultSummary: input.resultSummary,
-        now: input.now,
-      });
-    }
     if (input.state === 'stopped')
       return this.markStopped(
         input.taskID,
@@ -929,22 +902,6 @@ export class BackgroundJobBoard {
       existing.generation !== input.expectedGeneration
     ) {
       return existing;
-    }
-
-    // A wall-clock deadline is a hard, non-recoverable claim. Completion after
-    // that claim is late evidence and cannot replace the canonical timeout.
-    if (existing.deadlineExceededAt !== undefined) {
-      if (existing.state !== 'running') return existing;
-      if (input.state === 'completed' || input.state === 'running') {
-        return existing;
-      }
-      return this.finalizeWallClockTimeout({
-        taskID: input.taskID,
-        generation: existing.generation,
-        now: input.now,
-        statusUncertain: false,
-        resultSummary: existing.resultSummary ?? timeoutSummary(input.state),
-      });
     }
 
     // Guard: stale status updates cannot reopen already terminal jobs.
@@ -1045,10 +1002,10 @@ export class BackgroundJobBoard {
       lastLiveBusyAt: now,
       activityRevision: existing.activityRevision + 1,
       stopConfirmationStartedAt: undefined,
-      timedOut: existing.deadlineExceededAt !== undefined,
+      timedOut: false,
       recoverableAfterLiveBusy:
         existing.recoverableAfterLiveBusy || existing.timedOut,
-      statusUncertain: existing.deadlineExceededAt !== undefined,
+      statusUncertain: false,
       // A live observation restarts the demotion clock.
       statusUncertainSince: undefined,
       terminalUnreconciled: false,
@@ -1085,7 +1042,6 @@ export class BackgroundJobBoard {
   ): BackgroundJobRecord | undefined {
     const existing = this.jobs.get(taskID);
     if (existing?.state !== 'running') return existing;
-    if (existing.deadlineExceededAt !== undefined) return existing;
     if (
       expectedGeneration !== undefined &&
       existing.generation !== expectedGeneration
@@ -1187,10 +1143,7 @@ export class BackgroundJobBoard {
       ...existing,
       state: 'reconciled',
       terminalUnreconciled: false,
-      statusUncertain:
-        existing.deadlineExceededAt !== undefined
-          ? existing.statusUncertain
-          : false,
+      statusUncertain: false,
       updatedAt: now,
       lastUsedAt: now,
       terminalState: existing.terminalState ?? terminalStateOf(existing.state),
@@ -1234,16 +1187,6 @@ export class BackgroundJobBoard {
         !this.validateLease(options.cancellationLease))
     ) {
       return existing;
-    }
-    if (existing.deadlineExceededAt !== undefined) {
-      if (existing.state !== 'running') return existing;
-      return this.finalizeWallClockTimeout({
-        taskID,
-        generation: existing.generation,
-        now,
-        statusUncertain: false,
-        resultSummary: existing.resultSummary ?? normalizeCancelReason(reason),
-      });
     }
     if (!options.force) {
       if (existing.state === 'reconciled') return existing;
@@ -1428,74 +1371,6 @@ export class BackgroundJobBoard {
     return this.field(taskID, 'resultSummary');
   }
 
-  claimWallClockDeadline(
-    input: WallClockTimeoutClaimInput,
-  ): BackgroundJobRecord | undefined {
-    const existing = this.jobs.get(input.taskID);
-    if (
-      existing?.state !== 'running' ||
-      existing?.generation !== input.generation ||
-      existing?.deadlineExceededAt !== undefined
-    ) {
-      return undefined;
-    }
-
-    const now = input.now ?? Date.now();
-    const updated: BackgroundJobRecord = {
-      ...existing,
-      timedOut: true,
-      deadlineExceededAt: now,
-      cancellationRequested: true,
-      statusUncertain: false,
-      updatedAt: now,
-      resultSummary:
-        input.resultSummary ??
-        'Background task exceeded its wall-clock deadline; abort requested.',
-    };
-    this.setJob(updated);
-    return updated;
-  }
-
-  private finalizeWallClockTimeout(
-    input: WallClockTimeoutFinalizeInput,
-  ): BackgroundJobRecord | undefined {
-    const existing = this.jobs.get(input.taskID);
-    if (!existing) return undefined;
-    if (existing.state !== 'running') return existing;
-    if (
-      existing.generation !== input.generation ||
-      existing.deadlineExceededAt === undefined
-    ) {
-      return undefined;
-    }
-
-    const now = input.now ?? Date.now();
-    const updated: BackgroundJobRecord = {
-      ...existing,
-      state: 'error',
-      terminalRevision: existing.terminalRevision + 1,
-      timedOut: true,
-      recoverableAfterLiveBusy: false,
-      statusUncertain: input.statusUncertain,
-      cancellationRequested: true,
-      terminalUnreconciled: true,
-      updatedAt: now,
-      completedAt: existing.completedAt ?? now,
-      terminalState: 'error',
-      resultSummary: input.resultSummary,
-      lastStatusError: input.statusUncertain
-        ? input.resultSummary
-        : existing.lastStatusError,
-      timeoutCount: (existing.timeoutCount ?? 0) + 1,
-      lastErrorAt: now,
-      totalErrors: (existing.totalErrors ?? 0) + 1,
-      stopConfirmationStartedAt: undefined,
-    };
-    this.setJob(updated);
-    this.notifyTerminalPublication(input.taskID);
-    return updated;
-  }
-
   getParentSessionID(taskID: string): string | undefined {
     return this.field(taskID, 'parentSessionID');
   }
@@ -1533,11 +1408,7 @@ export class BackgroundJobBoard {
     const job = this.resolve(parentSessionID, taskIDOrAlias);
     if (!job) return undefined;
     if (agent && job.agent !== agent) return undefined;
-    if (
-      job.state !== 'running' ||
-      !job.recoverableAfterLiveBusy ||
-      job.deadlineExceededAt !== undefined
-    ) {
+    if (job.state !== 'running' || !job.recoverableAfterLiveBusy) {
       return undefined;
     }
     return job;
@@ -2246,10 +2117,6 @@ function normalizeWhitespace(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
 }
 
-function timeoutSummary(state: TaskOutputState): string {
-  return `Background task exceeded its wall-clock deadline; abort was observed with child state ${state}.`;
-}
-
 const REVIVE_ONLY = 'task_revive only';
 
 function formatJob(job: BackgroundJobRecord): string {
@@ -2258,9 +2125,7 @@ function formatJob(job: BackgroundJobRecord): string {
   const displayState =
     job.state === 'running' && isResume ? 'running [resumed]' : job.state;
   const status = job.terminalUnreconciled
-    ? `${job.state}, unreconciled${
-        job.deadlineExceededAt !== undefined ? ', timed out' : ''
-      }`
+    ? `${job.state}, unreconciled`
     : job.statusUncertain
       ? `${job.state}${job.timedOut ? ', timed out' : ''}, status uncertain`
       : job.timedOut

@@ -9637,7 +9637,7 @@ describe('task-session-manager hook', () => {
       const clock = createSupervisorClock();
       const abort = mock(async () => undefined);
       const supervisor = new BackgroundJobSupervisor({
-        backgroundJobStore: board,
+        backgroundJobBoard: board,
         wallClockTimeoutMs: 100,
         abortGraceMs: 10,
         abort,
@@ -9710,7 +9710,7 @@ describe('task-session-manager hook', () => {
     const clock = createSupervisorClock();
     const abort = mock(async () => undefined);
     const supervisor = new BackgroundJobSupervisor({
-      backgroundJobStore: board,
+      backgroundJobBoard: board,
       wallClockTimeoutMs: 100,
       abortGraceMs: 10,
       abort,
@@ -9770,15 +9770,14 @@ describe('task-session-manager hook', () => {
     expect(abort).toHaveBeenCalledWith('background-child');
   });
 
-  test('fallback delete/recreate/busy preserves an unclaimed absolute deadline', async () => {
+  test('fallback delete/recreate/busy keeps the watchdog armed for the live run', async () => {
     const board = new BackgroundJobBoard();
     const coordinator = new SessionLifecycle(() => {});
     const clock = createSupervisorClock();
     const abort = mock(async () => undefined);
     const supervisor = new BackgroundJobSupervisor({
-      backgroundJobStore: board,
+      backgroundJobBoard: board,
       wallClockTimeoutMs: 100,
-      abortGraceMs: 10,
       abort,
       now: clock.now,
       setTimeout: clock.setTimeout,
@@ -9828,12 +9827,14 @@ describe('task-session-manager hook', () => {
     fallback = false;
     await clock.advanceTo(100);
 
+    // A foreground-fallback delete/recreate does not consume the one-shot
+    // deadline: the live run is still aborted through the host.
     expect(abort).toHaveBeenCalledTimes(1);
     expect(abort).toHaveBeenCalledWith('fallback-child');
-    expect(board.get('fallback-child')?.deadlineExceededAt).toBe(100);
+    expect(board.get('fallback-child')?.state).toBe('running');
   });
 
-  test('fallback deletion during grace confirms rather than clears a hard timeout', async () => {
+  test('a fallback deletion after the watchdog abort drops the row without inventing a terminal', async () => {
     const board = new BackgroundJobBoard();
     const coordinator = new SessionLifecycle(() => {});
     const clock = createSupervisorClock();
@@ -9843,10 +9844,8 @@ describe('task-session-manager hook', () => {
       now: clock.now,
     });
     const supervisor = new BackgroundJobSupervisor({
-      backgroundJobStore: board,
-      terminalGate,
+      backgroundJobBoard: board,
       wallClockTimeoutMs: 100,
-      abortGraceMs: 20,
       abort,
       now: clock.now,
       setTimeout: clock.setTimeout,
@@ -9871,6 +9870,13 @@ describe('task-session-manager hook', () => {
     });
 
     await clock.advanceTo(100);
+    expect(abort).toHaveBeenCalledTimes(1);
+    // The watchdog aborted; no terminal state was fabricated locally.
+    expect(board.get('fallback-grace-child')).toMatchObject({
+      state: 'running',
+      timedOut: false,
+    });
+
     fallback = true;
     await hook.event({
       event: {
@@ -9881,11 +9887,7 @@ describe('task-session-manager hook', () => {
     coordinator.dispatchSessionDeleted('fallback-grace-child');
 
     expect(abort).toHaveBeenCalledTimes(1);
-    expect(board.get('fallback-grace-child')).toMatchObject({
-      state: 'error',
-      timedOut: true,
-      deadlineExceededAt: 100,
-    });
+    expect(board.get('fallback-grace-child')?.state).toBe('running');
     terminalGate.dispose();
   });
 

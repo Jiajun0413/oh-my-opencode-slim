@@ -4,7 +4,7 @@ import {
   isPrunableEvictedSession,
   BackgroundJobBoard as ProductionBoard,
 } from './background-job-board';
-import { BackgroundJobBoard } from './background-job-fixture';
+import { BackgroundJobBoard, boardFixture } from './background-job-fixture';
 import * as loggerModule from './logger';
 
 // The board's two render TTLs are module-private now; these mirror the scale
@@ -888,19 +888,26 @@ describe('BackgroundJobBoard', () => {
       parentSessionID: 'parent-1',
       agent: 'oracle',
     });
-    board.claimWallClockDeadline({
+    // The markStatusUncertain overlay alone (a read that cannot confirm the
+    // state) is what blocks reuse; an acknowledged terminal with a confirmed
+    // state stays reusable.
+    board.markStatusUncertain('ses_uncertain', 'status unavailable');
+    expect(board.get('ses_uncertain')?.statusUncertain).toBe(true);
+    expect(board.resolveReusable('parent-1', 'ses_uncertain')).toBeUndefined();
+
+    const committed = boardFixture.updateStatus(board, {
       taskID: 'ses_uncertain',
-      generation: board.get('ses_uncertain')?.generation ?? -1,
-    });
-    board.finalizeWallClockTimeout({
-      taskID: 'ses_uncertain',
-      generation: board.get('ses_uncertain')?.generation ?? -1,
-      statusUncertain: true,
+      state: 'error',
       resultSummary: 'status unavailable',
     });
     board.markReconciled('ses_uncertain');
-
-    expect(board.resolveReusable('parent-1', 'ses_uncertain')).toBeUndefined();
+    expect(committed).toMatchObject({ state: 'error', statusUncertain: false });
+    expect(board.get('ses_uncertain')).toMatchObject({
+      state: 'reconciled',
+      terminalUnreconciled: false,
+      statusUncertain: false,
+    });
+    expect(board.resolveReusable('parent-1', 'ses_uncertain')).toBeDefined();
   });
 
   describe('stale uncertain removal (#1314)', () => {
@@ -2189,18 +2196,7 @@ describe('BackgroundJobBoard', () => {
         agent: 'oracle',
         now: 100,
       });
-      board.claimWallClockDeadline({
-        taskID: 'ses_uncertain',
-        generation: board.get('ses_uncertain')?.generation ?? -1,
-        now: 150,
-      });
-      board.finalizeWallClockTimeout({
-        taskID: 'ses_uncertain',
-        generation: board.get('ses_uncertain')?.generation ?? -1,
-        statusUncertain: true,
-        resultSummary: 'status unavailable',
-        now: 200,
-      });
+      board.markStatusUncertain('ses_uncertain', 'status unavailable', 150);
       board.markReconciled('ses_uncertain', 300);
 
       board.registerLaunch({

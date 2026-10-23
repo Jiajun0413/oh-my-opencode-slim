@@ -966,13 +966,12 @@ describe('PluginConfigSchema backgroundJobs', () => {
     }
   });
 
-  it('defaults the wall-clock supervisor to disabled with a 10 second grace', () => {
+  it('defaults the wall-clock supervisor to disabled', () => {
     const result = PluginConfigSchema.safeParse({ backgroundJobs: {} });
 
     expect(result.success).toBe(true);
     if (result.success) {
       expect(result.data.backgroundJobs?.wallClockTimeoutMs).toBe(0);
-      expect(result.data.backgroundJobs?.abortGraceMs).toBe(10_000);
     }
   });
 
@@ -1068,7 +1067,6 @@ describe('PluginConfigSchema backgroundJobs', () => {
       PluginConfigSchema.safeParse({
         backgroundJobs: {
           wallClockTimeoutMs: 0,
-          abortGraceMs: 1_000,
         },
       }).success,
     ).toBe(true);
@@ -1076,7 +1074,6 @@ describe('PluginConfigSchema backgroundJobs', () => {
       PluginConfigSchema.safeParse({
         backgroundJobs: {
           wallClockTimeoutMs: 60_000,
-          abortGraceMs: 60_000,
         },
       }).success,
     ).toBe(true);
@@ -1096,9 +1093,6 @@ describe('PluginConfigSchema backgroundJobs', () => {
       { wallClockTimeoutMs: 59_999 },
       { wallClockTimeoutMs: 2_147_483_648 },
       { wallClockTimeoutMs: 60_000.5 },
-      { abortGraceMs: 999 },
-      { abortGraceMs: 60_001 },
-      { abortGraceMs: 1_000.5 },
     ];
 
     for (const backgroundJobs of invalid) {
@@ -1106,7 +1100,6 @@ describe('PluginConfigSchema backgroundJobs', () => {
       expect(result.success).toBe(true);
       if (result.success) {
         expect(result.data.backgroundJobs?.wallClockTimeoutMs).toBe(0);
-        expect(result.data.backgroundJobs?.abortGraceMs).toBe(10_000);
       }
     }
   });
