@@ -9639,7 +9639,6 @@ describe('task-session-manager hook', () => {
       const supervisor = new BackgroundJobSupervisor({
         backgroundJobBoard: board,
         wallClockTimeoutMs: 100,
-        abortGraceMs: 10,
         abort,
         now: clock.now,
         setTimeout: clock.setTimeout,
