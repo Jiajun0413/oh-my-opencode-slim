@@ -2189,6 +2189,16 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     ) => {
       interviewSubmitService = service;
     },
+    // v2-only extension handle (consumed by src/v2/setup.ts's executor
+    // wrapper): register a delegated `subagent` launch from its STRUCTURED
+    // executor result, forwarding to the task-session-manager's shared fence
+    // pipeline (marks the pending handled-by-wrapper for the exact-once gate).
+    'v2.registerDelegatedLaunchFromStructured': (
+      input: Parameters<
+        (typeof taskSessionManagerHook)['v2.registerDelegatedLaunchFromStructured']
+      >[0],
+    ) =>
+      taskSessionManagerHook['v2.registerDelegatedLaunchFromStructured'](input),
 
     agent: agents,
 
@@ -3366,6 +3376,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     'v2.backgroundDefaultFlip': BackgroundDefaultFlipState;
     'v2.pinSessionChains': (sessionID: string) => void;
     'v2.releaseSessionChains': (sessionID: string) => void;
+    'v2.registerDelegatedLaunchFromStructured': (typeof taskSessionManagerHook)['v2.registerDelegatedLaunchFromStructured'];
   };
 
   return hooks;
