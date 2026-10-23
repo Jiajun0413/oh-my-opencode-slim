@@ -227,9 +227,10 @@ describe('task controls through the real v2 client shim', () => {
       });
       const previous = board.get('ses_child');
       if (!previous) throw new Error('expected previous run');
-      const lease = board.acquireRelaunchLease(
+      const lease = board.acquireLease(
         'ses_child',
         previous.generation,
+        'relaunch',
       );
       if (!lease) throw new Error('expected relaunch lease');
       board.registerLaunch({
@@ -451,7 +452,7 @@ describe('task controls through the real v2 client shim', () => {
         session: { get },
         isDisposed: () => disposed,
       });
-      const acquire = spyOn(h.board, 'acquireMessageLease');
+      const acquire = spyOn(h.board, 'acquireLease');
       const pending = h.message.execute(messageArgs, context);
       const settled = pending.then(
         (value) => ({ value, error: undefined }),
@@ -459,7 +460,9 @@ describe('task controls through the real v2 client shim', () => {
       );
       await entered.promise;
       expect(h.host.prompt).not.toHaveBeenCalled();
-      const lease = acquire.mock.results[0]?.value;
+      const lease = acquire.mock.results
+        .map((result) => result?.value)
+        .find((value) => value?.kind === 'message');
       if (!lease) throw new Error('Expected a held message lease');
 
       if (change === 'disposed') disposed = true;
@@ -495,7 +498,7 @@ describe('task controls through the real v2 client shim', () => {
       expect(h.host.switchAgent).not.toHaveBeenCalled();
       expect(h.host.switchModel).not.toHaveBeenCalled();
       expect(h.host.interrupt).not.toHaveBeenCalled();
-      const nextLease = h.board.acquireMessageLease('ses_child', 1);
+      const nextLease = h.board.acquireLease('ses_child', 1, 'message');
       expect(nextLease).toBeDefined();
       if (nextLease) h.board.releaseLease(nextLease);
     },
@@ -854,8 +857,10 @@ describe('task controls through the real v2 client shim', () => {
         'transport timed out',
       );
       expect(release).not.toHaveBeenCalled();
-      expect(h.board.acquireCancellationLease('ses_child', 1)).toBeUndefined();
-      expect(h.board.acquireRelaunchLease('ses_child', 1)).toBeUndefined();
+      expect(
+        h.board.acquireLease('ses_child', 1, 'cancellation'),
+      ).toBeUndefined();
+      expect(h.board.acquireLease('ses_child', 1, 'relaunch')).toBeUndefined();
       if (settlement === 'resolve') send.resolve({});
       else send.reject(new Error('late rejection'));
       await Bun.sleep(0);
@@ -867,7 +872,7 @@ describe('task controls through the real v2 client shim', () => {
         delivery: 'queue',
         resume: false,
       });
-      const lease = h.board.acquireMessageLease('ses_child', 1);
+      const lease = h.board.acquireLease('ses_child', 1, 'message');
       expect(lease).toBeDefined();
       if (lease) h.board.releaseLease(lease);
     },
@@ -907,7 +912,7 @@ describe('task controls through the real v2 client shim', () => {
       });
       expect(h.register).toHaveBeenCalledTimes(1);
       expect(h.onLaunch).toHaveBeenCalledTimes(1);
-      const lease = h.board.acquireRelaunchLease('ses_child', 2);
+      const lease = h.board.acquireLease('ses_child', 2, 'relaunch');
       expect(lease).toBeDefined();
       if (lease) h.board.releaseLease(lease);
     },
@@ -947,7 +952,7 @@ describe('task controls through the real v2 client shim', () => {
       await expect(h.revive.execute(reviveArgs, context)).rejects.toThrow(
         /idle wait/i,
       );
-      const lease = h.board.acquireRelaunchLease('ses_child', 1);
+      const lease = h.board.acquireLease('ses_child', 1, 'relaunch');
       expect(lease).toBeDefined();
       if (!lease) throw new Error('preparation lease was retained');
       if (outcome === 'late resolve') idle.resolve();
@@ -980,10 +985,12 @@ describe('task controls through the real v2 client shim', () => {
           },
         },
       });
-      const acquire = spyOn(h.board, 'acquireRelaunchLease');
+      const acquire = spyOn(h.board, 'acquireLease');
       const pending = h.revive.execute(reviveArgs, context);
       await entered.promise;
-      const lease = acquire.mock.results[0]?.value;
+      const lease = acquire.mock.results
+        .map((result) => result?.value)
+        .find((value) => value?.kind === 'relaunch');
       if (!lease) throw new Error('missing relaunch lease');
       let replacement: typeof lease | undefined;
       if (change === 'drop') h.board.drop('ses_child');
@@ -995,9 +1002,10 @@ describe('task controls through the real v2 client shim', () => {
             parentSessionID: 'parent',
             agent: 'explorer',
           });
-        replacement = h.board.acquireRelaunchLease(
+        replacement = h.board.acquireLease(
           'ses_child',
           h.board.get('ses_child')?.generation ?? -1,
+          'relaunch',
         );
       }
       if (change === 'running' || change === 'activity') {
@@ -1026,9 +1034,10 @@ describe('task controls through the real v2 client shim', () => {
           parentSessionID: 'parent',
           agent: 'explorer',
         });
-      const available = h.board.acquireRelaunchLease(
+      const available = h.board.acquireLease(
         'ses_child',
         h.board.get('ses_child')?.generation ?? -1,
+        'relaunch',
       );
       expect(available).toBeDefined();
       if (available) h.board.releaseLease(available);

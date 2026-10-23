@@ -2347,7 +2347,7 @@ async function verifyRevivedDelivery(moved: boolean) {
     // (task-revive.ts registerLaunch + tracker.register) — the board
     // runs a NEW generation and the tracker owns observing it.
     await Bun.sleep(1_100);
-    const lease = h.board.acquireRelaunchLease('child', first.generation);
+    const lease = h.board.acquireLease('child', first.generation, 'relaunch');
     if (!lease) throw new Error('missing relaunch lease');
     const relaunched = h.board.registerLaunch({
       taskID: 'child',
@@ -2532,7 +2532,7 @@ test('revived-run tracker exhaustion re-emits exactly one publication wake to th
     // Past the throttle window, revive the child (the exact
     // post-admission state task_revive leaves behind).
     await Bun.sleep(1_100);
-    const lease = h.board.acquireRelaunchLease('child', first.generation);
+    const lease = h.board.acquireLease('child', first.generation, 'relaunch');
     if (!lease) throw new Error('missing relaunch lease');
     const relaunched = h.board.registerLaunch({
       taskID: 'child',
@@ -2832,7 +2832,7 @@ test('first publication of an unowned second generation is native-owned: skipped
     // the notify dedupe), so the plugin wake must NOT fire beside the
     // native delivery (F1).
     await Bun.sleep(1_100);
-    const lease = h.board.acquireRelaunchLease('child', first.generation);
+    const lease = h.board.acquireLease('child', first.generation, 'relaunch');
     if (!lease) throw new Error('missing relaunch lease');
     const relaunched = h.board.registerLaunch({
       taskID: 'child',
@@ -3006,7 +3006,7 @@ test('revived stop with no prior tracker delivery wakes once and carries the att
     // Revive (task_revive's post-admission shape), then the host
     // interrupts the revived run before it ever completes.
     await Bun.sleep(1_100);
-    const lease = h.board.acquireRelaunchLease('child', first.generation);
+    const lease = h.board.acquireLease('child', first.generation, 'relaunch');
     if (!lease) throw new Error('missing relaunch lease');
     const relaunched = h.board.registerLaunch({
       taskID: 'child',
@@ -3154,7 +3154,7 @@ test('recovery wake stays suppressed beside a tracker-delivered terminal for the
     // Revive; the revived generation completes and the tracker delivers
     // its <task> notification (the generation's one admission).
     await Bun.sleep(1_100);
-    const lease = h.board.acquireRelaunchLease('child', first.generation);
+    const lease = h.board.acquireLease('child', first.generation, 'relaunch');
     if (!lease) throw new Error('missing relaunch lease');
     const relaunched = h.board.registerLaunch({
       taskID: 'child',
@@ -3386,7 +3386,7 @@ test('runbook §3-D: zero cache-monitor warnings across a full revival/notificat
     // Revival past the throttle window: tracker-owned relaunch
     // (task_revive's exact post-admission shape).
     await Bun.sleep(1_100);
-    const lease = h.board.acquireRelaunchLease('child', first.generation);
+    const lease = h.board.acquireLease('child', first.generation, 'relaunch');
     if (!lease) throw new Error('missing relaunch lease');
     const relaunched = h.board.registerLaunch({
       taskID: 'child',

@@ -957,7 +957,7 @@ describe('task-session-manager hook', () => {
       expect(own?.state).toBe('reconciled');
       expect(own?.terminalState).toBe('completed');
       expect(
-        board.acquireRelaunchLease('ses_own', own.generation),
+        board.acquireLease('ses_own', own.generation, 'relaunch'),
       ).toBeUndefined();
       await resume('ses_error');
       expect(board.get('ses_error')).toMatchObject({
@@ -1024,7 +1024,7 @@ describe('task-session-manager hook', () => {
     const board = new BackgroundJobBoard();
     const pendingCallTracker = createPendingCallTracker();
     const markUsed = spyOn(board, 'markUsed');
-    const acquire = spyOn(board, 'acquireRelaunchLease');
+    const acquire = spyOn(board, 'acquireLease');
     const adopt = spyOn(board, 'adoptTerminal');
     const { hook, complete } = createHook({
       backgroundJobBoard: board,
@@ -1083,7 +1083,11 @@ describe('task-session-manager hook', () => {
     );
     expect(board.get('ses_waiting')).toBeUndefined();
     expect(adopt).not.toHaveBeenCalled();
-    expect(acquire).not.toHaveBeenCalled();
+    // No relaunch lease was acquired (the collapsed single acquire seam is
+    // spied: assert no acquisition of this flow's kind happened).
+    expect(acquire.mock.calls.some((call) => call[2] === 'relaunch')).toBe(
+      false,
+    );
     expect(markUsed).not.toHaveBeenCalled();
     expect(pendingCallTracker.peekByParent('parent-1')).toBeUndefined();
   });
@@ -3328,9 +3332,10 @@ describe('task-session-manager hook', () => {
     const relaunched = board.get('child-1');
     expect(resume.args.task_id).toBe('child-1');
     expect(relaunched).toMatchObject({ generation: 2, state: 'running' });
-    const cancellationLease = board.acquireCancellationLease(
+    const cancellationLease = board.acquireLease(
       'child-1',
       relaunched?.generation ?? -1,
+      'cancellation',
     );
     expect(cancellationLease).toBeDefined();
     if (!cancellationLease) {
@@ -3346,9 +3351,10 @@ describe('task-session-manager hook', () => {
       parentSessionID: 'parent-1',
       agent: 'oracle',
     });
-    const cancellationLease = board.acquireCancellationLease(
+    const cancellationLease = board.acquireLease(
       first.taskID,
       first.generation,
+      'cancellation',
     );
     expect(cancellationLease).toBeDefined();
     const { hook } = createHook({ backgroundJobBoard: board });
@@ -3374,7 +3380,7 @@ describe('task-session-manager hook', () => {
       generation: first.generation,
       state: 'running',
     });
-    expect(board.acquireRelaunchLease('child-1', first.generation)).toBe(
+    expect(board.acquireLease('child-1', first.generation, 'relaunch')).toBe(
       undefined,
     );
     if (!cancellationLease) {
@@ -3400,9 +3406,10 @@ describe('task-session-manager hook', () => {
       Date.now(),
       first.generation,
     );
-    const cancellationLease = board.acquireCancellationLease(
+    const cancellationLease = board.acquireLease(
       first.taskID,
       first.generation,
+      'cancellation',
     );
     expect(cancellationLease).toBeDefined();
     const { hook } = createHook({ backgroundJobBoard: board });
@@ -3577,7 +3584,7 @@ describe('task-session-manager hook', () => {
       { output: undefined },
     );
 
-    const secondLease = board.acquireRelaunchLease('child-1', 1);
+    const secondLease = board.acquireLease('child-1', 1, 'relaunch');
     expect(secondLease).toBeDefined();
     if (!secondLease) throw new Error('relaunch lease was not released');
     board.releaseLease(secondLease);
@@ -3606,7 +3613,7 @@ describe('task-session-manager hook', () => {
       ),
     ).rejects.toThrow('context tracking failed');
 
-    const cancellationLease = board.acquireCancellationLease('child-1', 2);
+    const cancellationLease = board.acquireLease('child-1', 2, 'cancellation');
     expect(cancellationLease).toBeDefined();
     if (!cancellationLease) {
       throw new Error('cancellation lease was not acquired');
@@ -6562,7 +6569,7 @@ describe('task-session-manager hook', () => {
     // The deferral entry from error#1 must be gone: relaunch the task and
     // prove a later idle runs the normal inspect path instead of the
     // deferred-error backstop with the stale message.
-    const lease = board.acquireRelaunchLease('child-1', run.generation);
+    const lease = board.acquireLease('child-1', run.generation, 'relaunch');
     if (!lease) throw new Error('missing relaunch lease');
     board.registerLaunch({
       taskID: 'child-1',
@@ -7412,7 +7419,7 @@ describe('task-session-manager hook', () => {
           return timer;
         },
       );
-      const acquire = spyOn(ProductionBoard.prototype, 'acquireRelaunchLease');
+      const acquire = spyOn(ProductionBoard.prototype, 'acquireLease');
       const releaseLease = board.releaseLease.bind(board);
       const release = spyOn(
         ProductionBoard.prototype,
@@ -7459,7 +7466,9 @@ describe('task-session-manager hook', () => {
         );
         (await deadline.promise)();
         expect(String(await pending)).toContain('status: admission_unknown');
-        const lease = acquire.mock.results[0]?.value;
+        const lease = acquire.mock.results
+          .map((result) => result?.value)
+          .find((value) => value?.kind === 'relaunch');
         if (!lease) throw new Error('missing relaunch lease');
         coordinator.dispatchSessionDeleted(deletedID);
         expect(board.get('child-1')).toBeUndefined();
