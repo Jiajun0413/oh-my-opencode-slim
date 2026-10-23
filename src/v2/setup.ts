@@ -82,7 +82,6 @@ import {
   v1ArgsToSubagent,
 } from './delegation';
 import { mapV2EventToV1 } from './event-adapter';
-import { createSubagentExecutorWrapper } from './subagent-executor-wrapper';
 import {
   INTERNAL_SYNTHETIC_MESSAGE_PREFIX,
   isInternalAdmission,
@@ -100,6 +99,7 @@ import {
   userTextFromContent,
   type V2CommandSubmit,
 } from './session-submit';
+import { createSubagentExecutorWrapper } from './subagent-executor-wrapper';
 import type {
   V2AgentDraft,
   V2Cleanup,
@@ -2924,6 +2924,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
                 childTaskID: string;
                 state: 'running' | 'completed' | 'error' | 'cancelled';
                 background: boolean;
+                result?: string;
                 exactCallConfirmed: boolean;
               }) => Promise<unknown>)
             | undefined;
