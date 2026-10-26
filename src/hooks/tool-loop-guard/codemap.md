@@ -11,7 +11,7 @@ The guard operates per session and distinguishes between different types of tool
 
 - **Read-only file tools** (read, grep, glob): Hard-block after M confirmations to prevent infinite loops
 - **Task supervision** (task_status): Warn-only to avoid deadlocking result retrieval
-- **Task lifecycle tools** (task, task_cancel, task_message, task_revive): Exempt entirely (managed by task-session-manager)
+- **Task lifecycle tools** (task, task_cancel, task_revive): Exempt entirely (managed by task-session-manager)
 - **Wait tools** (wait_for_user, wait_for_background_tasks): Dedicated per-turn counter that blocks on third consecutive call
 
 The run counter only advances in `tool.execute.after` when arguments and output are byte-identical to the previous call. Any new information resets the counter, allowing legitimate re-reads after file changes.

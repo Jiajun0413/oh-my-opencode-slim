@@ -36,7 +36,7 @@ import { log } from '../../utils/logger';
  * - Task supervision (task_status) warns at N calls but stays warn-only
  *   (never hard-blocks) to avoid deadlocking result retrieval for
  *   long-running background tasks.
- * - Task management and lifecycle tools (task, task_cancel, task_message,
+ * - Task management and lifecycle tools (task, task_cancel,
  *   task_revive) remain exempt; task-session-manager owns its own
  *   duplicate-spawn guards (#1056/#1070).
  * - Wait tools (wait_for_user, wait_for_background_tasks) use a dedicated
@@ -60,7 +60,6 @@ const LOOP_GUARD_BLOCK_AT = 5;
 const LOOP_GUARD_EXEMPT: Record<string, true> = {
   task: true,
   task_cancel: true,
-  task_message: true,
   task_revive: true,
 };
 

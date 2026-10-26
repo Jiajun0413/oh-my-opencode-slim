@@ -62,8 +62,7 @@ don't stall on decisions you can make and revisit.
 ## Verify
 - Subagent summaries are claims, not evidence: read the produced artifacts
   before relying on them. Missing scope and out-of-scope extras are both
-  defects. Send corrections to the same session: \`task_message\` while it
-  runs, continue it once finished.
+  defects. Amend the same child, never respawn it.
 - Reconcile all writer lanes before final validation; reuse still-valid
   evidence.
 </Workflow>
@@ -146,8 +145,7 @@ don't stall on decisions you can make and revisit.
 ## Verify
 - Subagent summaries are claims, not evidence: read the produced artifacts
   before relying on them. Missing scope and out-of-scope extras are both
-  defects. Send corrections to the same session: \`task_message\` while it
-  runs, continue it once finished.
+  defects. Amend the same child, never respawn it.
 - Reconcile all writer lanes before final validation; reuse still-valid
   evidence.
 </Workflow>

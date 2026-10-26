@@ -247,12 +247,14 @@ describe('plugin tool registration', () => {
     } as never;
 
     try {
-      // v2 never registers wait_for_user: the native `question` tool
-      // covers the blocking boundary there. The rest of the surface is
-      // intact.
+      // v2 never registers wait_for_user (the native `question` tool covers
+      // the blocking boundary) nor the v1-only amendment/resume tools that
+      // native subagent(sessionID, prompt) replaces. The rest is intact.
       const hooks = await plugin(baseInput);
       expect(hooks.tool?.task_status).toBeDefined();
       expect(hooks.tool?.wait_for_user).toBeUndefined();
+      expect(hooks.tool?.task_message).toBeUndefined();
+      expect(hooks.tool?.task_revive).toBeUndefined();
       await hooks.dispose?.();
     } finally {
       await rm(projectDir, { recursive: true, force: true });

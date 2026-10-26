@@ -733,12 +733,7 @@ describe('orchestrator agent', () => {
       orchestrator as { config: { permission: Record<string, unknown> } }
     ).config.permission;
 
-    for (const toolName of [
-      'task_cancel',
-      'task_message',
-      'task_revive',
-      'task_status',
-    ]) {
+    for (const toolName of ['task_cancel', 'task_revive', 'task_status']) {
       expect(permission[toolName]).toBe('allow');
     }
   });
@@ -1174,12 +1169,7 @@ describe('tool permissions', () => {
       oracle as { config: { permission: Record<string, unknown> } }
     ).config.permission;
 
-    for (const toolName of [
-      'task_cancel',
-      'task_message',
-      'task_revive',
-      'task_status',
-    ]) {
+    for (const toolName of ['task_cancel', 'task_revive', 'task_status']) {
       expect(permission[toolName]).toBe('deny');
     }
   });

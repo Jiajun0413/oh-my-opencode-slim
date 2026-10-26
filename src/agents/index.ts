@@ -53,14 +53,15 @@ type AgentFactory = (
 
 const ORCHESTRATOR_DEFAULT_TOOL_NAMES = [
   'task_cancel',
-  'task_message',
   'task_reply',
   'task_status',
   'acp_run',
 ] as const;
-/** v1-only control tool: retired on v2, which continues retained sessions
- * through the native delegation resume parameter. */
-const ORCHESTRATOR_V1_ONLY_TOOL_NAMES = ['task_revive'] as const;
+/** V1-only controls; v2 continues and steers with native subagent. */
+const ORCHESTRATOR_V1_ONLY_TOOL_NAMES = [
+  'task_revive',
+  'task_message',
+] as const;
 const MARKETPLACE_TOOL_NAMES = [
   'marketplace_inspect',
   'marketplace_manage',
@@ -1095,9 +1096,6 @@ export function createAgents(
       wakeScheduler:
         runtime.backgroundJobsEnabled &&
         runtime.backgroundJobs.orchestratorWake.enabled,
-      taskMessage:
-        runtime.backgroundJobsEnabled &&
-        !runtime.disabledTools.includes('task_message'),
       hostFlavor: options?.hostFlavor,
       routingBlock: runtime.routingBlock,
     },

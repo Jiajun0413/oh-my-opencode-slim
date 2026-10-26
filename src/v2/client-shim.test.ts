@@ -2194,32 +2194,6 @@ describe('v2 client shim prompt noReply delivery', () => {
     });
   });
 
-  test('noReply with explicit steer steers without waking', async () => {
-    const call = await promptThroughShim({
-      noReply: true,
-      delivery: 'steer',
-      parts: [{ type: 'text', text: 'Update' }],
-    });
-    expect(call).toMatchObject({
-      sessionID: 'ses_1',
-      delivery: 'steer',
-      resume: false,
-    });
-  });
-
-  test('noReply with garbage delivery falls back to queue', async () => {
-    const call = await promptThroughShim({
-      noReply: true,
-      delivery: 'push',
-      parts: [{ type: 'text', text: 'Update' }],
-    });
-    expect(call).toMatchObject({
-      sessionID: 'ses_1',
-      delivery: 'queue',
-      resume: false,
-    });
-  });
-
   test('prompt without noReply steers', async () => {
     const call = await promptThroughShim({
       parts: [{ type: 'text', text: 'Update' }],

@@ -13,21 +13,25 @@ const v2 = (options = {}) =>
   buildOrchestratorPrompt({ ...options, hostFlavor: 'v2' });
 
 describe('orchestrator prompt: host vocabulary', () => {
-  test('v2 uses subagent and soft-steered task_message', () => {
+  test('v2 uses subagent and never names the retired task_message', () => {
     const prompt = v2();
 
     expect(prompt).toContain('`subagent` calls in one message');
     expect(prompt).toContain('look up IDs with the models tool');
     expect(prompt).not.toContain('task_id');
+    expect(prompt).not.toContain('task_message');
   });
 
-  test('v1 uses task, task_revive, and queue-only task_message', () => {
+  test('v1 uses the task vocabulary and restates no tool mechanics', () => {
     const prompt = v1();
 
     expect(prompt).toContain('`task` calls in one message');
     expect(prompt).not.toContain('delivery:');
     expect(prompt).not.toContain('subagent(');
     expect(prompt).not.toContain('models tool');
+    // Tool usage lives in the tool descriptions, not in the prompt.
+    expect(prompt).not.toContain('task_message');
+    expect(prompt).not.toContain('task_revive');
   });
 
   test('result reads go through task_status, not a task_result tool', () => {
@@ -174,8 +178,8 @@ describe('createAgents orchestrator prompt gates', () => {
   const capabilities = (prompt: string) => ({
     waitForUser: prompt.includes('wait_for_user'),
     wakeScheduler: prompt.includes('wake scheduler'),
-    taskMessage: prompt.includes('task_message'),
-    fallback: prompt.includes('once it settles'),
+    // The correction policy is host-neutral: amend, never respawn.
+    amend: prompt.includes('Amend the same child, never respawn it.'),
   });
 
   beforeEach(() => {
@@ -186,7 +190,7 @@ describe('createAgents orchestrator prompt gates', () => {
     RuntimeConfig.reset(TEST_DIRECTORY);
   });
 
-  test('v1 lifecycle off names no wait_for_user, no wake scheduler, no task_message', () => {
+  test('v1 lifecycle off names no wait_for_user, no wake scheduler', () => {
     const agents = createAgents(
       runtimeFor({ backgroundJobs: { enabled: false } }),
     );
@@ -195,9 +199,9 @@ describe('createAgents orchestrator prompt gates', () => {
     expect(capabilities(prompt)).toEqual({
       waitForUser: false,
       wakeScheduler: false,
-      taskMessage: false,
-      fallback: true,
+      amend: true,
     });
+    expect(prompt).not.toContain('task_message');
   });
 
   test('v2 lifecycle off keeps the v2 vocabulary and names no managed tool', () => {
@@ -215,28 +219,22 @@ describe('createAgents orchestrator prompt gates', () => {
     expect(prompt).toContain('`subagent` calls in one message');
   });
 
-  test('disabled_tools gates task_message while the lifecycle stays on', () => {
-    const agents = createAgents(
-      runtimeFor({ disabled_tools: ['task_message'] }),
-    );
+  test('the default v1 prompt carries the correction policy', () => {
+    const agents = createAgents(runtimeFor());
     const prompt = agents.find((a) => a.name === 'orchestrator')?.config
       .prompt as string;
     expect(capabilities(prompt)).toEqual({
       waitForUser: true,
       wakeScheduler: true,
-      taskMessage: false,
-      fallback: true,
+      amend: true,
     });
-    expect(prompt).toContain(
-      'task(...) once it settles, continue it once finished.',
-    );
   });
 
   test('v1 lifecycle off with both tools disabled still renders the fallback channel', () => {
     const agents = createAgents(
       runtimeFor({
         backgroundJobs: { enabled: false },
-        disabled_tools: ['wait_for_user', 'task_message'],
+        disabled_tools: ['wait_for_user'],
       }),
     );
     const prompt = agents.find((a) => a.name === 'orchestrator')?.config
@@ -244,9 +242,9 @@ describe('createAgents orchestrator prompt gates', () => {
     expect(capabilities(prompt)).toEqual({
       waitForUser: false,
       wakeScheduler: false,
-      taskMessage: false,
-      fallback: true,
+      amend: true,
     });
+    expect(prompt).not.toContain('task_message');
   });
 
   test('defaults keep the registered-tool prompt bytes unchanged', () => {

@@ -13,7 +13,6 @@ import {
 import { buildPluginInput } from '../v2/client-shim';
 import { createCancelTaskTool } from './cancel-task';
 import { TaskActivityTracker } from './task-activity';
-import { createTaskMessageTool } from './task-message';
 import { createTaskStatusTool } from './task-status';
 
 let client: Record<string, any>;
@@ -516,6 +515,85 @@ describe('task_status', () => {
     },
   );
 
+  test('diagnostic refusal passes the real record state through', async () => {
+    const h = makeResultTool();
+    await h.settle('error');
+    const job = h.board.get('ses_child1');
+    if (!job) throw new Error('expected tracked record');
+    // A reconciled record can carry no terminal state (defensive contract):
+    // never relabel an unattributed terminal as still running.
+    job.state = 'reconciled';
+    job.terminalState = undefined;
+    h.messages.mockClear();
+    const output = await h.tool.execute(
+      { task_id: 'exp-1', diagnostic: true },
+      { sessionID: 'parent-1' } as never,
+    );
+    expect(output).toContain('state: reconciled');
+    expect(output).not.toContain('state: running');
+    expect(h.messages).not.toHaveBeenCalled();
+  });
+
+  test('diagnostic labels an anchored excerpt as identity-attributed', async () => {
+    const h = makeResultTool();
+    await h.settle('error');
+    const job = h.board.get('ses_child1');
+    if (!job) throw new Error('expected tracked record');
+    job.runInputMessageID = 'msg_input';
+    h.messages.mockResolvedValue({
+      data: [
+        { info: { id: 'msg_input', role: 'user' }, parts: [] },
+        {
+          info: { role: 'assistant', time: { created: 10 } },
+          parts: [{ type: 'text', text: 'anchored partial' }],
+        },
+      ],
+    } as never);
+    h.messages.mockClear();
+    const output = await h.tool.execute(
+      { task_id: 'exp-1', diagnostic: true },
+      { sessionID: 'parent-1' } as never,
+    );
+    expect(output).toContain('anchored partial');
+    expect(output).toContain('evidence: transcript (identity)');
+    // No history paging: the bounded read stays the only host read.
+    expect(h.messages.mock.calls[0]?.[0]).toMatchObject({
+      query: { limit: 100 },
+    });
+    expect(h.messages.mock.calls[0]?.[0]).not.toHaveProperty('historyBoundary');
+    job.runInputMessageID = 'msg_previous';
+    const stale = await h.tool.execute({ task_id: 'exp-1', diagnostic: true }, {
+      sessionID: 'parent-1',
+    } as never);
+    expect(stale).toContain('a later run owns the tail');
+    expect(stale).not.toContain('anchored partial');
+  });
+
+  test('a same-generation amendment keeps the excerpt readable', async () => {
+    const h = makeResultTool();
+    await h.settle('error');
+    const job = h.board.get('ses_child1');
+    if (!job) throw new Error('expected tracked record');
+    job.runInputMessageID = 'msg_input';
+    job.amendmentInputMessageID = 'msg_amend';
+    h.messages.mockResolvedValue({
+      data: [
+        { info: { id: 'msg_input', role: 'user' }, parts: [] },
+        { info: { id: 'msg_amend', role: 'user' }, parts: [] },
+        {
+          info: { role: 'assistant', time: { created: 10 } },
+          parts: [{ type: 'text', text: 'amended partial' }],
+        },
+      ],
+    } as never);
+    const output = await h.tool.execute(
+      { task_id: 'exp-1', diagnostic: true },
+      { sessionID: 'parent-1' } as never,
+    );
+    expect(output).toContain('amended partial');
+    expect(output).toContain('evidence: transcript (identity)');
+  });
+
   test('diagnostic mutual exclusion precedes all host I/O', async () => {
     const h = makeResultTool();
     await expect(
@@ -641,6 +719,9 @@ describe('task_status', () => {
     );
     expect(output).toContain('[... truncated ...]');
     expect(output).toContain('truncated: messages,chars');
+    // Unanchored rows carry the longer attribution label, so the budget must
+    // reserve that form rather than the identity one.
+    expect(output).toContain('evidence: transcript (timestamp)');
     expect(await read()).toBe(output);
   });
 
@@ -1921,26 +2002,6 @@ describe('task_status unknown-handle enumeration', () => {
       .execute({ task_id: 'fix-9' }, { sessionID: 'parent-1' } as never)
       .catch((thrown: Error) => thrown);
     expect((error as Error).message).toBe('Unknown task ID or alias: fix-9');
-  });
-
-  test('task_message enumerates the handles through the shared unknown-ref error', async () => {
-    const board = seededBoard();
-    const { task_message } = createTaskMessageTool({
-      input: { directory: '/test', client: { session: {} } } as never,
-      backgroundJobBoard: board,
-    });
-    const error = await task_message
-      .execute({ task_id: 'fix-9', message: 'hello' }, {
-        sessionID: 'parent-1',
-      } as never)
-      .catch((thrown: Error) => thrown);
-    const message = (error as Error).message;
-    expect(message).toContain('Unknown task ID or alias: fix-9');
-    expect(message).toContain(EXPECTED_RECENT);
-    expect(message).not.toContain('ses_a');
-    assertParseSafe(
-      message.split('\n').find((line) => line.startsWith('recent: ')),
-    );
   });
 
   test('task_cancel enumerates the handles inside its unknown output', async () => {

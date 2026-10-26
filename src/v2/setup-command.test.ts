@@ -19,6 +19,10 @@ import {
 } from '../hooks/phase-reminder';
 import { BACKGROUND_JOB_BOARD_METADATA_KEY } from '../hooks/task-session-manager/board-injection';
 import {
+  createPendingCallTracker,
+  type PendingTaskCall,
+} from '../hooks/task-session-manager/pending-call-tracker';
+import {
   createToolLoopGuardHook,
   LOOP_GUARD_WARNING,
 } from '../hooks/tool-loop-guard/hook';
@@ -63,6 +67,18 @@ function makeEvent(
     system: [],
     tools: {},
     messages: messages as V2SessionContextEvent['messages'],
+    ...overrides,
+  };
+}
+
+function makePromptEvent(
+  overrides: Partial<V2SessionPromptEvent> = {},
+): V2SessionPromptEvent {
+  return {
+    sessionID: 'ses_p',
+    messageID: 'msg_1',
+    prompt: { text: 'do the thing' },
+    delivery: 'steer',
     ...overrides,
   };
 }
@@ -1876,25 +1892,12 @@ describe('tool execute bridge status discrimination', () => {
 });
 
 describe('createSessionPromptBridge (native session.prompt hook)', () => {
-  function makePromptEvent(
-    overrides: Partial<V2SessionPromptEvent> = {},
-  ): V2SessionPromptEvent {
-    return {
-      sessionID: 'ses_p',
-      messageID: 'msg_1',
-      prompt: { text: 'do the thing' },
-      delivery: 'steer',
-      ...overrides,
-    };
-  }
-
   test('handlePrompt delivers chat.message once per admission with parts', async () => {
     const calls: Array<Record<string, unknown>> = [];
     const bridge = createSessionPromptBridge(async (input) => {
       calls.push(input as Record<string, unknown>);
     });
-    // Pre-learn the agent so the admission delivers immediately (the
-    // first-admission deferral is covered by its own tests below).
+    // Pre-learn the agent so the admission delivers immediately.
     await bridge.observeContext(
       makeEvent(
         [{ id: 'msg_0', role: 'user', content: [{ type: 'text', text: 'x' }] }],
@@ -1942,9 +1945,7 @@ describe('createSessionPromptBridge (native session.prompt hook)', () => {
         },
       }),
     );
-    // observeChatMessage (task-session-manager + wake scheduler) gates on
-    // a non-synthetic text/file part — the file part keeps that gate
-    // passable for attachment-only prompts.
+    // The file part keeps the real consumers' non-synthetic-part gate passable.
     expect(calls[0]?.parts).toEqual([
       { type: 'file', uri: 'file:///a.txt', name: 'a.txt' },
     ]);
@@ -1979,9 +1980,7 @@ describe('createSessionPromptBridge (native session.prompt hook)', () => {
       },
     ]);
 
-    // Repeated context events with the same agent/model: no more calls
-    // (once-per-admission fidelity — message-scoped delivery belongs to
-    // the prompt hook).
+    // Repeated context events with the same agent/model: no more calls.
     await bridge.observeContext(contextEvent);
     await bridge.observeContext(contextEvent);
     expect(calls).toHaveLength(1);
@@ -2009,8 +2008,7 @@ describe('createSessionPromptBridge (native session.prompt hook)', () => {
     const bridge = createSessionPromptBridge(async (input) => {
       calls.push(input as Record<string, unknown>);
     });
-    // Trailing user message with an empty-string id: the newly-learned
-    // forward carries state but no messageID.
+    // Empty-string trailing id: the forward carries state but no messageID.
     await bridge.observeContext(
       makeEvent([{ id: '', role: 'user', content: [] }], {
         sessionID: 'ses_p',
@@ -2019,8 +2017,7 @@ describe('createSessionPromptBridge (native session.prompt hook)', () => {
     );
     expect(calls).toEqual([{ sessionID: 'ses_p', agent: 'orchestrator' }]);
 
-    // No user message at all: same omission (the model change forces a
-    // new forward, so the shape is observable).
+    // No user message at all: same omission.
     await bridge.observeContext(
       makeEvent([{ id: 'a1', role: 'assistant', content: [] }], {
         sessionID: 'ses_p',
@@ -2088,12 +2085,8 @@ describe('createSessionPromptBridge (native session.prompt hook)', () => {
   });
 
   test('first prompt is deferred until the context event learns the agent (parts + agent together)', async () => {
-    // P1 regression: forwarding the first admitted prompt before the
-    // agent is learned gets it dropped by every v1 consumer (no
-    // sessionMetadata.setAgent → shouldManageSession false), and the
-    // agent-only context forward is dropped by the parts gate. The
-    // bridge must latch the first prompt and flush it when the first
-    // agent-bearing context event arrives.
+    // P1 regression: an early forward is dropped by every v1 consumer, so the
+    // bridge latches the first prompt until the agent-bearing context event.
     const calls: Array<Record<string, unknown>> = [];
     const bridge = createSessionPromptBridge(async (input) => {
       calls.push(input as Record<string, unknown>);
@@ -2117,8 +2110,7 @@ describe('createSessionPromptBridge (native session.prompt hook)', () => {
         },
       ),
     );
-    // Exactly ONE delivery, carrying parts + agent + model + messageID
-    // together (the no-parts state forward is superseded by the flush).
+    // Exactly ONE delivery carrying parts + agent + model + messageID together.
     expect(calls).toEqual([
       {
         sessionID: 'ses_p',
@@ -2151,11 +2143,8 @@ describe('createSessionPromptBridge (native session.prompt hook)', () => {
   });
 
   test('deferred flush satisfies the v1 setAgent-before-consumers ordering', async () => {
-    // Replica of the real v1 chat.message handler ordering: an agent on
-    // the delivery registers the session agent BEFORE the consumers gate
-    // on it. The deferred flush must pass the consumers' gate where the
-    // old immediate forward (agent-less) and the old context forward
-    // (parts-less) both failed.
+    // Replica of the v1 handler ordering: setAgent before the consumers gate;
+    // the flush passes where the agent-less and parts-less forwards failed.
     const sessionAgents = new Map<string, string>();
     const consumerObserved: Array<string | undefined> = [];
     const bridge = createSessionPromptBridge(async (input) => {
@@ -2198,8 +2187,7 @@ describe('createSessionPromptBridge (native session.prompt hook)', () => {
     });
     await bridge.handlePrompt(makePromptEvent()); // pending (no agent yet)
     await bridge.handlePrompt(makePromptEvent({ messageID: 'msg_2' }));
-    // The pending first admission flushed best-known (no agent learned),
-    // the new one latched — order preserved.
+    // The pending admission flushed best-known; the new one latched.
     expect(calls).toEqual([
       {
         sessionID: 'ses_p',
@@ -2228,8 +2216,7 @@ describe('createSessionPromptBridge (native session.prompt hook)', () => {
       calls.push(input as Record<string, unknown>);
     });
     await bridge.handlePrompt(makePromptEvent()); // pending msg_1
-    // Synthetic/compaction request for the same session: agent absent,
-    // trailing user message already past the pending admission.
+    // Agent-absent request whose trailing id is past the pending admission.
     await bridge.observeContext(
       makeEvent(
         [{ id: 'msg_9', role: 'user', content: [{ type: 'text', text: 's' }] }],
@@ -2248,13 +2235,8 @@ describe('createSessionPromptBridge (native session.prompt hook)', () => {
   });
 
   test('handlePrompt restores the internal-initiator marker from prompt metadata (wake admissions stay internal)', async () => {
-    // The v2 orchestrator-wake queue prompt arrives with the marker as
-    // prompt metadata (part metadata cannot survive the text-only v2
-    // translation). The rebuilt parts view must carry the v1 part marker
-    // so isInternalInitiatorPart consumers — orchestrator-wake's
-    // observeChatMessage in particular — treat the admission as internal
-    // (no no-progress rearm, no timer clear). The marker must survive
-    // the deferred first-admission flush too.
+    // Wake metadata must survive the deferred flush as a v1 part marker so
+    // isInternalInitiatorPart consumers treat the admission as internal.
     const calls: Array<Record<string, unknown>> = [];
     const bridge = createSessionPromptBridge(async (input) => {
       calls.push(input as Record<string, unknown>);
@@ -2330,13 +2312,204 @@ describe('createSessionPromptBridge (native session.prompt hook)', () => {
   });
 });
 
+describe('createSessionPromptBridge raw admission feed', () => {
+  /** A live resumed pending, mirroring the run-input-anchor setup. */
+  function resumedPending(sessionID: string): PendingTaskCall {
+    return {
+      callId: 'call_resume',
+      parentSessionId: 'ses_parent',
+      agentType: 'fixer',
+      label: 'label',
+      fullObjective: 'objective',
+      background: true,
+      lifecycleEpoch: 0,
+      resumedTaskId: sessionID,
+    };
+  }
+
+  test('the raw feed precedes the chat.message delivery, deferred or immediate', async () => {
+    // The raw prompt-hook feed is the earliest authoritative admission
+    // evidence: it always fires ahead of the (possibly deferred) delivery.
+    const fed: Array<{ sessionID: string; messageID: string }> = [];
+    const order: string[] = [];
+    const bridge = createSessionPromptBridge(
+      async (input) => {
+        order.push(`chat.message:${input.messageID}`);
+      },
+      (sessionID, messageID) => {
+        fed.push({ sessionID, messageID });
+        order.push(`admission:${messageID}`);
+      },
+    );
+
+    // Unknown agent: fed immediately while chat.message stays latched...
+    await bridge.handlePrompt(makePromptEvent());
+    expect(fed).toEqual([{ sessionID: 'ses_p', messageID: 'msg_1' }]);
+    expect(order).toEqual(['admission:msg_1']);
+
+    // ...learning the agent flushes the deferred delivery; the replay does
+    // not re-feed.
+    await bridge.observeContext(
+      makeEvent(
+        [
+          {
+            id: 'msg_1',
+            role: 'user',
+            content: [{ type: 'text', text: 'hi' }],
+          },
+        ],
+        { sessionID: 'ses_p', agent: 'orchestrator' },
+      ),
+    );
+    expect(order).toEqual(['admission:msg_1', 'chat.message:msg_1']);
+    expect(fed).toHaveLength(1);
+
+    // Known agent: the next admission delivers immediately, still after its
+    // feed.
+    await bridge.handlePrompt(makePromptEvent({ messageID: 'msg_2' }));
+    expect(order).toEqual([
+      'admission:msg_1',
+      'chat.message:msg_1',
+      'admission:msg_2',
+      'chat.message:msg_2',
+    ]);
+  });
+
+  test('a throwing feed never refuses the admission or loses the delivery', async () => {
+    // A feed throw must be swallowed: the dedupe record is already written.
+    const calls: Array<Record<string, unknown>> = [];
+    const bridge = createSessionPromptBridge(
+      async (input) => {
+        calls.push(input as Record<string, unknown>);
+      },
+      () => {
+        throw new Error('feed exploded');
+      },
+    );
+    await bridge.observeContext(
+      makeEvent(
+        [{ id: 'msg_0', role: 'user', content: [{ type: 'text', text: 'x' }] }],
+        { sessionID: 'ses_p', agent: 'orchestrator' },
+      ),
+    );
+    calls.length = 0;
+
+    await expect(
+      bridge.handlePrompt(makePromptEvent()),
+    ).resolves.toBeUndefined();
+    // The admission still reaches the v1 consumer (deferred or immediate).
+    expect(calls).toEqual([
+      {
+        sessionID: 'ses_p',
+        messageID: 'msg_1',
+        agent: 'orchestrator',
+        parts: [{ type: 'text', text: 'do the thing' }],
+      },
+    ]);
+  });
+
+  test('duplicate and malformed admissions never feed', async () => {
+    const fed: Array<{ sessionID: string; messageID: string }> = [];
+    const bridge = createSessionPromptBridge(
+      async () => {},
+      (sessionID, messageID) => fed.push({ sessionID, messageID }),
+    );
+
+    await bridge.handlePrompt(makePromptEvent());
+    // Re-fired admission with the same messageID: deduped, not re-fed.
+    await bridge.handlePrompt(makePromptEvent());
+    expect(fed).toEqual([{ sessionID: 'ses_p', messageID: 'msg_1' }]);
+
+    // Malformed ids: ignored before the feed.
+    await bridge.handlePrompt(
+      makePromptEvent({ sessionID: '', messageID: 'msg_x' }),
+    );
+    await bridge.handlePrompt(
+      makePromptEvent({ sessionID: 'ses_p', messageID: '' }),
+    );
+    await bridge.handlePrompt(
+      makePromptEvent({ sessionID: '', messageID: '' }),
+    );
+    expect(fed).toHaveLength(1);
+
+    // A later, distinct admission still feeds (once).
+    await bridge.handlePrompt(makePromptEvent({ messageID: 'msg_2' }));
+    expect(fed).toEqual([
+      { sessionID: 'ses_p', messageID: 'msg_1' },
+      { sessionID: 'ses_p', messageID: 'msg_2' },
+    ]);
+  });
+
+  test('agent/model-only state forwards never feed', async () => {
+    const tracker = createPendingCallTracker();
+    tracker.add(resumedPending('ses_p'));
+    const calls: Array<Record<string, unknown>> = [];
+    const { bridge } = trackedBridge(tracker, async (input) => {
+      calls.push(input);
+    });
+
+    // State forwards with a trailing id reach chat.message but never feed.
+    await bridge.observeContext(
+      makeEvent([{ id: 'msg_state', role: 'user', content: [] }], {
+        sessionID: 'ses_p',
+        agent: 'orchestrator',
+        model: { id: 'claude-x', providerID: 'anthropic' },
+      }),
+    );
+    // A model-only change forces another state forward.
+    await bridge.observeContext(
+      makeEvent([{ id: 'msg_state', role: 'user', content: [] }], {
+        sessionID: 'ses_p',
+        agent: 'orchestrator',
+        model: { id: 'claude-y', providerID: 'anthropic' },
+      }),
+    );
+
+    expect(calls.map((call) => call.messageID)).toEqual([
+      'msg_state',
+      'msg_state',
+    ]);
+    // Nothing was bound to the live pending either.
+    expect(
+      tracker.peekByCallId('call_resume', 'ses_parent')?.inputMessageID,
+    ).toBeUndefined();
+    expect(tracker.firstAdmission('ses_p')).toBeUndefined();
+
+    // The real first admission is what feeds.
+    await bridge.handlePrompt(makePromptEvent({ messageID: 'msg_real' }));
+    expect(tracker.firstAdmission('ses_p')).toBe('msg_real');
+    expect(
+      tracker.peekByCallId('call_resume', 'ses_parent')?.inputMessageID,
+    ).toBe('msg_real');
+  });
+
+  /** Feed a real tracker from the bridge's raw admission feed. */
+  function trackedBridge(
+    tracker: ReturnType<typeof createPendingCallTracker>,
+    chatMessage?: (input: Record<string, unknown>) => Promise<void>,
+  ) {
+    return {
+      bridge: createSessionPromptBridge(
+        async (input) => {
+          await chatMessage?.(input as Record<string, unknown>);
+        },
+        (sessionID, messageID) => tracker.noteAdmission(sessionID, messageID),
+      ),
+    };
+  }
+
+  // Bridge feed ordering, dedupe, and state-forward exclusion are pinned
+  // above; first-wins/binding/ambiguity tracker semantics (firstAdmission,
+  // peekByCallId) are pinned in pending-call-tracker.test.ts and
+  // run-input-anchor.test.ts.
+});
+
 describe('context handler: v2 single cache breakpoint', () => {
   test('observeContextAgent runs and the per-request emulation is skipped', async () => {
     const observed: string[] = [];
     const handler = createSessionContextHandler({
       interviewHandleContext: async () => {},
-      // Native prompt-hook mode: no chatMessage emulation dep — agent
-      // tracking flows through observeContextAgent instead.
+      // Native prompt-hook mode: agent tracking flows through observeContextAgent.
       observeContextAgent: async (event) => {
         observed.push(event.sessionID);
       },
