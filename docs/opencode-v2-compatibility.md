@@ -15,10 +15,10 @@ removed, and v1-era skill drafts expose `{source, list}` rather than `add`.
 The adapter targets the v2 plugin API surface (see
 [The v2 plugin API surface](#the-v2-plugin-api-surface-this-adapter-uses)),
 and the compile-time mirror guard below is pinned to `@opencode/plugin`
-2.1.4. Typecheck covers the consumed listing filters, nullable continuation
+2.2.0. Typecheck covers the consumed listing filters, nullable continuation
 cursors, native execution event envelope, compaction result names and the
 existing hook/permission contracts. This is source-contract coverage against
-v2.1.4; the latest live-host smoke baseline remains the version stated below.
+v2.2.0; the latest live-host smoke baseline remains the version stated below.
 
 The 2.1 replay renames do not require rewriting host-owned data here: the
 compaction bridge leaves `result.native` and `metadata.keepID` untouched.
@@ -98,11 +98,11 @@ Three builds are produced:
 | `./tui` | `dist/tui2.js` | `build:tui` | same external set as `build:plugin` (composes the v1 TUI entry; inlines zod) |
 
 The optional `@opentui/*` pins (0.5.11) provide the v2 TUI entry's rendering
-stack. The development-only `@opencode/plugin` 2.1.4 contract declares an
-optional OpenTUI peer floor of `>=0.6.8`. Runtime pins stay unchanged in
-this patch; TUI runtime compatibility with that peer floor is unverified. `@opentui/solid` pins
-`solid-js` exactly (0.5.12 still requires 1.9.12), so any future OpenTUI
-bump must re-check that pin.
+stack. The development-only `@opencode/plugin` 2.2.0 contract declares an
+optional OpenTUI peer floor of `0.7.0`; the runtime pins track that family
+(`@opentui/core`/`@opentui/solid` 0.7.0) so the dependency-contract test and
+the host agree. `@opentui/solid` pins `solid-js` exactly (0.7.0 requires
+1.9.12), so any future OpenTUI bump must re-check that pin.
 
 v2's plugin resolver tries the `server` subpath first
 (`subpaths: ["server", ""]`), which the exports map resolves directly to
@@ -135,7 +135,7 @@ Verified live on OpenCode v2 (all bridges green — health check
 name for the chat.headers bridge; the event stream and bridges are exercised end-to-end on the stable host;
 since the council 2026-10-23 removal the plugin creates no wake scheduler on
 v2 — terminal delivery is the host's native background notifier). v2 conformance is compile-time-pinned by the
-mirror-conformance guard against the `@opencode/plugin` 2.1.4
+mirror-conformance guard against the `@opencode/plugin` 2.2.0
 devDependency and exercised by the mock-driven bridge tests. Every v2
 API the adapter touches is
 capability-probed at runtime (`s.switchModel`, `ctx.generate`, …), so a host
