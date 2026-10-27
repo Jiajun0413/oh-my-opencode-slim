@@ -20,6 +20,14 @@ cursors, native execution event envelope, compaction result names and the
 existing hook/permission contracts. This is source-contract coverage against
 v2.2.0; the latest live-host smoke baseline remains the version stated below.
 
+The 2.2.0 release adds the Desktop GUI plugin SDK, per-session
+`session.instructions.entry.*`, type-filtered event subscriptions,
+`experimental.generate`, and richer media endpoints. OMOS consumes none of the
+GUI surface and keeps its existing promise-adapter bridges; the additions are
+backward-compatible on the paths this adapter uses. The native patch tool is
+still named `patch` with a `{ patchText }` input, and the apply-patch preflight
+now serves both that name and v1's `apply_patch`.
+
 The 2.1 replay renames do not require rewriting host-owned data here: the
 compaction bridge leaves `result.native` and `metadata.keepID` untouched.
 OMO does not use the removed credential-configuration write shape in its

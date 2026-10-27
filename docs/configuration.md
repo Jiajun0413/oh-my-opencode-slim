@@ -66,10 +66,12 @@ features. This is a temporary escape hatch:
 OH_MY_OPENCODE_SLIM_DISABLE=1 opencode
 ```
 
-Set `OH_MY_OPENCODE_SLIM_TUI_REFRESH_MS` to override the sidebar's 1-second
-config re-read interval, in milliseconds. Non-numeric values and values below
-10 fall back to the default. This knob exists mainly to speed up the test
-suite; leave it unset for normal use.
+Set `OH_MY_OPENCODE_SLIM_TUI_REFRESH_MS` to override the TUI config re-read
+interval, in milliseconds. The default is 1s while the sidebar is on (the
+poll drives rendering) and 5s while the sidebar is off (config-only; it still
+detects external `multiplexer.type` edits). Non-numeric values and values
+below 10 fall back to the default. This knob exists mainly to speed up the
+test suite; leave it unset for normal use.
 
 If OmO-slim detects an invalid plugin config for the current project, the TUI sidebar shows a warning. Run `oh-my-opencode-slim doctor` from your project root for full diagnostics.
 
@@ -197,13 +199,42 @@ council-and-observer-only setup turns off the rest:
   "backgroundJobs": { "enabled": false },
   "interview": { "enabled": false },
   "marketplace": { "enabled": false },
-  "sidebar": false,
+  "tui": false,
   "liveConfigRefresh": false,
-  "disabled_hooks": ["auto-update-checker"],
-  "disabled_commands": ["deepwork", "reflect", "loop"],
+  "fallback": { "enabled": false },
+  "webfetch": { "enabled": false },
+  "multiplexer": { "type": "none" },
+  "companion": { "enabled": false },
+  // Keep council + observer; enable observer by naming only the other
+  // built-ins here, then set a vision-capable model for it.
+  "disabled_agents": ["explorer", "oracle", "designer", "fixer"],
+  "agents": {
+    "orchestrator": { "skills": [] },
+    "observer": { "skills": [] },
+    "council": { "skills": [] },
+    "councillor": { "skills": [] }
+  },
   "disabled_mcps": ["context7", "gh_grep"],
+  "disabled_commands": ["interview", "implement", "deepwork", "reflect", "loop"],
+  "disabled_hooks": [
+    "phase-reminder", "foreground-fallback", "deepwork-guard", "deepwork-goal",
+    "cache-monitor", "json-error-recovery", "tool-loop-guard",
+    "search-path-guard", "absolute-path-rescue", "apply-patch",
+    "auto-update-checker"
+  ],
+  "disabled_tools": [
+    "ast_grep_search", "ast_grep_replace", "acp_run",
+    "marketplace_inspect", "marketplace_manage",
+    "task_cancel", "task_message", "task_status", "task_reply"
+  ]
 }
 ```
+
+`tui: false` gates the TUI client process only; the server-side council,
+observer, agents, and hooks keep working. Remove it (and optionally set
+`sidebar: false` instead) when you want the OMOS sidebar and commands without
+the rest. `interview.enabled: false` also disables `/implement`, because
+`/implement` feeds the same interview flow.
 
 A disabled subsystem is not constructed at all: no tools, listeners, timers,
 state files, or servers. With the managed lifecycle off, native OpenCode
@@ -220,6 +251,7 @@ and [Council](council.md) for what remains.
 | `preset` | string | - | Active preset name (e.g. `"openai"`, `"best"`) |
 | `setDefaultAgent` | boolean | `true` | When `true`, sets OpenCode's `default_agent` to the orchestrator if unset or pointing at a subagent; `false` leaves it untouched |
 | `sidebar` | boolean | `true` | Master switch for the OMOS TUI sidebar surface (the agent list it renders and its state file). When `false`, the plugin never registers or renders the sidebar and writes no sidebar state; the native host sidebar is untouched, and pane management keeps following `multiplexer` config changes |
+| `tui` | boolean | `true` | Master switch for all OMOS TUI surfaces: the sidebar, `/preset`, `/killall`, `/subagent`, and the update notice. When `false`, the TUI entry registers nothing; server-side agents, council, observer, hooks, and tools are untouched. Stronger than `sidebar: false`. |
 | `liveConfigRefresh` | boolean | `true` | v2 only: master switch for the live config-file watcher that reloads runtime model/preset profiles when `oh-my-opencode-slim.json(c)` changes on disk. When `false`, v2 does not watch config files and file edits apply only after a restart; explicit `/preset` writes still refresh the current generation where applicable |
 | `stripOrchestratorModel` | boolean | `false` | Preserve a runtime `/model` selection for the orchestrator after subagent dispatch by omitting its configured model from the SDK config. A selected preset's explicit `orchestrator.model` is retained. Without a runtime selection, this opt-in delegates the initial orchestrator choice to OpenCode's session default. |
 | `routingBlock` | boolean | `true` | When false, removes the `<Agents>` routing block from the built-in orchestrator prompt. The host's native delegation-tool roster still lists every enabled agent with its one-line description, but it carries no Delegate/Don't routing criteria — the block's routing guidance (~300 tokens) has no roster equivalent, so `false` trades routing quality for tokens, or drops stock routing claims that drift against custom agent prompts (`agents.<name>.prompt`). Applies on v1 and v2 hosts. No effect when an orchestrator.md override already replaces the whole prompt. |
@@ -291,7 +323,7 @@ and [Council](council.md) for what remains.
 | `disabled_tools` | string[] | `[]` | Slim tool names to disable globally. Disabled Slim tools are not registered with OpenCode and cannot be used by agents; OpenCode built-in tools are not affected |
 | `disabled_skills` | string[] | `[]` | Skill names to disable globally. Disabled skills are not granted to agents, and disabled bundled skills are not registered; listing `reflect` here also disables the `/reflect` command |
 | `disabled_hooks` | string[] | `[]` | Hook names to disable globally: `phase-reminder`, `foreground-fallback`, `deepwork-guard`, `deepwork-goal`, `chat-headers`, `cache-monitor`, `json-error-recovery`, `tool-loop-guard`, `search-path-guard`, `absolute-path-rescue`, `apply-patch`, `council-inject`, `auto-update-checker`. `auto-update-checker` gates update **checking** and installation together, so it is stronger than `autoUpdate`, which only controls installation. Unknown values are stripped with a warning when the config loads; a value consisting only of unknown names is treated as unset, so a lower config layer's list still applies. See [Hooks](#hooks) |
-| `disabled_commands` | string[] | `[]` | Slash commands to disable globally: `interview`, `implement`, `deepwork`, `reflect`, `loop`, `preset`. Disabled commands are neither registered nor intercepted at execution time, so a user-defined command with the same name is left untouched. Listing `reflect` in `disabled_skills` also disables the `/reflect` command. See [Slash Commands](#slash-commands) |
+| `disabled_commands` | string[] | `[]` | Slash commands to disable globally: `interview`, `implement`, `deepwork`, `reflect`, `loop`, `preset`, `killall`, `subagent`. Disabled commands are neither registered nor intercepted at execution time, so a user-defined command with the same name is left untouched. Listing `reflect` in `disabled_skills` also disables the `/reflect` command. See [Slash Commands](#slash-commands) |
 | `deepworkGuardMode` | `"shadow"` \| `"enforce"` | `"shadow"` | `shadow` records receipts without blocking; `enforce` blocks completion writes whose tombstone references artifacts with no receipt. Disable the guard via `disabled_hooks` (`deepwork-guard`) |
 | `webfetch.enabled` | boolean | `true` | When `false`, the enhanced `webfetch` is not registered and OpenCode's built-in is used. See [Webfetch](webfetch.md) |
 | `fallback.enabled` | boolean | `true` | Enable Slim's foreground model-chain failover. It does not configure OpenCode provider/AI-SDK retries. On **v2 hosts** the replay path (abort + re-prompt) stays disabled — the v2 `switchModel` has no per-turn/atomic conditional form, so an in-flight replay could commit after a newer user turn has taken over — while the retry-hook steering path runs: host retry events are absorbed up to `fallback.maxRetries`, then the model is switched in place via the host `session.switchModel` and the host retries the current turn on the new model. The same switch disables both paths. |
@@ -1223,7 +1255,7 @@ Available hooks:
 
 - **Prompt injection**: `phase-reminder` (per-turn scheduler-workflow reminder on orchestrator messages), `deepwork-goal` (post-compaction goal pointer, delivered once per compaction epoch), `council-inject` (keyword-triggered Council Mode procedure, injected once per session at the first trigger).
 - **Model failover**: `foreground-fallback` — same effect as `fallback.enabled = false`.
-- **Tool guards**: `json-error-recovery`, `tool-loop-guard`, `search-path-guard`, `absolute-path-rescue`, `apply-patch` — each stops intercepting tool calls entirely, so malformed output, repeated identical calls, and invalid or guessed paths surface raw to the model.
+- **Tool guards**: `json-error-recovery`, `tool-loop-guard`, `search-path-guard`, `absolute-path-rescue`, `apply-patch` (v1 `apply_patch`, v2 `patch`) — each stops intercepting tool calls entirely, so malformed output, repeated identical calls, and invalid or guessed paths surface raw to the model.
 - **Deepwork**: `deepwork-goal` turns the post-compaction goal pointer off (the model then relies on the skill's resume discipline alone); `deepwork-guard` turns the receipt/claim guard off (see `deepworkGuardMode`).
 - **Update checking**: `auto-update-checker` — stops both the startup update check (including the notification) and the automatic installation. It is the stronger switch: `autoUpdate: false` only suppresses installation, notifications may still appear.
 - **Telemetry / headers**: `cache-monitor` (prompt-cache bust watchdog; warnings stop), `chat-headers` (Copilot `x-initiator` header on both the v1 `chat.headers` hook and the v2 `model.request` bridge).
@@ -1243,7 +1275,7 @@ Disable built-in commands via `disabled_commands`:
 { "disabled_commands": ["interview", "deepwork"] }
 ```
 
-Available commands: `interview`, `implement`, `deepwork`, `reflect`, `loop`, `preset`. Disabled commands are neither registered nor intercepted at execution time, so a user-defined command with the same name is left untouched. Listing `reflect` in `disabled_skills` also disables the `/reflect` command.
+Available commands: `interview`, `implement`, `deepwork`, `reflect`, `loop`, `preset`, `killall`, `subagent`. Disabled commands are neither registered nor intercepted at execution time, so a user-defined command with the same name is left untouched. Listing `reflect` in `disabled_skills` also disables the `/reflect` command. `/killall` and `/subagent` are TUI commands; `tui: false` removes the whole TUI surface, while `disabled_commands` removes only the named command.
 
 Invalid entries are stripped with a warning when the config loads; a value consisting only of unknown names is treated as unset, so a lower config layer's list still applies — it is not an explicit empty override.
 

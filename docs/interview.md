@@ -5,6 +5,14 @@
 The command can be disabled globally with `"disabled_commands": ["interview"]` in
 the Slim configuration; a disabled `/interview` is not registered.
 
+The whole interview subsystem can be cold-gated with
+`"interview": { "enabled": false }`. That switch is stronger than
+`disabled_commands`: the interview manager, browser server, and tools are not
+constructed at all. It also disables `/implement`, because `/implement` feeds
+the same interview flow; use `disabled_commands` when you want to hide only the
+command name while keeping the subsystem available. Every feature remains
+available when the switch is left at its default (`true`).
+
 Use it when chat feels too loose and you want a cleaner question/answer flow plus a markdown spec saved in your repo.
 
 > Tip: `/interview` usually works well with a fast model. If the flow feels slower than it should, switch models in OpenCode with `Ctrl+X`, then `m`, and pick a faster one.
