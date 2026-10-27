@@ -39,7 +39,11 @@ import {
 import type { ConfigLoadWarning, ConfigLoadWarningKind } from './config/loader';
 import { RuntimeConfig } from './config/runtime';
 import { getBuildInfo } from './generated/build-info';
-import { HEALTH_CHECK, minimumExpectedToolCount } from './health-check';
+import {
+  HEALTH_CHECK,
+  minimumExpectedAgentCount,
+  minimumExpectedToolCount,
+} from './health-check';
 import {
   COUNCIL_INJECT_METADATA_KEY,
   createAbsolutePathRescueHook,
@@ -599,6 +603,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     ownedTuiActivitySessions.clear();
   };
   let sessionLifecycle: SessionLifecycle | undefined;
+  // Mirror of the runtime fallback switches, hoisted out of the try so the
+  // returned hooks object can gate v2-only surfaces (retry registration).
+  let fallbackRetryHookEnabled = false;
 
   let chatHeadersHook: ReturnType<typeof createChatHeadersHook> | undefined;
   let foregroundFallback: ForegroundFallbackManager | undefined;
@@ -607,10 +614,14 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     | ((sessionID: string) => SessionTeamBundle | undefined)
     | undefined;
   let selectedMarketplacePackageIds: readonly string[] = [];
-  let deepworkCommandHook: ReturnType<typeof createDeepworkCommandHook>;
-  let deepworkGuardHook: ReturnType<typeof createDeepworkGuardHook>;
-  let reflectCommandHook: ReturnType<typeof createReflectCommandHook>;
-  let loopCommandHook: ReturnType<typeof createLoopCommandHook>;
+  let deepworkCommandHook:
+    | ReturnType<typeof createDeepworkCommandHook>
+    | undefined;
+  let deepworkGuardHook: ReturnType<typeof createDeepworkGuardHook> | undefined;
+  let reflectCommandHook:
+    | ReturnType<typeof createReflectCommandHook>
+    | undefined;
+  let loopCommandHook: ReturnType<typeof createLoopCommandHook> | undefined;
   let taskSessionManagerHook:
     | ReturnType<typeof createTaskSessionManagerHook>
     | undefined;
@@ -624,8 +635,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     | ReturnType<typeof createAbsolutePathRescueHook>
     | undefined;
   let toolLoopGuard: ToolLoopGuardHook | undefined;
-  let deepworkGuardAfter: (i: unknown, o: unknown) => Promise<void> =
-    async () => {};
+  let deepworkGuardAfter:
+    | ((i: unknown, o: unknown) => Promise<void>)
+    | undefined;
   let jsonErrorRecoveryAfter: (i: unknown, o: unknown) => Promise<void> =
     async () => {};
   let taskSessionManagerAfter: (i: unknown, o: unknown) => Promise<void> =
@@ -645,14 +657,14 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let admissionRuntimeLease: AdmissionRuntimeLease | undefined;
   let finalHostAgentConfig: Record<string, unknown> | undefined;
   let interviewManager: ReturnType<typeof createInterviewManager> | undefined;
-  let companionManager: CompanionManager;
+  let companionManager: CompanionManager | undefined;
   let revivedRunTracker: ReturnType<typeof createRevivedRunTracker> | undefined;
   let terminalGate: BackgroundJobTerminalGate | undefined;
   let markRevivedRunPending: (taskID: string) => void = () => {};
   let markRevivedRunSettled: (taskID: string) => void = () => {};
   let getRevivedContextFiles = (_taskID: string): ContextFile[] => [];
   let pruneRevivedContext = () => {};
-  const taskActivityTracker = new TaskActivityTracker();
+  let taskActivityTracker: TaskActivityTracker | undefined;
   let interviewSubmitService: ReturnType<
     typeof createInterviewManager
   >['service'];
@@ -917,21 +929,33 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // hook, wake scheduler, or task_* / wait_for_user tool factories. The
     // native OpenCode task/subagent machinery stays completely untouched.
     const lifecycleEnabled = runtime.backgroundJobsEnabled;
+    if (lifecycleEnabled) {
+      taskActivityTracker = new TaskActivityTracker();
+    }
     const activePresetName = runtime.getRuntimePreset() ?? config.preset;
-    selectedMarketplacePackageIds = resolveDesiredMarketplacePackageIds(
-      config,
-      activePresetName,
-    );
+    selectedMarketplacePackageIds = runtime.marketplaceEnabled
+      ? resolveDesiredMarketplacePackageIds(config, activePresetName)
+      : [];
     rewriteDisplayNameMentions = createDisplayNameMentionRewriter(runtime);
     // Host flavor marker ('v2' on OpenCode v2 hosts, set by the v2 client
     // shim; absent on v1). Threads the native delegation vocabulary into
     // prompt assembly so v2 prompts say subagent(...)/agent directly.
     const delegation = delegationWording(hostFlavor);
-    // Slash-command hooks are lifecycle-independent: they only intercept
-    // their own runtime commands.
-    deepworkCommandHook = createDeepworkCommandHook();
-    reflectCommandHook = createReflectCommandHook();
-    loopCommandHook = createLoopCommandHook();
+    // Slash-command hooks are lifecycle-independent, but disabled commands
+    // need neither a handler nor its captured state.
+    const commandOptions = {
+      disabledCommands: runtime.disabledCommands,
+      disabledSkills: runtime.disabledSkills,
+    };
+    if (isCommandEnabled('deepwork', commandOptions)) {
+      deepworkCommandHook = createDeepworkCommandHook();
+    }
+    if (isCommandEnabled('reflect', commandOptions)) {
+      reflectCommandHook = createReflectCommandHook();
+    }
+    if (isCommandEnabled('loop', commandOptions)) {
+      loopCommandHook = createLoopCommandHook();
+    }
     agentDefs = createAgents(runtime, {
       projectDirectory: ctx.directory,
       hostFlavor,
@@ -1208,11 +1232,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           sessionMetadata.markTaskManaged(sessionID);
         },
         isFallbackInProgress: (sessionID) =>
-          foregroundFallback!.isFallbackInProgress(sessionID),
+          foregroundFallback?.isFallbackInProgress(sessionID) ?? false,
         willAttemptFallback: (sessionID) =>
-          foregroundFallback!.willAttemptFallback(sessionID),
+          foregroundFallback?.willAttemptFallback(sessionID) ?? false,
         fallbackFailureReason: (sessionID) =>
-          foregroundFallback!.fallbackFailureReason(sessionID),
+          foregroundFallback?.fallbackFailureReason(sessionID) ??
+          'Model fallback is disabled.',
         coordinator: sessionLifecycle,
         revivedRunTracker,
         onChildInputWait: (notification) => {
@@ -1261,7 +1286,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
               hasInputWait: (sessionID) =>
                 taskSessionManagerHook!.hasInputWait(sessionID),
               isFallbackInProgress: (sessionID) =>
-                foregroundFallback!.isFallbackInProgress(sessionID),
+                foregroundFallback?.isFallbackInProgress(sessionID) ?? false,
               resolveSelection: lifecycleSelectionResolver,
               // C2 writer-lane predicate: the queued child's agent from the board
               // record, graded by its role's write permission data. A missing
@@ -1661,6 +1686,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     const fallbackUserEnabled =
       runtime.fallback.enabled !== false &&
       !runtime.disabledHooks.has('foreground-fallback');
+    fallbackRetryHookEnabled = fallbackUserEnabled;
     const fallbackEnabled = fallbackUserEnabled && hostFlavor !== 'v2';
     const v2RetryEnabled = fallbackUserEnabled;
     if (fallbackUserEnabled && hostFlavor === 'v2') {
@@ -1674,43 +1700,46 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // registry finalize and every successful profile refresh. The manager
     // aliases this record; see publishChainGeneration.
     foregroundFallbackChains = runtime.modelArrays;
-    foregroundFallback = new ForegroundFallbackManager(
-      foregroundFallbackChains,
-      fallbackEnabled,
-      ctx,
-      runtime.fallback.maxRetries,
-      sessionLifecycle,
-      // A managed background-task session switching models mid-flight must
-      // move its admission accounting (provider/model caps) to the new
-      // model. No-op for unknown/non-task sessions; idempotent per model.
-      // Undefined when the lifecycle is off: no admission runtime exists.
-      lifecycleEnabled
-        ? (sessionID, model) =>
-            backgroundTaskConcurrency?.migrateTask(sessionID, model)
-        : undefined,
-      runtime.fallback.initialRetryDelayMs,
-      runtime.fallback.retryDelayMs,
-      backgroundFallbackHandoff,
-      // Identify confirmed background children even after cancellation or
-      // termination, so handoff preparation rejects a delayed stale replay.
-      // Undefined remains exclusive to foreground/unmanaged sessions, and
-      // is the honest value when no board exists.
-      lifecycleEnabled
-        ? (sessionID) => {
-            const record = backgroundJobBoard?.get(sessionID);
-            return record?.background === true ? record.generation : undefined;
-          }
-        : undefined,
-      lifecycleEnabled
-        ? (sessionID) => backgroundJobBoard?.hasRunning(sessionID) ?? false
-        : undefined,
-      v2RetryEnabled,
-    );
+    foregroundFallback = fallbackUserEnabled
+      ? new ForegroundFallbackManager(
+          foregroundFallbackChains,
+          fallbackEnabled,
+          ctx,
+          runtime.fallback.maxRetries,
+          sessionLifecycle,
+          // A managed background-task session switching models mid-flight must
+          // move its admission accounting (provider/model caps) to the new
+          // model. No-op for unknown/non-task sessions; idempotent per model.
+          // Undefined when the lifecycle is off: no admission runtime exists.
+          lifecycleEnabled
+            ? (sessionID, model) =>
+                backgroundTaskConcurrency?.migrateTask(sessionID, model)
+            : undefined,
+          runtime.fallback.initialRetryDelayMs,
+          runtime.fallback.retryDelayMs,
+          backgroundFallbackHandoff,
+          // Identify confirmed background children even after cancellation or
+          // termination, so handoff preparation rejects a delayed stale replay.
+          // Undefined remains exclusive to foreground/unmanaged sessions, and
+          // is the honest value when no board exists.
+          lifecycleEnabled
+            ? (sessionID) => {
+                const record = backgroundJobBoard?.get(sessionID);
+                return record?.background === true
+                  ? record.generation
+                  : undefined;
+              }
+            : undefined,
+          lifecycleEnabled
+            ? (sessionID) => backgroundJobBoard?.hasRunning(sessionID) ?? false
+            : undefined,
+          v2RetryEnabled,
+        )
+      : undefined;
 
     // P0 cold gating: each on-demand tool guard is only constructed when
     // its disabled_hooks entry is absent, so a disabled guard performs no
-    // construction work and its composed before/after calls no-op. Deepwork
-    // guard keeps its per-call self-gate inside its own module.
+    // construction work or per-tool-call work.
     if (!runtime.disabledHooks.has('apply-patch')) {
       applyPatch = createApplyPatchHook(ctx);
     }
@@ -1723,7 +1752,13 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       absolutePathRescue = createAbsolutePathRescueHook(ctx);
     }
 
-    deepworkGuardHook = createDeepworkGuardHook(ctx);
+    if (!runtime.disabledHooks.has('deepwork-guard')) {
+      const hook = createDeepworkGuardHook(ctx);
+      deepworkGuardHook = hook;
+      deepworkGuardAfter = wrapPostToolHook('deepwork-guard', (i, o) =>
+        hook['tool.execute.after'](i as never, o as never),
+      );
+    }
     if (!runtime.disabledHooks.has('json-error-recovery')) {
       const jsonErrorRecoveryHook = createJsonErrorRecoveryHook(ctx);
       jsonErrorRecoveryAfter = wrapPostToolHook('json-error-recovery', (i, o) =>
@@ -1734,10 +1769,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       toolLoopGuard = createToolLoopGuardHook({ directory: ctx.directory });
     }
 
-    // Pre-created wrapped handlers for tool.execute.after (error-isolated)
-    deepworkGuardAfter = wrapPostToolHook('deepwork-guard', (i, o) =>
-      deepworkGuardHook['tool.execute.after'](i as never, o as never),
-    );
+    // Pre-created wrapped handler for tool.execute.after (error-isolated).
     if (taskSessionManagerHook) {
       taskSessionManagerAfter = wrapPostToolHook(
         'task-session-manager',
@@ -1759,12 +1791,14 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       interviewManager = createInterviewManager(ctx, config);
       interviewSubmitService = interviewManager.service;
     }
-    companionManager = new CompanionManager(
-      companionSessionIdForDirectory(ctx.directory),
-      ctx.directory,
-      runtime.companion,
-      hostFlavor,
-    );
+    if (runtime.companion?.enabled === true) {
+      companionManager = new CompanionManager(
+        companionSessionIdForDirectory(ctx.directory),
+        ctx.directory,
+        runtime.companion,
+        hostFlavor,
+      );
+    }
     if (lifecycleEnabled) {
       // Invariant: the lifecycle block above initialized the shared recovery
       // and alias state. Checked once here so TypeScript narrows it for the
@@ -1882,9 +1916,11 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
     toolCount =
       Object.keys(tools).length +
-      ['marketplace_inspect', 'marketplace_manage'].filter(
-        (name) => !runtime.disabledTools.includes(name),
-      ).length;
+      (runtime.marketplaceEnabled
+        ? ['marketplace_inspect', 'marketplace_manage'].filter(
+            (name) => !runtime.disabledTools.includes(name),
+          ).length
+        : 0);
   } catch (err) {
     terminalGate?.dispose();
     admissionRuntimeLease?.release();
@@ -1909,6 +1945,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   // Skip MCP threshold when user explicitly disabled all built-in MCPs
   const mcpThreshold =
     runtime.disabledMcps.length > 0 ? 0 : HEALTH_CHECK.minMcps;
+  const minAgents = minimumExpectedAgentCount(
+    runtime.disabledAgents ? [...runtime.disabledAgents] : [],
+    Boolean(runtime.council),
+  );
   const toolThreshold = minimumExpectedToolCount(
     runtime.disabledTools,
     runtime.webfetch.enabled !== false,
@@ -1916,13 +1956,13 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     runtime.backgroundJobsEnabled,
   );
   if (
-    agentCount < HEALTH_CHECK.minAgents ||
+    agentCount < minAgents ||
     toolCount < toolThreshold ||
     mcpCount < mcpThreshold
   ) {
     const msg = [
       'Health check: registrations suspiciously low.',
-      `  agents: ${agentCount} (expected >=${HEALTH_CHECK.minAgents})`,
+      `  agents: ${agentCount} (expected >=${minAgents})`,
       `  tools:  ${toolCount} (expected >=${toolThreshold})`,
       `  mcps:   ${mcpCount} (expected >=${mcpThreshold})`,
       'This usually means a dependency failed to resolve (jsdom, etc).',
@@ -1971,7 +2011,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     }
   }
 
-  companionManager.onLoad();
+  companionManager?.onLoad();
 
   function resolveTuiVariantForModel(
     agentName: string,
@@ -2181,13 +2221,13 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         });
       }
       if (isCommandEnabled('deepwork', commandGate)) {
-        deepworkCommandHook.registerCommand(opencodeConfig);
+        deepworkCommandHook?.registerCommand(opencodeConfig);
       }
       if (isCommandEnabled('reflect', commandGate)) {
-        reflectCommandHook.registerCommand(opencodeConfig);
+        reflectCommandHook?.registerCommand(opencodeConfig);
       }
       if (isCommandEnabled('loop', commandGate)) {
-        loopCommandHook.registerCommand(opencodeConfig);
+        loopCommandHook?.registerCommand(opencodeConfig);
       }
     },
     retire() {
@@ -2605,8 +2645,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // Per-instance background-default flip handle: v2 setup arms it after
     // its description rewrite verifies and disarms it with its teardown.
     'v2.backgroundDefaultFlip': backgroundDefaultFlip,
-    'v2.session.retry': (input: never, switchModel: never) =>
-      foregroundFallback?.handleV2Retry(input, switchModel),
+    'v2.session.retry': fallbackRetryHookEnabled
+      ? (input: never, switchModel: never) =>
+          foregroundFallback?.handleV2Retry(input, switchModel)
+      : undefined,
     // v2-only extension hook: pin the chain generation in effect when a
     // child session registers — the same generation as its frozen profile.
     'v2.pinSessionChains': (
@@ -2869,7 +2911,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         toolLoopGuard?.resetSession(eventSessionID);
       }
       if (eventSessionID) {
-        applyActivityEvent(taskActivityTracker, event);
+        if (taskActivityTracker) applyActivityEvent(taskActivityTracker, event);
         if (
           event.type === 'session.status' &&
           (statusType === 'busy' || statusType === 'retry')
@@ -2927,7 +2969,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
               isInternalAdmission(info.sessionID, info.parentID));
           if (!internalAdmission) {
             sessionMetadata.setModel(info.sessionID, model);
-            companionManager.onSessionModelChanged({
+            companionManager?.onSessionModelChanged({
               sessionId: info.sessionID,
               model,
             });
@@ -3055,7 +3097,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         event.type === 'permission.asked' ||
         event.type === 'question.asked'
       ) {
-        companionManager.onWaitingInput(companionRequestId);
+        companionManager?.onWaitingInput(companionRequestId);
       }
 
       if (
@@ -3063,7 +3105,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         event.type === 'question.replied' ||
         event.type === 'question.rejected'
       ) {
-        companionManager.onInputResolved();
+        companionManager?.onInputResolved();
       }
 
       const companionStatus = normalizeCompanionSessionStatus(
@@ -3072,7 +3114,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       );
       if (eventSessionID && companionStatus) {
         const job = backgroundJobBoard?.get(eventSessionID);
-        companionManager.onSessionStatus({
+        companionManager?.onSessionStatus({
           sessionId: eventSessionID,
           agent: sessionMetadata.getAgent(eventSessionID),
           status: companionStatus,
@@ -3089,7 +3131,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         if (sessionID) {
           sessionLifecycle?.dispatchSessionDeleted(sessionID);
         }
-        companionManager.onSessionDeleted(sessionID);
+        companionManager?.onSessionDeleted(sessionID);
         if (sessionID) {
           v1InternalSelectionOverrides.delete(sessionID);
           sessionMetadata.delete(sessionID);
@@ -3129,7 +3171,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // onLoad, and if it fails before that the detached companion would
       // survive until process exit. Idempotent (registerActiveManager's
       // replacement path and the process-exit listener tolerate repeats).
-      companionManager.onExit();
+      companionManager?.onExit();
       // Release only this generation's ownership. The admission runtime
       // defers final scheduler/tracker teardown by one macrotask so an
       // immediate config-update re-init can retain active and queued calls.
@@ -3155,7 +3197,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         input as never,
         output as never,
       );
-      await deepworkGuardHook['tool.execute.before'](
+      await deepworkGuardHook?.['tool.execute.before'](
         input as never,
         output as never,
       );
@@ -3225,7 +3267,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       }
 
       if (commandEnabled('deepwork')) {
-        await deepworkCommandHook.handleCommandExecuteBefore(
+        await deepworkCommandHook?.handleCommandExecuteBefore(
           input as {
             command: string;
             sessionID: string;
@@ -3236,7 +3278,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       }
 
       if (commandEnabled('reflect')) {
-        await reflectCommandHook.handleCommandExecuteBefore(
+        await reflectCommandHook?.handleCommandExecuteBefore(
           input as {
             command: string;
             sessionID: string;
@@ -3247,7 +3289,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       }
 
       if (commandEnabled('loop')) {
-        await loopCommandHook.handleCommandExecuteBefore(
+        await loopCommandHook?.handleCommandExecuteBefore(
           input as {
             command: string;
             sessionID: string;
@@ -3553,7 +3595,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           const pendingStatus = pendingTuiBusySessions.get(input.sessionID);
           pendingTuiBusySessions.delete(input.sessionID);
           markTuiAgentActive(input.sessionID, agent, pendingStatus);
-          companionManager.onSessionStatus({
+          companionManager?.onSessionStatus({
             sessionId: input.sessionID,
             agent,
             status: 'busy',
@@ -3584,7 +3626,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
             input.variant ??
             input.model?.variant ??
             output?.message?.model?.variant;
-          companionManager.onSessionModelChanged({
+          companionManager?.onSessionModelChanged({
             sessionId: input.sessionID,
             model,
             ...(liveVariant ? { variant: liveVariant } : {}),
@@ -3851,7 +3893,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     },
 
     'tool.execute.after': async (input, output) => {
-      await deepworkGuardAfter(input, output);
+      await deepworkGuardAfter?.(input, output);
       await jsonErrorRecoveryAfter(input, output);
       await toolLoopGuard?.['tool.execute.after'](
         input as never,

@@ -11,6 +11,7 @@ import { existsSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { CompanionManager, stateFilePath } from './companion/manager';
 import * as hookFactories from './hooks';
 import * as handoffFactories from './hooks/task-session-manager/fallback-observation-transfer';
 import { OhMyOpenCodeLite as plugin } from './index';
@@ -169,17 +170,54 @@ describe('plugin feature gates through exported hooks', () => {
         error: { message: 'Rate limit exceeded' },
         decision: { retry: true, delay: 2_000 },
       };
-      // The host still dispatches the retry hook, but disabled_hooks
-      // suppresses steering internally (v2RetryEnabled=false): the
-      // interface outcome must be a no-op switch and an untouched host
-      // decision.
+      // The host still dispatches the retry hook, but the disabled hook
+      // means no manager is constructed: the interface outcome must be a
+      // no-op switch and an untouched host decision.
       await hooks['v2.session.retry']?.(retry as never, switchModel as never);
-      expect(retrySpy).toHaveBeenCalledTimes(1);
+      expect(retrySpy).toHaveBeenCalledTimes(0);
       expect(switchModel).not.toHaveBeenCalled();
       expect(retry.decision).toEqual({ retry: true, delay: 2_000 });
     } finally {
       await hooks?.dispose?.();
       retrySpy.mockRestore();
+    }
+  });
+
+  test('companion cold gate: disabled companion is not constructed', async () => {
+    await configure({});
+    const onLoadSpy = spyOn(CompanionManager.prototype, 'onLoad');
+    let hooks: PluginHooks | undefined;
+    try {
+      hooks = await createHooks('v2');
+      // companion.enabled defaults to false in this suite's config: no
+      // manager is constructed, so no onLoad (and its state-file cleanup
+      // I/O) ever runs and no state file is created.
+      expect(onLoadSpy).not.toHaveBeenCalled();
+      expect(existsSync(stateFilePath())).toBe(false);
+    } finally {
+      await hooks?.dispose?.();
+      onLoadSpy.mockRestore();
+    }
+  });
+
+  test('companion cold gate: enabled companion loads and cleans up', async () => {
+    await configure({
+      companion: {
+        enabled: true,
+        // Missing binary: registration and state writes run, but the
+        // updater and spawn path touch neither network nor a child.
+        binaryPath: `${projectDir}/missing-companion-bin`,
+      },
+    });
+    const onLoadSpy = spyOn(CompanionManager.prototype, 'onLoad');
+    let hooks: PluginHooks | undefined;
+    try {
+      hooks = await createHooks('v2');
+      expect(onLoadSpy).toHaveBeenCalledTimes(1);
+      expect(existsSync(stateFilePath())).toBe(true);
+    } finally {
+      await hooks?.dispose?.();
+      onLoadSpy.mockRestore();
     }
   });
 

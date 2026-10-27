@@ -1,7 +1,45 @@
 import { describe, expect, test } from 'bun:test';
-import { minimumExpectedToolCount } from './health-check';
+import { ALL_AGENT_NAMES } from './config/constants';
+import {
+  minimumExpectedAgentCount,
+  minimumExpectedToolCount,
+} from './health-check';
 
 describe('plugin health thresholds', () => {
+  test('agent floor accounts for the configured disabled roster', () => {
+    expect(
+      minimumExpectedAgentCount(['explorer', 'oracle', 'designer', 'fixer']),
+    ).toBe(4);
+    expect(minimumExpectedAgentCount(['observer'])).toBe(7);
+    expect(
+      minimumExpectedAgentCount([
+        'explorer',
+        'oracle',
+        'designer',
+        'fixer',
+        'observer',
+      ]),
+    ).toBe(3);
+  });
+
+  test('agent floor omits council agents when no council is configured', () => {
+    expect(minimumExpectedAgentCount(['observer'], false)).toBe(5);
+    expect(
+      minimumExpectedAgentCount(
+        ['explorer', 'oracle', 'designer', 'fixer'],
+        false,
+      ),
+    ).toBe(2);
+    expect(minimumExpectedAgentCount(['observer'], true)).toBe(7);
+  });
+
+  test('agent floor safely handles malformed or exhaustive disabled input', () => {
+    expect(minimumExpectedAgentCount('' as any)).toBe(ALL_AGENT_NAMES.length);
+    expect(minimumExpectedAgentCount(null as any)).toBe(ALL_AGENT_NAMES.length);
+    expect(minimumExpectedAgentCount({} as any)).toBe(ALL_AGENT_NAMES.length);
+    expect(minimumExpectedAgentCount([...ALL_AGENT_NAMES])).toBe(1);
+  });
+
   test('accounts only for intentionally disabled baseline tools', () => {
     expect(minimumExpectedToolCount()).toBe(9);
     expect(minimumExpectedToolCount(['wait_for_user'])).toBe(8);
