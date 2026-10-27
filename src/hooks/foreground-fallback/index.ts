@@ -41,6 +41,7 @@ import { isRecord } from '../../utils/guards';
 import {
   createInternalAgentTextPart,
   isInternalInitiatorPart,
+  isNativeBackgroundTaskNotification,
   SLIM_INTERNAL_INITIATOR_MARKER,
 } from '../../utils/internal-initiator';
 import { log } from '../../utils/logger';
@@ -55,6 +56,7 @@ import {
   parseModelReference,
   withTimeout,
 } from '../../utils/session';
+import { isInternalAdmission } from '../../v2/internal-admissions';
 import type { SessionLifecycle } from '../session-lifecycle';
 import type { createBackgroundFallbackHandoff } from '../task-session-manager/fallback-observation-transfer';
 import { isReplayableUserMessage } from '../types';
@@ -969,9 +971,13 @@ export class ForegroundFallbackManager {
     parts: unknown[],
   ): boolean {
     if (this.replayMessageIds.get(sessionID)?.has(messageID)) return true;
+    // v1 chat.message records internal admissions before message.updated.
+    // Recognize them before advancing the external-turn probe sequence.
+    if (isInternalAdmission(sessionID, messageID)) return true;
     const marked = parts.some(
       (part) =>
         isInternalInitiatorPart(part) ||
+        isNativeBackgroundTaskNotification(part) ||
         (isRecord(part) &&
           typeof part.text === 'string' &&
           part.text.includes(SLIM_INTERNAL_INITIATOR_MARKER)),
