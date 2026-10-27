@@ -1466,11 +1466,16 @@ export function renderSidebar(
   modelNames?: ReadonlyMap<string, string>,
 ): JSX.Element {
   const configStatusRow = buildConfigStatusRow(configInvalid, theme);
+  const presetHoverBackground = resolveHoverBackground({
+    background: theme.background,
+    text: theme.text,
+    hover: theme.hover,
+  });
   const presetRowEl = presetRow
     ? buildPresetRow(
         presetRow,
         theme,
-        resolveHoverBackground(theme),
+        presetHoverBackground,
         interaction?.hasSelectedText,
       )
     : null;
@@ -1500,7 +1505,7 @@ export function renderSidebar(
     },
     [
       box({ flexDirection: 'row', alignItems: 'center' }, [
-        text({ fg: theme.textMuted, width: 2 }, [sidebarOpen ? '▼ ' : '▶ ']),
+        text({ fg: theme.text, width: 2 }, [sidebarOpen ? '▼ ' : '▶ ']),
         box({ paddingRight: 1, backgroundColor: theme.accent }, [
           text(
             {
@@ -1664,7 +1669,7 @@ function resolveMultiplexerType(value: unknown): MultiplexerType {
  * (same hover/click decoration); without one it is a muted, informational
  * line — capability detection happens in the v2 setup, never here.
  */
-function buildPresetRow(
+export function buildPresetRow(
   presetRow: SidebarPresetRow,
   theme: { text: unknown; textMuted: unknown },
   hoverBackground: unknown,
@@ -1712,6 +1717,10 @@ function buildPresetRow(
         ]);
   if (!clickable) return content;
   return decorateInteractiveRow(content, {
+    // Sidebar rows sit on backgroundElement, so using that color as the
+    // hover fill leaves this row visually unchanged. Use the normal hover
+    // color when the host provides one, otherwise derive a visible fill from
+    // the page background and text colors.
     hoverBackground,
     onActivate: presetRow.onActivate,
     hasSelectedText,
