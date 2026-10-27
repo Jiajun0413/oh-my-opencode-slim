@@ -1041,6 +1041,19 @@ describe('createV2Setup e2e', () => {
       expect(
         stored.get('session-preset/v1/ses_child-1').preserveModel,
       ).toBeUndefined();
+      const resumedModel = identities.get('ses_child-1')?.model as {
+        providerID: string;
+        id: string;
+      };
+      expect(resumedModel).toMatchObject({
+        providerID: 'manual',
+        id: 'resumed',
+      });
+      await retry('ses_child-1', resumedModel.providerID, resumedModel.id);
+      expect(switches.at(-1)).toMatchObject({
+        sessionID: 'ses_child-1',
+        model: { providerID: 'test', id: 'a' },
+      });
       await retry('ses_child-1', 'test', 'a');
       expect(switches.at(-1)).toMatchObject({
         sessionID: 'ses_child-1',
