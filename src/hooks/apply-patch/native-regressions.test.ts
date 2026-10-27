@@ -333,19 +333,19 @@ const blocked: Blocked[] = [
       '+export { a, b };',
       '*** End of File',
     ),
-    'apply_patch verification failed:',
+    'patch verification failed:',
   ],
   [
     'T10 unbounded prefix/suffix deletion',
     { 'a.txt': 'start\nold\nx1\nx2\nx3\nx4\nx5\nx6\nx7\nx8\nend\n' },
     patch('*** Update File: a.txt', '@@', ' start', '-stale', '+new', ' end'),
-    'apply_patch verification failed:',
+    'patch verification failed:',
   ],
   [
     'T16 Add followed by Delete',
     {},
     patch('*** Add File: n.txt', '+a', '*** Delete File: n.txt'),
-    'apply_patch verification failed:',
+    'patch verification failed:',
   ],
   [
     'N6 mid-chunk empty line is rejected',
@@ -359,7 +359,7 @@ const blocked: Blocked[] = [
       '',
       '     return x',
     ),
-    'apply_patch validation failed:',
+    'patch validation failed:',
   ],
   [
     'N8 indented @@ would edit wrong native occurrence',
@@ -373,7 +373,7 @@ const blocked: Blocked[] = [
       '-        return 1',
       '+        return 2',
     ),
-    'Native apply_patch would not reproduce',
+    'Native patch tool would not reproduce',
   ],
   [
     'Pa missing @@ insertion anchor fails closed',

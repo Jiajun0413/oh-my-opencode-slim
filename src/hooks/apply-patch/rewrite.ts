@@ -266,7 +266,7 @@ export async function rewritePatch(
         if (!rewrite && !original) {
           throw new ApplyPatchError(
             'verification',
-            `Native apply_patch would not reproduce the verified update: ${filePath}`,
+            `Native patch tool would not reproduce the verified update: ${filePath}`,
           );
         }
         keepOriginal = original > rewrite;

@@ -14,7 +14,12 @@ function createHook(root = '/tmp/hook-root') {
   } as never);
 }
 
-async function runHook(root: string, patchText: string, worktree?: string) {
+async function runHook(
+  root: string,
+  patchText: string,
+  worktree?: string,
+  tool: string = 'apply_patch',
+) {
   const hook = worktree
     ? createApplyPatchHook({
         client: {} as never,
@@ -23,19 +28,74 @@ async function runHook(root: string, patchText: string, worktree?: string) {
       } as never)
     : createHook(root);
   const output = { args: { patchText } };
-  await hook['tool.execute.before']({ tool: 'apply_patch' }, output);
+  await hook['tool.execute.before']({ tool }, output);
   return output.args.patchText;
 }
 
 describe('apply-patch/hook', () => {
-  test('ignores tools other than apply_patch', async () => {
+  test('passes unrelated tools through byte-identically', async () => {
     const hook = createHook();
     const patchText = '*** Begin Patch\n*** End Patch';
-    const output = { args: { patchText } };
+    for (const tool of ['read', 'grep', 'patched']) {
+      const output = { args: { patchText } };
 
-    await hook['tool.execute.before']({ tool: 'read' }, output);
+      await hook['tool.execute.before']({ tool }, output);
 
-    expect(output.args.patchText).toBe(patchText);
+      expect(output.args.patchText).toBe(patchText);
+    }
+  });
+
+  test('serves the v2 native patch tool: rewrites and mutates args in place', async () => {
+    const root = await createTempDir('apply-patch-hook-');
+    await writeFixture(root, 'sample.txt', 'prefix\nstale-value\nsuffix\n');
+    const hook = createHook(root);
+    const patchText = `*** Begin Patch
+*** Update File: sample.txt
+@@
+ prefix
+-old-value
++new-value
+ suffix
+*** End Patch`;
+    const args = { patchText };
+    const output = { args };
+
+    await hook['tool.execute.before']({ tool: 'patch' }, output);
+
+    expect(output.args).toBe(args);
+    expect(args.patchText).toContain('-stale-value');
+    expect(args.patchText).toContain('+new-value');
+
+    await applyPatch(root, args.patchText);
+    expect(await readFile(path.join(root, 'sample.txt'), 'utf-8')).toBe(
+      'prefix\nnew-value\nsuffix\n',
+    );
+  });
+
+  test('v2 patch tool with a non-string patchText passes through untouched', async () => {
+    const hook = createHook();
+    const output = { args: { patchText: 42 } };
+
+    await hook['tool.execute.before']({ tool: 'patch' }, output);
+
+    expect(output.args.patchText).toBe(42);
+  });
+
+  test('apply_patch and patch behave identically on the same patch', async () => {
+    const root = await createTempDir('apply-patch-hook-');
+    await writeFixture(root, 'sample.txt', 'prefix\nstale-value\nsuffix\n');
+    const patchText = `*** Begin Patch
+*** Update File: sample.txt
+@@
+ prefix
+-old-value
++new-value
+ suffix
+*** End Patch`;
+    const viaApplyPatch = await runHook(root, patchText);
+    const viaPatch = await runHook(root, patchText, undefined, 'patch');
+    expect(viaPatch).toBe(viaApplyPatch);
+    expect(viaPatch).not.toBe(patchText);
   });
 
   test('blocks an unrecoverable patch as verification before native execution', async () => {
@@ -53,7 +113,7 @@ describe('apply-patch/hook', () => {
     await expect(
       hook['tool.execute.before']({ tool: 'apply_patch' }, output),
     ).rejects.toThrow(
-      'apply_patch verification failed: Failed to find expected lines',
+      'patch verification failed: Failed to find expected lines',
     );
 
     expect(output.args.patchText).toBe(patchText);
@@ -169,7 +229,7 @@ garbage
     await expect(
       hook['tool.execute.before']({ tool: 'apply_patch' }, output),
     ).rejects.toThrow(
-      'apply_patch validation failed: Invalid patch format: unexpected line in patch chunk: garbage',
+      'patch validation failed: Invalid patch format: unexpected line in patch chunk: garbage',
     );
 
     expect(output.args.patchText).toBe(patchText);
@@ -190,7 +250,7 @@ garbage
     try {
       await expect(
         hook['tool.execute.before']({ tool: 'apply_patch' }, output),
-      ).rejects.toThrow('apply_patch internal error:');
+      ).rejects.toThrow('patch internal error:');
 
       expect(output.args.patchText).toBe(patchText);
     } finally {

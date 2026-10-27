@@ -1801,7 +1801,7 @@ describe('plugin reload generation cleanup', () => {
           } as never,
           { args: { patchText } } as never,
         ),
-      ).rejects.toThrow('apply_patch verification failed');
+      ).rejects.toThrow('patch verification failed');
 
       // absolute-path-rescue rewrites the guessed path to the existing
       // suffix.
