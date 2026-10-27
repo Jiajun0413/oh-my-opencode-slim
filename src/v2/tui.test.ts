@@ -606,6 +606,10 @@ describe('v2 tui preset plugin', () => {
       process.env.XDG_DATA_HOME = path.join(configHome, 'sidebar-data');
       process.env.OPENCODE_LOG_DIR = path.join(configHome, 'logs');
       process.env.OH_MY_OPENCODE_SLIM_TUI_REFRESH_MS = '60000';
+      recordTuiAgentModels(
+        { agentModels: { oracle: 'global/team-b' } },
+        projectDir,
+      );
       const [route, setRoute] = createSignal({
         type: 'session',
         sessionID: 'root-a',
@@ -644,6 +648,11 @@ describe('v2 tui preset plugin', () => {
               status: 'bound',
               presetName: 'server-alpha',
               affects: 'future-children-only',
+              team: {
+                agentModels: { oracle: 'saved/team-a' },
+                agentVariants: {},
+                inheritance: {},
+              },
             };
           },
         }),
@@ -669,10 +678,13 @@ describe('v2 tui preset plugin', () => {
         expect(screen.captureCharFrame()).toContain(
           'Session team snapshot: server-alpha',
         );
+        expect(screen.captureCharFrame()).toContain('team-a');
+        expect(screen.captureCharFrame()).not.toContain('team-b');
 
         setRoute({ type: 'session', sessionID: 'root-b' });
         await screen.renderOnce();
         expect(screen.captureCharFrame()).not.toContain('server-alpha');
+        expect(screen.captureCharFrame()).not.toContain('team-a');
         expect(screen.captureCharFrame()).toContain(
           'Session team snapshot: Loading',
         );
@@ -689,9 +701,15 @@ describe('v2 tui preset plugin', () => {
           status: 'bound',
           presetName: 'late-beta',
           affects: 'future-children-only',
+          team: {
+            agentModels: { oracle: 'saved/late-team' },
+            agentVariants: {},
+            inheritance: {},
+          },
         });
         await screen.renderOnce();
         expect(screen.captureCharFrame()).not.toContain('late-beta');
+        expect(screen.captureCharFrame()).not.toContain('late-team');
         expect(screen.captureCharFrame()).not.toContain('server-alpha');
         expect(requests[1]).toEqual({
           input: { sessionID: 'root-b' },
@@ -718,13 +736,16 @@ describe('v2 tui preset plugin', () => {
     });
 
     test('sidebar overlays the picker selection only on a root orchestrator session', async () => {
-      writeUserConfig(makeConfig() as unknown as Record<string, unknown>);
+      writeUserConfig({ ...makeConfig(), compactSidebar: false });
       process.env.XDG_DATA_HOME = path.join(configHome, 'overlay-data');
       process.env.OPENCODE_LOG_DIR = path.join(configHome, 'logs');
       process.env.OH_MY_OPENCODE_SLIM_TUI_REFRESH_MS = '60000';
       // Static on-disk projection: what the sidebar shows WITHOUT the overlay.
       recordTuiAgentModels(
-        { agentModels: { orchestrator: 'zai-coding-plan/glm-5.3' } },
+        {
+          agentModels: { orchestrator: 'zai-coding-plan/glm-5.3' },
+          agentVariants: { orchestrator: 'medium' },
+        },
         projectDir,
       );
       const [route, setRoute] = createSignal({
@@ -763,9 +784,14 @@ describe('v2 tui preset plugin', () => {
         rpc: () => ({
           read: async (input: { sessionID: string }) => ({
             sessionID: input.sessionID,
-            status: 'unbound',
-            presetName: null,
+            status: 'bound',
+            presetName: 'balanced',
             affects: 'future-children-only',
+            team: {
+              agentModels: { orchestrator: 'saved/preset-root-model' },
+              agentVariants: { orchestrator: 'low' },
+              inheritance: {},
+            },
           }),
         }),
       };
@@ -782,9 +808,11 @@ describe('v2 tui preset plugin', () => {
         nextRoute: unknown,
         expectedModel: string,
         notExpectedModel: string,
+        expectedVariant: string,
       ) => {
         writeUserConfig({
           ...makeConfig(),
+          compactSidebar: false,
           preset,
         } as unknown as Record<string, unknown>);
         setRoute(nextRoute as { type: string; sessionID?: string });
@@ -795,6 +823,8 @@ describe('v2 tui preset plugin', () => {
         });
         const frame = screen?.captureCharFrame() ?? '';
         expect(frame).not.toContain(notExpectedModel);
+        expect(frame).not.toContain('preset-root-model');
+        expect(frame).toMatch(new RegExp(`variant\\s+${expectedVariant}`));
       };
       try {
         cleanup = await tui2Plugin.setup(
@@ -814,6 +844,7 @@ describe('v2 tui preset plugin', () => {
         // static row immediately, before any prompt commits the switch.
         expect(screen.captureCharFrame()).toContain('gemini-x');
         expect(screen.captureCharFrame()).not.toContain('glm-5.3');
+        expect(screen.captureCharFrame()).toMatch(/variant\s+high/);
 
         // Every leg starts from a root-a frame showing gemini-x, so each
         // route change below has an observable transition (no vacuous
@@ -824,24 +855,28 @@ describe('v2 tui preset plugin', () => {
           { type: 'session', sessionID: 'child-1' },
           'glm-5.3',
           'gemini-x',
+          'medium',
         );
         await assertRouteShows(
           'balanced',
           { type: 'session', sessionID: 'root-a' },
           'gemini-x',
           'glm-5.3',
+          'high',
         );
         await assertRouteShows(
           'cheap',
           { type: 'session', sessionID: 'root-b' },
           'glm-5.3',
           'gemini-x',
+          'medium',
         );
         await assertRouteShows(
           'balanced',
           { type: 'home', sessionID: '' },
           'glm-5.3',
           'gemini-x',
+          'medium',
         );
       } finally {
         cleanup?.();

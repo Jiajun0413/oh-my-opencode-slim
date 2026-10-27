@@ -250,8 +250,16 @@ export async function readSessionPreset(
     },
   );
   if (state.sessionID !== sessionID)
-    throw new Error('Session response mismatch.');
+    throw new Error(
+      'The server returned a different session. Reopen Presets to retry.',
+    );
   return state;
+}
+
+export function sessionPresetLabel(state: SessionPresetState): string {
+  return state.status === 'bound'
+    ? (state.presetName ?? '(no named preset)')
+    : 'Not bound';
 }
 
 function assertApplyTarget(run: ManagerRun, target: ApplyTarget): void {
@@ -260,9 +268,7 @@ function assertApplyTarget(run: ManagerRun, target: ApplyTarget): void {
     (target.scope === 'session' &&
       run.ctx.getSessionID?.() !== target.sessionID)
   ) {
-    throw new Error(
-      'The displayed session or workspace changed. Nothing was applied; try again.',
-    );
+    throw new Error('The displayed session or workspace changed.');
   }
 }
 
