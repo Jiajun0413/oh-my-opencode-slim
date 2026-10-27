@@ -24,7 +24,11 @@ function savedState(): SessionPresetState {
     presetName: 'A',
     affects: 'future-children-only',
     team: {
-      agentModels: { oracle: 'saved/team-a' },
+      agentModels: {
+        oracle: 'saved/team-a',
+        designer: 'default',
+        explorer: 'default',
+      },
       agentVariants: { explorer: 'high' },
       inheritance: { explorer: 'session' },
     },
@@ -41,6 +45,7 @@ describe('visible session sidebar team', () => {
     const projected = projectSidebarTeam(snapshot, saved);
     expect(projected.agentModels).toEqual({
       oracle: 'saved/team-a',
+      designer: 'default',
       explorer: 'Inherits session',
     });
     expect(projected.agentVariants).toEqual({ explorer: 'high' });

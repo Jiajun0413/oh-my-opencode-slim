@@ -324,12 +324,12 @@ export function createSessionPresets(options: {
       ? {
           team: {
             agentModels: Object.fromEntries(
-              Object.entries(record.bundle.profiles)
-                .filter(([, profile]) => profile.model)
-                .map(([agent, profile]) => [
-                  agent,
-                  `${profile.model?.providerID}/${profile.model?.id}`,
-                ]),
+              Object.entries(record.bundle.profiles).map(([agent, profile]) => [
+                agent,
+                profile.model
+                  ? `${profile.model.providerID}/${profile.model.id}`
+                  : profile.sidebarModel,
+              ]),
             ),
             agentVariants: Object.fromEntries(
               Object.entries(record.bundle.profiles).flatMap(

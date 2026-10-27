@@ -168,6 +168,7 @@ describe('durable session team presets', () => {
       sidebarModel: 'default',
       sidebarVariant: 'max',
     };
+    saved.profiles.designer = { sidebarModel: 'default' };
     saved.profiles.fixer = {
       model: { providerID: 'test', id: 'saved-A' },
       sidebarModel: 'test/saved-A',
@@ -187,7 +188,12 @@ describe('durable session team presets', () => {
       presetName: 'A',
       affects: 'future-children-only',
       team: {
-        agentModels: { explorer: 'test/saved-A', fixer: 'test/saved-A' },
+        agentModels: {
+          explorer: 'test/saved-A',
+          oracle: 'default',
+          designer: 'default',
+          fixer: 'test/saved-A',
+        },
         agentVariants: { explorer: 'high', oracle: 'max', fixer: 'medium' },
         inheritance: { oracle: 'session', fixer: 'orchestrator' },
       },
