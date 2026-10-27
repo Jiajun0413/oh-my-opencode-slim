@@ -183,6 +183,44 @@ describe('plugin feature gates through exported hooks', () => {
     }
   });
 
+  test('v1 interview disabled keeps request transforms inert', async () => {
+    await configure({
+      backgroundJobs: { enabled: false },
+      interview: { enabled: false },
+      disabled_hooks: [
+        'auto-update-checker',
+        'phase-reminder',
+        'council-inject',
+        'deepwork-goal',
+      ],
+    });
+    let hooks: PluginHooks | undefined;
+    try {
+      hooks = await createHooks('v1');
+      const messages = [
+        {
+          info: { id: 'msg_1', role: 'user', sessionID: 'ses_interview_off' },
+          parts: [{ type: 'text', text: 'hello' }],
+        },
+      ];
+      await expect(
+        hooks['experimental.chat.messages.transform']?.(
+          {} as never,
+          { messages } as never,
+        ),
+      ).resolves.toBeUndefined();
+
+      const completed = { text: 'hello' };
+      await hooks['experimental.text.complete']?.(
+        { sessionID: 'ses_interview_off', messageID: 'msg_1' } as never,
+        completed as never,
+      );
+      expect(completed.text).toBe('hello');
+    } finally {
+      await hooks?.dispose?.();
+    }
+  });
+
   test('companion cold gate: disabled companion is not constructed', async () => {
     await configure({});
     const onLoadSpy = spyOn(CompanionManager.prototype, 'onLoad');

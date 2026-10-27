@@ -665,9 +665,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let getRevivedContextFiles = (_taskID: string): ContextFile[] => [];
   let pruneRevivedContext = () => {};
   let taskActivityTracker: TaskActivityTracker | undefined;
-  let interviewSubmitService: ReturnType<
-    typeof createInterviewManager
-  >['service'];
+  let interviewSubmitService:
+    | ReturnType<typeof createInterviewManager>['service']
+    | undefined;
   let acpRunTools: Record<string, ReturnType<typeof createAcpRunTool>>;
   let webfetch: ReturnType<typeof createWebfetchTool> | undefined;
   const isFallbackPending = (taskID: string): boolean =>
@@ -1895,7 +1895,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       runtime.interviewEnabled && !runtime.disabledCommands.has('interview');
     const interviewTools = shouldRegisterInterview
       ? createInterviewSubmitStateTool({
-          service: () => interviewSubmitService,
+          service: () => {
+            if (!interviewSubmitService) {
+              throw new Error('interview service unavailable');
+            }
+            return interviewSubmitService;
+          },
           maxQuestions: config.interview?.maxQuestions,
         })
       : {};
@@ -3314,6 +3319,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // through the shared apply step, then strip it from the saved/visible
     // text. v2 has no equivalent hook.
     'experimental.text.complete': async (input, output) => {
+      if (!interviewSubmitService) return;
       try {
         output.text = await interviewSubmitService.completeInterviewText(
           input.sessionID,
@@ -3761,7 +3767,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       const sessionID =
         findLatestUserMessage(typedOutput.messages)?.info.sessionID ??
         typedOutput.messages.find(isMessageWithParts)?.info.sessionID;
-      if (sessionID && interviewSubmitService.getActiveInterviewId(sessionID)) {
+      if (
+        sessionID &&
+        interviewSubmitService?.getActiveInterviewId(sessionID)
+      ) {
         // The kickoff is the one deliberate rewrite; later turns must remain
         // byte-stable so each request can reuse the provider cache prefix.
         collapseInterviewHistory(typedOutput.messages);
