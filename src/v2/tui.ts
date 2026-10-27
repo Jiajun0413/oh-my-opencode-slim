@@ -200,16 +200,18 @@ export async function runPresetFlow(
  * thunk from inside a `ui.slot` render (which runs under the
  * Keymap.Provider) — calling it directly from plugin `setup` throws
  * `Keymap.Provider is missing`. The command needs an `id` because the
- * host's reducer rejects slash/palette commands without one.
+ * host's reducer rejects slash/palette commands without one. Only enabled
+ * commands are included: a disabled command's palette/slash/keybind must
+ * not exist at all.
  */
 function buildPresetLayer(
   ctx: V2PresetTuiContext,
-  presetCommandEnabled: boolean,
+  gates: V2CommandGates,
 ): () => { mode: string; commands: V2KeymapCommand[] } {
   return () => ({
     mode: 'global',
     commands: [
-      ...(presetCommandEnabled
+      ...(gates.preset
         ? [
             {
               id: PRESET_COMMAND_ID,
@@ -221,8 +223,8 @@ function buildPresetLayer(
             },
           ]
         : []),
-      buildKillAllCommand(ctx),
-      buildOpenSubagentCommand(ctx),
+      ...(gates.killall ? [buildKillAllCommand(ctx)] : []),
+      ...(gates.subagent ? [buildOpenSubagentCommand(ctx)] : []),
     ],
   });
 }
@@ -342,23 +344,33 @@ async function runKillAllFlow(ctx: {
 /**
  * Whether the update notice may be scheduled. Only an explicit
  * `disabled_hooks: ["auto-update-checker"]` turns it off — a config read
- * failure keeps the notice (best-effort, matching every other degraded
- * path here, and never silently dropping a user-visible feature).
+ * failure resolves to `undefined` upstream and keeps the notice
+ * (best-effort, matching every other degraded path here, and never silently
+ * dropping a user-visible feature).
  */
-function updateNoticeEnabled(ctx: V2TuiPluginContext): boolean {
-  try {
-    const config = loadPluginConfig(ctx.location?.directory ?? process.cwd(), {
-      silent: true,
-      hostFlavor: 'v2',
-    });
-    return !(config.disabled_hooks ?? []).includes('auto-update-checker');
-  } catch (err) {
-    log(
-      '[v2][tui] update-notice config read failed; keeping notice',
-      String(err),
-    );
-    return true;
-  }
+function updateNoticeEnabled(config: PluginConfig | undefined): boolean {
+  return !(config?.disabled_hooks ?? []).includes('auto-update-checker');
+}
+
+/**
+ * Which TUI keymap commands the config still enables, resolved from one
+ * config read via the shared `disabled_commands` decision surface.
+ * `undefined` (config read failure) keeps every command — fail-open,
+ * matching every other degraded path here.
+ */
+interface V2CommandGates {
+  preset: boolean;
+  killall: boolean;
+  subagent: boolean;
+}
+
+function commandGates(config: PluginConfig | undefined): V2CommandGates {
+  const disabledCommands = new Set(config?.disabled_commands ?? []);
+  return {
+    preset: isCommandEnabled('preset', { disabledCommands }),
+    killall: isCommandEnabled('killall', { disabledCommands }),
+    subagent: isCommandEnabled('subagent', { disabledCommands }),
+  };
 }
 
 /**
@@ -372,21 +384,36 @@ const plugin = {
   tui: omoTui.tui,
 
   async setup(ctx: V2TuiPluginContext): Promise<undefined | (() => void)> {
-    if (isPluginDisabledByEnv()) return omoTui.setup(ctx);
+    if (isPluginDisabledByEnv()) return;
+
+    const directory = ctx.location?.directory ?? process.cwd();
+    // One config read gates every surface registered below. Fail-open: a
+    // read failure keeps the TUI and all of its commands (never silently
+    // drops a user-visible feature).
+    let config: PluginConfig | undefined;
+    try {
+      config = loadPluginConfig(directory, { silent: true, hostFlavor: 'v2' });
+    } catch (err) {
+      log(
+        '[v2][tui] tui config read failed; keeping all TUI surfaces',
+        String(err),
+      );
+    }
+    if (config?.tui === false) {
+      // `tui: false` master switch: the TUI entry registers nothing — no
+      // sidebar, no keymap, no preset manager, no update notice.
+      log('[v2][tui] tui disabled by config (tui: false); registering nothing');
+      return undefined;
+    }
 
     const disposers: Array<() => void> = [];
     const baseCleanup = await omoTui.setup(ctx);
     if (typeof baseCleanup === 'function') disposers.push(baseCleanup);
 
     // `disabled_commands` gates the TUI entry exactly like it gates the
-    // server command: a disabled `/preset` is not registered anywhere.
-    const directory = ctx.location?.directory ?? process.cwd();
-    const presetCommandEnabled = isCommandEnabled('preset', {
-      disabledCommands: new Set(
-        loadPluginConfig(directory, { silent: true, hostFlavor: 'v2' })
-          .disabled_commands ?? [],
-      ),
-    });
+    // server command: a disabled command's palette/slash/keybind does not
+    // exist anywhere.
+    const gates = commandGates(config);
 
     const slotApi = (ctx.ui as { slot?: V2SlotApi } | undefined)?.slot;
     if (typeof slotApi !== 'function') {
@@ -398,7 +425,7 @@ const plugin = {
           render: () => {
             if (typeof ctx.keymap?.layer === 'function') {
               try {
-                ctx.keymap.layer(buildPresetLayer(ctx, presetCommandEnabled));
+                ctx.keymap.layer(buildPresetLayer(ctx, gates));
               } catch (err) {
                 log('[v2][tui] keymap.layer failed', String(err));
               }
@@ -419,10 +446,8 @@ const plugin = {
     // but has no UI channel on V2 — `client.tui.showToast` is a no-op in the
     // shim — so the TUI owns the message. Scheduled off the startup path and
     // silent on every failure; see ./update-notice.
-    // `disabled_hooks: ["auto-update-checker"]` is the explicit off switch —
-    // a config read failure keeps the current best-effort behavior (the
-    // notice is silent anyway when no update is found).
-    if (updateNoticeEnabled(ctx)) {
+    // `disabled_hooks: ["auto-update-checker"]` is the explicit off switch.
+    if (updateNoticeEnabled(config)) {
       disposers.push(
         registerUpdateNotice(ctx, {
           renderBadge: (latest, color) => renderUpdateBadge(latest, color),

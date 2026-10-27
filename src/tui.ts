@@ -15,6 +15,7 @@ import {
 } from './config/constants';
 import { loadPluginConfig } from './config/loader';
 import { MultiplexerConfigSchema, type MultiplexerType } from './config/schema';
+import { isCommandEnabled } from './hooks/command-hook-utils';
 import {
   createOnceGate,
   logHostUnsupported,
@@ -1926,6 +1927,43 @@ function isSidebarEnabled(directory: string, hostFlavor?: string): boolean {
   }
 }
 
+/**
+ * The TUI master switch (`tui: false`, default true). Gates every OMOS TUI
+ * surface at the entry points (sidebar, /preset, /killall, /subagent,
+ * update notice); server-side features are untouched. Computed from the
+ * same plugin config the runtime reads, so a config read failure keeps the
+ * TUI (never silently drops features).
+ */
+function isTuiEnabled(directory: string, hostFlavor?: string): boolean {
+  try {
+    return (
+      loadPluginConfig(directory, { hostFlavor, silent: true }).tui !== false
+    );
+  } catch (err) {
+    log('[tui] tui config read failed; keeping TUI', String(err));
+    return true;
+  }
+}
+
+/**
+ * `disabled_commands` for one directory, fed to `isCommandEnabled`.
+ * Fail-open: a read failure keeps every command registered.
+ */
+function disabledCommandsFor(
+  directory: string,
+  hostFlavor?: string,
+): ReadonlySet<string> {
+  try {
+    return new Set(
+      loadPluginConfig(directory, { hostFlavor, silent: true })
+        .disabled_commands ?? [],
+    );
+  } catch (err) {
+    log('[tui] disabled_commands read failed; keeping commands', String(err));
+    return new Set();
+  }
+}
+
 /** Shape `readTuiSnapshot` returns for an empty/missing state file. */
 const EMPTY_TUI_SNAPSHOT: TuiSnapshot = {
   version: 1,
@@ -2187,12 +2225,17 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
   bindConfigListener();
   if (sidebarEnabled) scheduleRefresh();
   const rawRefreshMs = Number(process.env.OH_MY_OPENCODE_SLIM_TUI_REFRESH_MS);
-  // Test hook: shrink the 1s sidebar poll. Guarded so a bad value cannot
-  // spin the timer (setInterval clamps non-positive delays to ~1ms).
-  const renderIntervalMs =
-    Number.isFinite(rawRefreshMs) && rawRefreshMs >= 10 ? rawRefreshMs : 1000;
-  // With the sidebar off the poll only re-reads plugin config, which is
-  // still how file edits to `multiplexer.type` reach the pane wiring.
+  // Test hook: shrink/override both poll intervals. Guarded so a bad value
+  // cannot spin the timer (setInterval clamps non-positive delays to ~1ms).
+  const envRefreshMs =
+    Number.isFinite(rawRefreshMs) && rawRefreshMs >= 10
+      ? rawRefreshMs
+      : undefined;
+  // Fast path (sidebar on): the poll drives sidebar rendering (snapshot +
+  // config-backed rows) and stays at 1s. Slow path (sidebar off): the poll
+  // only re-reads plugin config — still how external file edits to
+  // `multiplexer.type` reach the pane wiring, so it stays alive but drops
+  // to 5s.
   const pollConfigOnly = () => {
     try {
       applyConfigState();
@@ -2202,7 +2245,7 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
   };
   const renderTimer = setInterval(
     sidebarEnabled ? scheduleRefresh : pollConfigOnly,
-    renderIntervalMs,
+    sidebarEnabled ? (envRefreshMs ?? 1000) : (envRefreshMs ?? 5000),
   );
   const animationTimer = sidebarEnabled
     ? setInterval(() => {
@@ -2270,6 +2313,13 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
 /** V2 slot adapter; `/preset` remains registered by src/v2/tui.ts. */
 async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
   if (isPluginDisabledByEnv()) return;
+  if (!isTuiEnabled(ctx.location?.directory ?? process.cwd(), 'v2')) {
+    // `tui: false` master switch: register nothing. Reached only when this
+    // internal setup is invoked directly; the composed v2 entry
+    // (src/v2/tui.ts) checks the same switch before calling in.
+    log('[tui] tui disabled by config (tui: false); registering nothing');
+    return;
+  }
   const presetManagerCtx = (directory: string): V2TuiContext => {
     const augmented = Object.create(ctx as object) as V2TuiContext;
     augmented.onConfigChanged = () =>
@@ -2522,6 +2572,13 @@ const plugin: TuiDualContractModule = {
   id: `${PLUGIN_NAME}:tui`,
   tui: async (api, _options, meta) => {
     if (isPluginDisabledByEnv()) return;
+    if (!isTuiEnabled(getTuiDirectory(api))) {
+      // `tui: false` master switch: the TUI entry registers nothing — no
+      // sidebar runtime, no commands, no pane wiring. Server-side features
+      // are untouched.
+      log('[tui] tui disabled by config (tui: false); registering nothing');
+      return;
+    }
 
     const runtime = createSidebarRuntime({
       version: meta.version ?? (await readPackageVersion()) ?? 'dev',
@@ -2558,10 +2615,21 @@ const plugin: TuiDualContractModule = {
           runtime.setSnapshot(value);
         },
       };
-      const disposeCommands = api.command.register(() => [
-        buildPresetCommand(api, runtime.getDirectory, snapshotRef),
-        buildKillAllCommand(api, runtime.getDirectory, runtime.getSnapshot),
-      ]);
+      // Both commands follow `disabled_commands` exactly like every other
+      // plugin command: a disabled command is not registered anywhere.
+      const disabledCommands = disabledCommandsFor(runtime.getDirectory());
+      const commands: TuiCommand[] = [];
+      if (isCommandEnabled('preset', { disabledCommands })) {
+        commands.push(
+          buildPresetCommand(api, runtime.getDirectory, snapshotRef),
+        );
+      }
+      if (isCommandEnabled('killall', { disabledCommands })) {
+        commands.push(
+          buildKillAllCommand(api, runtime.getDirectory, runtime.getSnapshot),
+        );
+      }
+      const disposeCommands = api.command.register(() => commands);
       api.lifecycle.onDispose(disposeCommands);
     }
 

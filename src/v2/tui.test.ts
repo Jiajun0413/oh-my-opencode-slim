@@ -901,6 +901,63 @@ describe('v2 tui preset plugin', () => {
       cleanup?.();
     });
 
+    test('disabled_commands killall/subagent remove their keymap commands', async () => {
+      writeUserConfig({ disabled_commands: ['killall', 'subagent'] });
+      const stub = makeSetupCtx();
+      let cleanup: (() => void) | undefined;
+      try {
+        cleanup = (await tui2Plugin.setup(
+          stub.ctx as unknown as V2TuiPluginContext,
+        )) as (() => void) | undefined;
+
+        stub.renderAppSlot();
+
+        expect(stub.layers[0]?.commands.map((command) => command.id)).toEqual([
+          'omo.preset',
+        ]);
+      } finally {
+        cleanup?.();
+      }
+    });
+
+    test('default enabled commands stay registered (preset, killall, subagent)', async () => {
+      // An explicit empty user config stops the search before the machine's
+      // real default config dir, so the defaults here are deterministic.
+      writeUserConfig({});
+      const stub = makeSetupCtx();
+      let cleanup: (() => void) | undefined;
+      try {
+        cleanup = (await tui2Plugin.setup(
+          stub.ctx as unknown as V2TuiPluginContext,
+        )) as (() => void) | undefined;
+
+        stub.renderAppSlot();
+
+        expect(stub.layers[0]?.commands.map((command) => command.id)).toEqual([
+          'omo.preset',
+          'omo.kill_all',
+          'omo.open_subagent',
+        ]);
+      } finally {
+        cleanup?.();
+      }
+    });
+
+    test('setup registers nothing when the tui master switch is false', async () => {
+      writeUserConfig({ tui: false });
+      const stub = makeSetupCtx();
+
+      const cleanup = await tui2Plugin.setup(
+        stub.ctx as unknown as V2TuiPluginContext,
+      );
+
+      // No sidebar slot, no app/preset slot, no keymap layer, no disposer:
+      // the TUI entry registers nothing at all.
+      expect(stub.slotClaims).toHaveLength(0);
+      expect(stub.layers).toHaveLength(0);
+      expect(cleanup).toBeUndefined();
+    });
+
     test('re-invokes layer on every app slot render', async () => {
       const stub = makeSetupCtx();
       const cleanup = (await tui2Plugin.setup(
@@ -1416,6 +1473,9 @@ describe('v2 tui preset plugin', () => {
     });
 
     test('disposes the pane wiring on hot reload with the sidebar disabled', async () => {
+      // Keep this poll-driven config reload fast without depending on the
+      // production 5s sidebar-off interval.
+      process.env.OH_MY_OPENCODE_SLIM_TUI_REFRESH_MS = '25';
       const stub = makeSetupCtx();
       const projectConfigDir = path.join(projectDir, '.opencode');
       fs.mkdirSync(projectConfigDir, { recursive: true });
