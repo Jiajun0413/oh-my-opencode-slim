@@ -34,6 +34,18 @@ the built-in `/models`, so it triggers no LLM turn.
 > applies on the next conversation or reload. Listing `preset` in
 > `disabled_commands` removes both the TUI entry and the server command.
 
+## Reading the current team
+
+On v2, the sidebar's team models and variants come from the displayed
+session's saved preset. Switching sessions shows each session's own team.
+Inherited models retain their saved variant, and each agent appears once
+under its display name. In root sessions, the main-agent model row follows
+the native model picker.
+
+The `/preset` list marks the current session's bound preset separately from
+the global default. A preset can carry both markers. The bound name remains
+visible even if its preset definition has since been removed.
+
 ## Scope and when changes take effect
 
 On v2, a root work session captures its subagent inference configuration before

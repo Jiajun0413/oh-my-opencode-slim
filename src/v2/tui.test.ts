@@ -297,11 +297,9 @@ describe('v2 tui preset plugin', () => {
         expect(stub.toasts).toHaveLength(1);
         expect(stub.toasts[0]).toContain('Saved preset "cheap"');
         expect(stub.toasts[0]).toContain('Live refresh requested');
-        expect(stub.toasts[0]).toStartWith(
-          'Saved preset "cheap" to user config.',
-        );
+        expect(stub.toasts[0]).toStartWith('Saved preset "cheap".');
         expect(stub.toasts[0]).not.toContain('Global default saved');
-        expect(stub.toasts[0]).toContain('bound sessions unchanged');
+        expect(stub.toasts[0]).toContain('Live refresh requested.');
         expect(stub.toasts[0]).not.toContain('Reload OpenCode');
         expect(readUserConfig().preset).toBe('cheap');
       } finally {
@@ -436,7 +434,7 @@ describe('v2 tui preset plugin', () => {
           options: { location: { directory: projectDir } },
         },
       ]);
-      expect(stub.toasts[0]).toContain('Session team snapshot: "cheap"');
+      expect(stub.toasts[0]).toContain('"cheap" applied.');
       expect(fs.readFileSync(userConfigPath(), 'utf-8')).toBe(before);
       expect(stub.reloadCalls()).toBe(0);
     });
