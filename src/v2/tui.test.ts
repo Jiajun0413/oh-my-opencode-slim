@@ -948,6 +948,17 @@ describe('v2 tui preset plugin', () => {
 
     test('renders agent labels and models in categorical colors and the brand in the interactive hue', async () => {
       const stub = makeSetupCtx();
+      writeUserConfig(makeConfig() as unknown as Record<string, unknown>);
+      recordTuiSessionParent('oracle-live', 'root', projectDir);
+      recordTuiAgentActivity(
+        {
+          sessionID: 'oracle-live',
+          agentName: 'oracle',
+          active: true,
+          details: { status: 'busy' },
+        },
+        projectDir,
+      );
       recordTuiAgentModels(
         {
           agentModels: {
@@ -964,6 +975,8 @@ describe('v2 tui preset plugin', () => {
         cleanup = (await tui2Plugin.setup(
           stub.ctx as unknown as V2TuiPluginContext,
         )) as (() => void) | undefined;
+        (stub.ctx.ui as { router: { current: () => unknown } }).router.current =
+          () => ({ type: 'session', sessionID: 'root' });
         const sidebarSlot = stub.slotClaims.find(
           (slot) => slot.append === 'sidebar.content',
         );
@@ -985,16 +998,93 @@ describe('v2 tui preset plugin', () => {
           span.text.includes('claude-haiku'),
         );
         const brand = spans.find((span) => span.text.includes('OMO-Slim'));
+        const activeIndicator = spans.find(
+          (span) =>
+            Math.abs(span.fg.g - 171 / 255) < 0.01 &&
+            Math.abs(span.fg.b - 52 / 255) < 0.01,
+        );
+        const mutedText = spans.find(
+          (span) =>
+            span.text.startsWith('v') && Math.abs(span.fg.r - 138 / 255) < 0.01,
+        );
         expect(namedAgent).toBeDefined();
         expect(secondAgent).toBeDefined();
         expect(model).toBeDefined();
         expect(secondModel).toBeDefined();
         expect(brand).toBeDefined();
+        expect(activeIndicator).toBeDefined();
+        expect(mutedText).toBeDefined();
         expect(namedAgent?.fg.r).toBeCloseTo(210 / 255);
         expect(secondAgent?.fg.r).toBeCloseTo(80 / 255);
         expect(model?.fg).toEqual(namedAgent?.fg);
         expect(secondModel?.fg).toEqual(secondAgent?.fg);
         expect(brand?.bg.b).toBeCloseTo(210 / 255);
+        expect(brand?.fg.r).toBeCloseTo(240 / 255);
+        expect(activeIndicator?.fg.g).toBeCloseTo(171 / 255);
+      } finally {
+        cleanup?.();
+        screen?.renderer.destroy();
+      }
+    });
+
+    test('renders retry indicators with the v2 warning token', async () => {
+      const stub = makeSetupCtx();
+      for (const sessionID of ['retrying', 'retrying2']) {
+        recordTuiSessionParent(sessionID, 'root', projectDir);
+        recordTuiAgentActivity(
+          {
+            sessionID,
+            agentName: 'oracle',
+            active: true,
+            details: { status: 'retry' },
+          },
+          projectDir,
+        );
+      }
+      recordTuiAgentModels(
+        { agentModels: { oracle: 'openai/gpt-5-mini' } },
+        projectDir,
+      );
+      (
+        stub.ctx.ui as {
+          router: { current: () => unknown; navigate?: unknown };
+        }
+      ).router.current = () => ({ type: 'session', sessionID: 'root' });
+      (stub.ctx.ui as { router: { navigate?: unknown } }).router.navigate =
+        () => {};
+      let cleanup: (() => void) | undefined;
+      let screen: Awaited<ReturnType<typeof testRender>> | undefined;
+      try {
+        cleanup = (await tui2Plugin.setup(
+          stub.ctx as unknown as V2TuiPluginContext,
+        )) as (() => void) | undefined;
+        const sidebarSlot = stub.slotClaims.find(
+          (slot) => slot.append === 'sidebar.content',
+        );
+        expect(sidebarSlot).toBeDefined();
+        screen = await testRender(() => sidebarSlot?.render?.() as never, {
+          width: 100,
+          height: 20,
+        });
+        await screen.renderOnce();
+        const initial = screen.captureSpans();
+        const agentLine = initial.lines.findIndex((line) =>
+          line.spans.some((span) => span.text.includes('oracle')),
+        );
+        expect(agentLine).toBeGreaterThanOrEqual(0);
+        await screen.mockMouse.click(10, agentLine);
+        await screen.flush();
+        const spans = screen.captureSpans().lines.flatMap((line) => line.spans);
+        const retryIndicator = spans.find(
+          (span) =>
+            Math.abs(span.fg.r - 222 / 255) < 0.01 &&
+            Math.abs(span.fg.g - 155 / 255) < 0.01 &&
+            Math.abs(span.fg.b - 33 / 255) < 0.01,
+        );
+        expect(retryIndicator).toBeDefined();
+        expect(retryIndicator?.fg.r).toBeCloseTo(222 / 255);
+        expect(retryIndicator?.fg.g).toBeCloseTo(155 / 255);
+        expect(retryIndicator?.fg.b).toBeCloseTo(33 / 255);
       } finally {
         cleanup?.();
         screen?.renderer.destroy();
