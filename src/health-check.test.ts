@@ -33,6 +33,15 @@ describe('plugin health thresholds', () => {
     expect(minimumExpectedAgentCount(['observer'], true)).toBe(7);
   });
 
+  test('agent floor follows createAgents when council is explicitly disabled', () => {
+    // A configured council plus disabled_agents:["council","observer"]
+    // leaves orchestrator + explorer + oracle + designer + fixer.
+    expect(minimumExpectedAgentCount(['council', 'observer'])).toBe(5);
+    expect(
+      minimumExpectedAgentCount(['council', 'observer', 'explorer'], true),
+    ).toBe(4);
+  });
+
   test('agent floor safely handles malformed or exhaustive disabled input', () => {
     expect(minimumExpectedAgentCount('' as any)).toBe(ALL_AGENT_NAMES.length);
     expect(minimumExpectedAgentCount(null as any)).toBe(ALL_AGENT_NAMES.length);

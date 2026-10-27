@@ -51,10 +51,14 @@ export function minimumExpectedAgentCount(
     ? disabledAgents
     : [];
   const disabled = new Set(safeDisabledAgents);
+  // createAgents disables the bare councillor whenever the council agent is
+  // disabled, even if the councillor itself is protected from user config.
+  const councilDisabled = disabled.has('council');
   const enabledCount = ALL_AGENT_NAMES.filter(
     (name) =>
       !disabled.has(name) &&
-      (councilEnabled || (name !== 'council' && name !== 'councillor')),
+      (councilEnabled || (name !== 'council' && name !== 'councillor')) &&
+      !(councilDisabled && name === 'councillor'),
   ).length;
   return Math.max(1, enabledCount);
 }
