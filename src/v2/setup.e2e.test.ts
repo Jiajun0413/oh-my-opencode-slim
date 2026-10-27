@@ -1032,6 +1032,20 @@ describe('createV2Setup e2e', () => {
       const beforeResumeRetry = switches.length;
       await retry('ses_child-1', 'manual', 'resumed');
       expect(switches).toHaveLength(beforeResumeRetry);
+      await launch('fallback-resume-call', 'root', {
+        sessionID: 'ses_child-1',
+      });
+      expect(stored.get('session-preset/v1/ses_child-1').explicitModel).toBe(
+        false,
+      );
+      expect(
+        stored.get('session-preset/v1/ses_child-1').preserveModel,
+      ).toBeUndefined();
+      await retry('ses_child-1', 'test', 'a');
+      expect(switches.at(-1)).toMatchObject({
+        sessionID: 'ses_child-1',
+        model: { providerID: 'backup', id: 'a' },
+      });
       const cancelled = {
         tool: 'subagent',
         sessionID: 'root',

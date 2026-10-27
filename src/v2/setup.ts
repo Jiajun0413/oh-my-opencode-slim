@@ -3075,8 +3075,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
             const binding = await sessionPresets.ensure(event.sessionID);
             // A resumed, already-profiled child may acquire an explicit
             // per-call model. Re-pin its execution policy on every admission.
-            if (binding?.parentID && binding.explicitModel)
-              pinBoundSessionChains(event.sessionID);
+            if (binding?.parentID) pinBoundSessionChains(event.sessionID);
             await sessionProfileBridge.ensureSessionProfile(event.sessionID);
             await bridge.handlePrompt(event);
           });
