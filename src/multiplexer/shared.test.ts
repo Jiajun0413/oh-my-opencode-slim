@@ -320,6 +320,19 @@ describe('findBinaryLogPrefix', () => {
 });
 
 describe('buildViewCommand', () => {
+  test('a PowerShell pane invokes the quoted executable behind the call operator', async () => {
+    const { buildViewCommand } = await importShared();
+    const cmd = buildViewCommand('ses_x', '', 'F:/repo', {
+      executable: 'D:/Tools/opencode/2.0.32/opencode.exe',
+      viewerFlavor: 'v2-shared',
+      viewerSurface: 'mini',
+      shell: 'powershell',
+    });
+    expect(cmd).toBe(
+      "& 'D:/Tools/opencode/2.0.32/opencode.exe' mini --session 'ses_x'",
+    );
+  });
+
   test('defaults to the resolved absolute host executable (#514)', async () => {
     const { buildViewCommand } = await importShared();
     const dir = mkdtempSync(join(tmpdir(), 'omos-514-'));

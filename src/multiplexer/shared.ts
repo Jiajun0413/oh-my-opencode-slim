@@ -22,11 +22,19 @@ export function normalizePathForShell(directory: string): string {
     : directory;
 }
 
-/** Quote an executable for sh -lc: bare fallback stays bare, Windows
- * backslashes become / so MSYS2/Git Bash single quotes don't preserve them. */
-function formatExecutableForShell(executable: string): string {
+export type PaneShell = 'posix' | 'powershell';
+
+/** Quote an executable for the pane shell: bare fallback stays bare, Windows
+ * backslashes become / for MSYS2/Git Bash; PowerShell needs the call operator. */
+function formatExecutableForShell(
+  executable: string,
+  shell?: PaneShell,
+): string {
   if (executable === 'opencode') return executable;
-  return quoteShellArg(normalizePathForShell(executable));
+  const normalized = normalizePathForShell(executable);
+  return shell === 'powershell'
+    ? `& ${quoteShellArg(normalized)}`
+    : quoteShellArg(normalized);
 }
 
 export function buildOpencodeAttachCommand(
@@ -37,10 +45,11 @@ export function buildOpencodeAttachCommand(
   // (zellij `sh -lc`, tmux server PATH) may not have `opencode` on PATH
   // (e.g. linuxbrew installs), #514.
   executable = resolveOpencodeExecutable(),
+  shell?: PaneShell,
 ): string {
   const attachDir = normalizePathForShell(directory);
   return [
-    formatExecutableForShell(executable),
+    formatExecutableForShell(executable, shell),
     'attach',
     quoteShellArg(serverUrl),
     '--session',
@@ -65,6 +74,7 @@ export type ViewerCommandOptions = Pick<
   /** Absolute host binary; defaults to the resolved host binary (falls
    back to bare `opencode`). */
   executable?: string;
+  shell?: PaneShell;
 };
 
 /**
@@ -100,12 +110,13 @@ export function buildViewCommand(
       serverUrl,
       directory,
       executable,
+      options.shell,
     );
     return mini ? `${attach} --mini` : attach;
   }
   const viewDir = normalizePathForShell(directory);
   return [
-    formatExecutableForShell(executable),
+    formatExecutableForShell(executable, options.shell),
     ...(mini ? ['mini'] : []),
     ...(flavor === 'v2-remote' ? ['--server', quoteShellArg(serverUrl)] : []),
     '--session',
