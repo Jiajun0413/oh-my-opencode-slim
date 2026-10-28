@@ -65,6 +65,17 @@ const MARKETPLACE_TOOL_NAMES = [
   'marketplace_inspect',
   'marketplace_manage',
 ] as const;
+/** Runtime guards accept only orchestrator-owned sessions for these tools
+ * (managed-session fence, wait_for_user name check, marketplace identity
+ * allow-list); declared primaries stay denied until the guards widen
+ * (issue #1591). */
+const ORCHESTRATOR_GUARDED_TOOL_NAMES = new Set([
+  'task_cancel',
+  'task_revive',
+  'wait_for_user',
+  'marketplace_inspect',
+  'marketplace_manage',
+]);
 const SAFE_AGENT_ALIAS_RE = /^[a-z][a-z0-9_-]*$/i;
 
 export function resolvePrimaryModelValue(value: unknown): string | undefined {
@@ -183,6 +194,8 @@ function applyOverrides(
       // opencodeConfig.agent.orchestrator.model (see src/index.ts:524-528,
       // added by #639). Leaving it undefined for the orchestrator lets
       // that later, precedence-aware guard be the sole source of truth.
+      // Declared primaries (agents.<name>.primary) intentionally keep the
+      // concrete model for now (issue #1591).
       agent.config.model =
         agent.name === 'orchestrator' ? undefined : primaryModel.id;
       // Subagents launch with the primary model, so carry its inline variant
@@ -606,11 +619,18 @@ function buildCustomAgentDefinition(
   fileAppendPrompt?: string,
   fallbackModel?: string,
 ): AgentDefinition {
-  const defaultPrompt = appendTaskRejectionInstruction(
-    `You are the ${name} specialist.`,
-  );
+  // A declared primary orchestrates (delegates); a plain custom agent is a
+  // specialist and must not spawn nested work (task-rejection stance).
+  const isPrimary = override.primary === true;
+  const defaultPrompt = isPrimary
+    ? `You are ${name}, a primary orchestrator. Plan, delegate to your specialists, monitor, and reconcile their results.`
+    : appendTaskRejectionInstruction(`You are the ${name} specialist.`);
   const primaryModel = getPrimaryModelFromOverride(override);
-  const description = override.description ?? `Custom subagent '${name}'`;
+  const description =
+    override.description ??
+    (isPrimary
+      ? `Primary orchestrator '${name}'`
+      : `Custom subagent '${name}'`);
 
   return {
     name,
@@ -655,8 +675,8 @@ function injectDisplayNames(
  * child's question parks with no tokens moving and no headless answerer
  * (task_reply covers permissions on both hosts; v2 form questions need a
  * host UI), so subagents default to 'deny' — same stance as `wait_for_user`
- * and as v2's own built-in subagents. The orchestrator is the only ask
- * channel. Explicit per-agent config always wins.
+ * and as v2's own built-in subagents. Primary agents are the ask
+ * channels. Explicit per-agent config always wins.
  */
 function applyDefaultPermissions(
   agent: AgentDefinition,
@@ -685,12 +705,15 @@ function applyDefaultPermissions(
     disabledSkills,
   );
 
+  const grantable = (toolName: string) =>
+    agent.name === 'orchestrator' ||
+    !ORCHESTRATOR_GUARDED_TOOL_NAMES.has(toolName);
+
   // Subagents don't ask the human by default: a parked child question
   // has no headless answerer. Explicit config wins.
-  const questionPerm =
-    agent.name === 'orchestrator'
-      ? (existing.question ?? 'allow')
-      : (existing.question ?? 'deny');
+  const questionPerm = isPrimaryAgent
+    ? (existing.question ?? 'allow')
+    : (existing.question ?? 'deny');
   const orchestratorDefaultToolNames = [
     ...ORCHESTRATOR_DEFAULT_TOOL_NAMES,
     ...(hostFlavor === 'v2' ? [] : ORCHESTRATOR_V1_ONLY_TOOL_NAMES),
@@ -698,7 +721,8 @@ function applyDefaultPermissions(
   const orchestratorDefaultPermissions = Object.fromEntries(
     orchestratorDefaultToolNames.map((toolName) => [
       toolName,
-      existing[toolName] ?? (agent.name === 'orchestrator' ? 'allow' : 'deny'),
+      existing[toolName] ??
+        (isPrimaryAgent && grantable(toolName) ? 'allow' : 'deny'),
     ]),
   );
   // Primary agents get allow because quiet interview prompts forbid printing
@@ -706,7 +730,7 @@ function applyDefaultPermissions(
   const interviewSubmitPermission =
     existing.interview_submit_state ?? (isPrimaryAgent ? 'allow' : 'deny');
   const waitForUserPerm =
-    agent.name === 'orchestrator'
+    isPrimaryAgent && grantable('wait_for_user')
       ? (existing.wait_for_user ?? 'allow')
       : 'deny';
   const marketplacePermissions = Object.fromEntries(
@@ -718,7 +742,7 @@ function applyDefaultPermissions(
           : 'allow';
       return [
         toolName,
-        agent.name === 'orchestrator' ? orchestratorPermission : 'deny',
+        isPrimaryAgent && grantable(toolName) ? orchestratorPermission : 'deny',
       ];
     }),
   );
@@ -729,11 +753,9 @@ function applyDefaultPermissions(
     // `task` stance (custom, ACP, write-capable marketplace) deny spawning.
     // The compiled v2 permission base allows every unmatched action, so an
     // absent entry would let any child spawn once the host depth limit is
-    // raised; the orchestrator keeps unrestricted delegation. Gated on the
+    // raised; primary agents keep unrestricted delegation. Gated on the
     // same v2 + observer condition as the stances (v1 stays untouched).
-    ...(nestedDispatchEnabled &&
-    existing.task === undefined &&
-    agent.name !== 'orchestrator'
+    ...(nestedDispatchEnabled && existing.task === undefined && !isPrimaryAgent
       ? { task: { ...TASK_NO_NESTED_DISPATCH } }
       : {}),
     question: questionPerm,
@@ -922,6 +944,18 @@ export function createAgents(
       return true;
     });
 
+  for (const [name, override] of Object.entries(mergedAgents)) {
+    if (
+      override?.primary !== undefined &&
+      !customAgentNames.includes(name) &&
+      (name !== 'orchestrator' || override.primary === false)
+    ) {
+      console.warn(
+        `[oh-my-opencode-slim] agents.${name}.primary is ignored: only custom agents can be declared primary (the orchestrator is always primary).`,
+      );
+    }
+  }
+
   const protoCustomAgents = customAgentNames.flatMap((name) => {
     const override = getOverrideFromAgents(mergedAgents, name);
     if (
@@ -1014,6 +1048,7 @@ export function createAgents(
       runtime.disabledSkills,
       nestedDispatchEnabled,
       options?.hostFlavor,
+      override?.primary === true,
     );
     return agent;
   });
@@ -1272,6 +1307,16 @@ export function getAgentConfigsFromDefinitions(
   runtime: RuntimeConfig,
   agents: readonly AgentDefinition[],
 ): Record<string, SDKAgentConfig> {
+  // Primary agents: the canonical orchestrator plus any custom agent the
+  // user explicitly marked with `primary: true`. See issue #1591.
+  const primaryNames = new Set<string>(['orchestrator']);
+  const mergedAgentsForPrimary = runtime.agents();
+  for (const name of runtime.customAgentNames) {
+    if (mergedAgentsForPrimary[name]?.primary === true) {
+      primaryNames.add(name);
+    }
+  }
+
   const applyClassification = (
     name: string,
     sdkConfig: SDKAgentConfig & {
@@ -1287,7 +1332,7 @@ export function getAgentConfigsFromDefinitions(
       sdkConfig.hidden = true;
     } else if (isSubagent(name)) {
       sdkConfig.mode = 'subagent';
-    } else if (name === 'orchestrator') {
+    } else if (primaryNames.has(name)) {
       sdkConfig.mode = 'primary';
     } else {
       sdkConfig.mode = 'subagent';

@@ -244,7 +244,8 @@ and [Council](council.md) for what remains.
 | `agents.<agent>.mcps` | string[] | - | Plugin MCP allow-list (`"*"`, `"!item"`, explicit list); this is plugin configuration, not a host agent `mcps` field |
 | `agents.<agent>.displayName` | string | - | Custom user-facing alias for the agent in the active config |
 | `agents.<agent>.color` | string | - | Agent display color as `#RRGGBB` or a theme color: `primary`, `secondary`, `accent`, `success`, `warning`, `error`, or `info` |
-| `agents.<agent>.description` | string | generated | Description shown to OpenCode and the orchestrator; defaults to `Custom subagent '<name>'` for custom agents |
+| `agents.<agent>.description` | string | generated | Description shown to OpenCode and the orchestrator; defaults to `Custom subagent '<name>'` for custom agents and `Primary orchestrator '<name>'` for primary ones |
+| `agents.<agent>.primary` | boolean | - | Registers this custom agent as a peer primary orchestrator (mode `primary`) instead of a subagent: delegation, task monitoring/messaging, and ask-channel permissions, plus a delegating default prompt (its own `prompt`/prompt file wins). See [Custom Agents](#custom-agents) |
 | `agents.<agent>.skills_include_local` | boolean | - | Adds valid skills from the project's and ancestors' `.opencode/skills/**/SKILL.md` and `.agents/skills/**/SKILL.md` trees before `skills_remove` applies |
 | `acpAgents.<name>.command` | string | - | Command for an external ACP-compatible agent; creates a wrapper subagent named `<name>` See [ACP-connected agents](#acp-connected-agents). |
 | `acpAgents.<name>.args` | string[] | `[]` | Arguments for the ACP agent command See [ACP-connected agents](#acp-connected-agents). |
@@ -1090,7 +1091,8 @@ plugin source.
 
 ### Custom Agents
 
-Unknown keys under `agents` are treated as custom subagents. A custom agent needs
+Unknown keys under `agents` are treated as custom agents — subagents unless they
+set `primary: true`. A custom agent needs
 its own `model`, a normal `prompt`, and optionally an `orchestratorPrompt` that
 teaches the orchestrator exactly when to delegate to it.
 
@@ -1111,6 +1113,17 @@ Notes:
 - Custom agent names must be safe identifiers such as `janitor` or `security-reviewer`
 - Custom agents without a `model` are skipped with a warning
 - Disabled custom agents are not registered or injected into the orchestrator prompt
+- Setting `primary: true` registers the custom agent as a peer primary orchestrator
+  (mode `primary`) instead of a subagent: it gets delegation, task
+  monitoring/messaging, and ask-channel permissions plus a delegating default
+  prompt, and its own `prompt`/prompt file wins
+- Primary agents are limited for now: `task_cancel`, `task_revive`,
+  `wait_for_user`, and the marketplace tools stay orchestrator-only, and
+  per-primary `<Agents>` catalog scoping plus task-board/wake membership are
+  planned follow-ups (issue #1591)
+- `primary` only applies to custom agents: on a built-in name it logs a warning
+  and does nothing. A primary with a `model` chain gets re-stamped on plugin
+  re-init, so prefer a scalar `model` when relying on `/model`
 
 > **Tip:** Keep `orchestratorPrompt` concise — the orchestrator reads it every turn.
 > Include: when to delegate, when NOT to delegate, and the agent's role in one paragraph.

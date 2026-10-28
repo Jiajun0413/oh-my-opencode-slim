@@ -164,6 +164,8 @@ function applyMarketplaceOwnerOverride(
       typeof model === 'string' ? { id: model } : { ...model },
     );
     definition._modelArray = models;
+    // Declared primaries (agents.<name>.primary) are not projected yet
+    // (issue #1591).
     if (definition.name !== 'orchestrator') {
       definition.config.model = models[0]?.id;
       if (models[0]?.variant) definition.config.variant = models[0].variant;
