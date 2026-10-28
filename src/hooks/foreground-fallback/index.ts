@@ -528,6 +528,7 @@ const DEDUP_WINDOW_MS = 5_000;
 const REPROMPT_DELAY_MS = 500;
 /** Longer host backoffs should use the configured model chain instead. */
 const MAX_HOST_RETRY_DELAY_MS = 30 * 60_000;
+const PROVIDER_MARK_TTL_MS = 30 * 60_000;
 /** Ceiling on host calls: a hung transport must not stall fallback. */
 const HOST_CALL_TIMEOUT_MS = 2_000;
 /** The replay send's ack can lag after the host admitted it: wait as long as
@@ -602,13 +603,13 @@ export class ForegroundFallbackManager {
   >();
   /** sessionID → last observed model string ("providerID/modelID") */
   private readonly sessionModel = new Map<string, string>();
-  /** sessionID → confirmed fallback and providers abandoned by its failures.
+  /** sessionID → confirmed fallback and provider failure timestamps.
    *  Kept separate from sessionModel because synthetic admissions may emit
    *  message.updated events for another model without changing the model
    *  serving the user's active turn. */
   private readonly activeFallback = new Map<
     string,
-    { model: string; downProviders: ReadonlySet<string> }
+    { model: string; downProviders: ReadonlyMap<string, number> }
   >();
   /** sessionID → agent name (populated from message.updated info.agent field) */
   private readonly sessionAgent = new Map<string, string>();
@@ -1271,9 +1272,16 @@ export class ForegroundFallbackManager {
     this.cancelInitialDelay(id);
   }
 
-  /** Confirmed fallback serving this session, including provider failures. */
+  /** Confirmed fallback serving this session, including unexpired provider failures. */
   getActiveFallback(sessionID: string) {
-    return this.activeFallback.get(sessionID);
+    const active = this.activeFallback.get(sessionID);
+    if (!active) return;
+    const downProviders = new Set<string>();
+    const now = Date.now();
+    for (const [provider, recordedAt] of active.downProviders) {
+      if (now - recordedAt < PROVIDER_MARK_TTL_MS) downProviders.add(provider);
+    }
+    return { model: active.model, downProviders };
   }
 
   /** Restart the count with a new record so replies still being read are
@@ -1290,14 +1298,14 @@ export class ForegroundFallbackManager {
     model: string,
     error: unknown,
   ): void {
-    const downProviders = new Set(
+    const downProviders = new Map(
       this.activeFallback.get(sessionID)?.downProviders,
     );
     const fromProvider = from
       ? parseModelReference(from)?.providerID
       : undefined;
     if (fromProvider && failoverScope(error) === 'provider') {
-      downProviders.add(fromProvider);
+      downProviders.set(fromProvider, Date.now());
     }
     const toProvider = parseModelReference(model)?.providerID;
     if (toProvider) downProviders.delete(toProvider);
@@ -1308,7 +1316,7 @@ export class ForegroundFallbackManager {
     log('[foreground-fallback] active fallback committed', {
       sessionID,
       model,
-      downProviders: [...downProviders].sort(),
+      downProviders: [...downProviders.keys()].sort(),
     });
   }
 
@@ -2917,10 +2925,10 @@ export class ForegroundFallbackManager {
     const hasAllowance = (model: string) =>
       !quotaExhausted?.has(parseModelReference(model)?.providerID ?? '');
 
-    const downProviders = this.activeFallback.get(sessionID)?.downProviders;
+    const downProviders = this.getActiveFallback(sessionID)?.downProviders;
     const parentID = this.sessionParent.get(sessionID);
     const parentDownProviders = parentID
-      ? this.activeFallback.get(parentID)?.downProviders
+      ? this.getActiveFallback(parentID)?.downProviders
       : undefined;
     // A failure after the sticky retry ends the descent even if switching to
     // the sticky entry cleared its provider from the exclusions.
