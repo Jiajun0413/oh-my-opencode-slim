@@ -60,6 +60,10 @@ import { createEventDirectoryScope } from '../utils/event-directory-scope';
 import { isRecord } from '../utils/guards';
 import { INTERNAL_INITIATOR_METADATA_KEY } from '../utils/internal-initiator';
 import { initLogger, log } from '../utils/logger';
+import {
+  type ModelImageCapabilityCache,
+  modelExistsInCatalog,
+} from '../utils/model-image-capability';
 import { OperationTimeoutError, withTimeout } from '../utils/session';
 import {
   adaptTool,
@@ -2580,6 +2584,9 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       // tui-state writer. Failure is honest: no swap, one logged cause.
       let currentProfiles: V2AgentRuntimeProfiles = {};
       let registeredProfiles: V2AgentRuntimeProfiles = {};
+      // Host model catalog cache for stale-pin invalidation (issue #1689).
+      // Dropped on every profile refresh so a retired/added model is re-read.
+      const modelCatalogCache: ModelImageCapabilityCache = {};
       let currentBundle: SessionTeamBundle | undefined;
       let profilesRegistry: typeof finalizedRegistry;
       const factoryRefreshProfiles = v1Hooks['v2.refreshProfiles'] as
@@ -2604,6 +2611,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
           return { ok: false as const, reason: 'Runtime profiles unavailable' };
         const result = await factoryRefreshProfiles(options);
         if (result.ok) {
+          modelCatalogCache.promise = undefined;
           const profiles = reconcileRuntimeProfileOptionKeys(
             currentProfiles,
             result.profiles,
@@ -3018,6 +3026,11 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         },
         preserveSessionModel: (sessionID) =>
           sessionPresets.peek(sessionID)?.preserveModel === true,
+        isModelAvailable: (ref) =>
+          modelExistsInCatalog(ref, {
+            ...(ctx.model?.list ? { modelDomain: ctx.model } : {}),
+            cache: modelCatalogCache,
+          }),
         registeredProfiles,
         pluginAgents,
         session: ctx.session,

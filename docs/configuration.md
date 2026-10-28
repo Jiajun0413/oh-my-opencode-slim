@@ -918,6 +918,10 @@ a variant unavailable for that model; Slim does not silently drop it.
 The v2 runtime-profile bridge preserves a child's per-call model and variant
 when its provider, model ID, or variant differs from the startup selection.
 An omitted variant and `default` identify the same default variant.
+When the agent has a startup model, a differing model is kept unless the
+host's model catalog proves it retired (no catalog, an empty catalog, or a
+failed lookup keeps the pin); a model that a config change retired is
+refreshed onto the current profile instead of being replayed across restarts.
 If the agent started without a model, any child model is kept, including the
 parent model v2 gives new subagents; a model added later applies after reload.
 New managed children receive the inference profile bound to their parent,

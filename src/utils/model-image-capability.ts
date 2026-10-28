@@ -1,5 +1,6 @@
 /**
- * Host-resolved image-input capability for a model reference.
+ * Host-resolved image-input capability and catalog existence for a model
+ * reference.
  *
  * Both host flavors are read through their own resolved-model registry —
  * the same merged view (models.dev catalog ⊕ user config capabilities)
@@ -15,6 +16,11 @@
  * keep their conservative default.
  */
 
+import { withTimeout } from './session';
+
+/** In-process registry lookups are fast; anything slower is unknown. */
+const CATALOG_LOOKUP_TIMEOUT_MS = 2_000;
+
 /** v2 `Model.Ref`-shaped: `id` is the model id. */
 export interface ModelImageCapabilityRef {
   readonly providerID: string;
@@ -22,7 +28,10 @@ export interface ModelImageCapabilityRef {
 }
 
 export interface ModelImageCapabilityCache {
-  promise?: Promise<ImageCatalog>;
+  /** Resolved catalog, or `null` after a failed fetch (unknown — callers
+   *  keep their default). `modelExistsInCatalog` drops the memo on failure
+   *  instead, so stale-pin checks retry on the next capture. */
+  promise?: Promise<ImageCatalog | null>;
 }
 
 export interface ModelImageCapabilityDeps {
@@ -120,12 +129,48 @@ export async function modelAcceptsImageInput(
     return undefined;
   try {
     deps.cache.promise ??= fetchCatalog(deps);
-    return (await deps.cache.promise).get(ref.providerID)?.get(ref.id);
+    return (await deps.cache.promise)?.get(ref.providerID)?.get(ref.id);
   } catch {
-    // A failed fetch is cached as an empty catalog for the rest of the
-    // generation (reads as unknown for every model, no per-request
-    // retry); the config hook drops the promise so config changes retry.
-    deps.cache.promise = Promise.resolve(new Map());
+    // A failed fetch is cached as unknown for the rest of the generation
+    // (no per-request retry); the config hook drops the promise so config
+    // changes retry.
+    deps.cache.promise = Promise.resolve(null);
+    return undefined;
+  }
+}
+
+/**
+ * Whether a model reference still resolves in the host catalog: `true`
+ * present, `false` only when a successfully loaded catalog positively
+ * shows it is gone (provider listed without the model, or provider
+ * absent), `undefined` unknown (no catalog source, empty/unparseable
+ * payload, failed fetch, timeout) — callers keep their default. Unknown
+ * outcomes drop the cache memo so the next call retries (issue #1689).
+ */
+export async function modelExistsInCatalog(
+  ref: ModelImageCapabilityRef,
+  deps: ModelImageCapabilityDeps,
+): Promise<boolean | undefined> {
+  if (!deps.modelDomain?.list && !deps.client?.config?.providers)
+    return undefined;
+  try {
+    deps.cache.promise ??= fetchCatalog(deps);
+    const catalog = await withTimeout(
+      deps.cache.promise,
+      CATALOG_LOOKUP_TIMEOUT_MS,
+      'model catalog lookup timed out',
+    );
+    // Empty or unparseable is unknown, not proof the model is gone.
+    if (!catalog || catalog.size === 0) {
+      deps.cache.promise = undefined;
+      return undefined;
+    }
+    const models = catalog.get(ref.providerID);
+    if (!models) return false;
+    return models.has(ref.id);
+  } catch {
+    // Failed or timed out: unknown; drop the memo so the next call retries.
+    deps.cache.promise = undefined;
     return undefined;
   }
 }

@@ -38,6 +38,9 @@ interface BridgeOptions {
   switchTimeoutMs?: number;
   onSessionCaptured?: (sessionID: string) => void;
   onSessionCaptureFailed?: (sessionID: string) => void;
+  isModelAvailable?: (
+    ref: ModelRef,
+  ) => boolean | undefined | Promise<boolean | undefined>;
 }
 
 function makeBridge(options?: BridgeOptions) {
@@ -71,6 +74,9 @@ function makeBridge(options?: BridgeOptions) {
       : {}),
     ...(options?.onSessionCaptureFailed
       ? { onSessionCaptureFailed: options.onSessionCaptureFailed }
+      : {}),
+    ...(options?.isModelAvailable
+      ? { isModelAvailable: options.isModelAvailable }
       : {}),
     log: () => {},
   });
@@ -789,6 +795,71 @@ describe('createSessionProfileBridge', () => {
     expect(switchCalls).toEqual([
       { sessionID: 'default', model: PROFILES.explorer.model },
     ]);
+  });
+
+  test('switches a stale retired model to the current profile (#1689)', async () => {
+    const retired = { providerID: 'cline-oauth', id: 'muse', variant: 'xhigh' };
+    const { bridge, switchCalls } = makeBridge({
+      registeredProfiles: PROFILES,
+      get: async () => ({
+        parentID: 'p',
+        agent: 'explorer',
+        model: retired,
+      }),
+      isModelAvailable: (ref) => ref.id !== 'muse',
+    });
+    await bridge.ensureSessionProfile('child');
+    // The retired pin is gone from the catalog: it must not be replayed —
+    // the child is refreshed onto the current explorer model.
+    expect(switchCalls).toEqual([
+      { sessionID: 'child', model: PROFILES.explorer.model },
+    ]);
+  });
+
+  test('keeps a valid per-call model that still resolves in the catalog (#1689)', async () => {
+    const override = { providerID: 'openai', id: 'per-call', variant: 'low' };
+    const { bridge, switchCalls } = makeBridge({
+      registeredProfiles: PROFILES,
+      get: async () => ({
+        parentID: 'p',
+        agent: 'explorer',
+        model: override,
+      }),
+      isModelAvailable: () => true,
+    });
+    await bridge.ensureSessionProfile('child');
+    expect(switchCalls).toEqual([]);
+    expect(bridge.profileForSession('child')).toBe(PROFILES.explorer);
+  });
+
+  test('keeps a differing model when catalog availability is unknown (#1689)', async () => {
+    const unknown = { providerID: 'other', id: 'maybe' };
+    const { bridge, switchCalls } = makeBridge({
+      registeredProfiles: PROFILES,
+      get: async () => ({
+        parentID: 'p',
+        agent: 'explorer',
+        model: unknown,
+      }),
+      isModelAvailable: () => undefined,
+    });
+    await bridge.ensureSessionProfile('child');
+    expect(switchCalls).toEqual([]);
+  });
+
+  test('keeps the child model when the catalog lookup fails (#1689)', async () => {
+    const override = { providerID: 'openai', id: 'per-call' };
+    const { bridge, switchCalls } = makeBridge({
+      registeredProfiles: PROFILES,
+      get: async () => ({
+        parentID: 'p',
+        agent: 'explorer',
+        model: override,
+      }),
+      isModelAvailable: () => Promise.reject(new Error('registry down')),
+    });
+    await bridge.ensureSessionProfile('child');
+    expect(switchCalls).toEqual([]);
   });
 
   test('leaves a modeled child uncaptured without session.switchModel', async () => {

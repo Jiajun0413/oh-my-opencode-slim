@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   type ModelImageCapabilityDeps,
   modelAcceptsImageInput,
+  modelExistsInCatalog,
 } from './model-image-capability';
 
 const REF = { providerID: 'p', id: 'm' } as const;
@@ -103,7 +104,66 @@ describe('modelAcceptsImageInput', () => {
     };
     await expect(modelAcceptsImageInput(REF, deps)).resolves.toBeUndefined();
     await expect(modelAcceptsImageInput(REF, deps)).resolves.toBeUndefined();
-    // No per-request retry: the empty catalog is cached for the generation.
+    // No per-request retry: the failed fetch caches unknown for the generation.
     expect(calls).toBe(1);
+  });
+});
+
+describe('modelExistsInCatalog', () => {
+  const catalogDeps = (): ModelImageCapabilityDeps => ({
+    cache: {},
+    modelDomain: {
+      list: async () => ({
+        data: [
+          { providerID: 'p', modelID: 'live' },
+          { providerID: 'p', modelID: 'also-live' },
+        ],
+      }),
+    },
+  });
+
+  test('reports present models and retired/unknown providers', async () => {
+    const deps = catalogDeps();
+    await expect(
+      modelExistsInCatalog({ providerID: 'p', id: 'live' }, deps),
+    ).resolves.toBe(true);
+    await expect(
+      modelExistsInCatalog({ providerID: 'p', id: 'gone' }, deps),
+    ).resolves.toBe(false);
+    await expect(
+      modelExistsInCatalog({ providerID: 'missing', id: 'live' }, deps),
+    ).resolves.toBe(false);
+  });
+
+  test('resolves undefined without any catalog source', async () => {
+    await expect(modelExistsInCatalog(REF, { cache: {} })).resolves.toBe(
+      undefined,
+    );
+  });
+
+  test('treats empty or unparseable catalogs as unknown', async () => {
+    for (const payload of [{ data: [] }, {}, { data: 'not-an-array' }]) {
+      const deps: ModelImageCapabilityDeps = {
+        cache: {},
+        modelDomain: { list: async () => payload },
+      };
+      await expect(modelExistsInCatalog(REF, deps)).resolves.toBeUndefined();
+    }
+  });
+
+  test('a failed fetch resolves undefined and retries on the next call', async () => {
+    let calls = 0;
+    const deps: ModelImageCapabilityDeps = {
+      cache: {},
+      modelDomain: {
+        list: async () => {
+          calls++;
+          throw new Error('registry unavailable');
+        },
+      },
+    };
+    await expect(modelExistsInCatalog(REF, deps)).resolves.toBeUndefined();
+    await expect(modelExistsInCatalog(REF, deps)).resolves.toBeUndefined();
+    expect(calls).toBe(2);
   });
 });
