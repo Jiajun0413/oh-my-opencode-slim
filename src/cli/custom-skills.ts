@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { basename, join } from 'node:path';
+import { getConfigDir } from '../config/paths';
 import { CUSTOM_SKILLS, type CustomSkill } from './custom-skills-registry';
-import { getConfigDir } from './paths';
 
 export { CUSTOM_SKILLS, type CustomSkill };
 

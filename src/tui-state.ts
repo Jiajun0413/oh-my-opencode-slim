@@ -1,7 +1,9 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import type { ReusableSessionSelection } from './utils/background-job-board';
 
 /**
@@ -261,36 +263,84 @@ function readTuiSnapshotStrict(statePath: string): TuiSnapshot | null {
   }
 }
 
-// Stat-based read cache for the polling TUI refresh (1/s per window).
-// Writers publish via tmp+rename, so a changed write always has a new
-// dev/ino — mtimeMs+size alone would also be sufficient, but inode
-// identity rules out same-mtime rewrites. Cache misses fall through to
-// a normal read; any stat/read failure bypasses the cache entirely.
-// Bounded LRU: a long-lived daemon polling many projects must not
-// retain a snapshot per visited path.
-const ASYNC_SNAPSHOT_CACHE_MAX = 8;
-const asyncSnapshotCache = new Map<
-  string,
-  { stat: string; snapshot: TuiSnapshot }
->();
+// One bounded stat-keyed snapshot cache shared by the locked writer and
+// the async TUI reader. Writers publish via tmp+rename, so a changed write
+// always has a new dev/ino; ctime rules out same-mtime in-place rewrites
+// and dev rules out cross-device inode coincidence. A hit must match every
+// field; any stat/read failure bypasses the cache entirely. Bounded LRU:
+// a long-lived process touching many projects must not retain a snapshot
+// per visited path.
+const SNAPSHOT_CACHE_MAX = 8;
 
-function snapshotStatKey(stat: fs.Stats): string {
-  return `${stat.dev}:${stat.ino}:${stat.mtimeMs}:${stat.size}`;
+interface SnapshotStat {
+  dev: number;
+  ino: number;
+  mtimeMs: number;
+  ctimeMs: number;
+  size: number;
 }
 
-function rememberAsyncSnapshot(
+interface SnapshotCacheEntry {
+  stat: SnapshotStat;
+  /** Canonical snapshot: the writer's memo. Never handed to async readers. */
+  snapshot: TuiSnapshot;
+  /**
+   * Isolated copy served to async readers. A reader may mutate it freely;
+   * the writer memo stays untouched. The copy survives cache hits, so
+   * reader-side mutations stay visible across polls of one entry (the
+   * pre-merge reader behavior).
+   */
+  readerSnapshot: TuiSnapshot;
+}
+
+const snapshotCache = new Map<string, SnapshotCacheEntry>();
+
+function snapshotStatOf(stat: fs.Stats): SnapshotStat {
+  return {
+    dev: stat.dev,
+    ino: stat.ino,
+    mtimeMs: stat.mtimeMs,
+    ctimeMs: stat.ctimeMs,
+    size: stat.size,
+  };
+}
+
+function sameSnapshotStat(a: SnapshotStat, b: SnapshotStat): boolean {
+  return (
+    a.dev === b.dev &&
+    a.ino === b.ino &&
+    a.mtimeMs === b.mtimeMs &&
+    a.ctimeMs === b.ctimeMs &&
+    a.size === b.size
+  );
+}
+
+function cacheSnapshot(
   statePath: string,
-  statKey: string,
   snapshot: TuiSnapshot,
-): void {
+  stat: SnapshotStat,
+): SnapshotCacheEntry {
   // Map insertion order doubles as the LRU order: re-insert to refresh.
-  asyncSnapshotCache.delete(statePath);
-  asyncSnapshotCache.set(statePath, { stat: statKey, snapshot });
-  while (asyncSnapshotCache.size > ASYNC_SNAPSHOT_CACHE_MAX) {
-    const oldest = asyncSnapshotCache.keys().next().value;
+  const entry: SnapshotCacheEntry = {
+    stat,
+    snapshot,
+    readerSnapshot: cloneSnapshot(snapshot),
+  };
+  snapshotCache.delete(statePath);
+  snapshotCache.set(statePath, entry);
+  while (snapshotCache.size > SNAPSHOT_CACHE_MAX) {
+    const oldest = snapshotCache.keys().next().value;
     if (oldest === undefined) break;
-    asyncSnapshotCache.delete(oldest);
+    snapshotCache.delete(oldest);
   }
+  return entry;
+}
+
+/** Refresh the LRU position without replacing the entry: reader-side
+ * mutations of the served copy must survive the refresh. */
+function touchSnapshot(statePath: string, entry: SnapshotCacheEntry): void {
+  snapshotCache.delete(statePath);
+  snapshotCache.set(statePath, entry);
 }
 
 export async function readTuiSnapshotAsync(
@@ -299,21 +349,34 @@ export async function readTuiSnapshotAsync(
   const statePath = getTuiStatePath(projectDir);
   try {
     const stat = await fs.promises.stat(statePath);
-    const statKey = snapshotStatKey(stat);
-    const cached = asyncSnapshotCache.get(statePath);
-    if (cached && cached.stat === statKey) {
-      // Refresh LRU position on hit.
-      asyncSnapshotCache.delete(statePath);
-      asyncSnapshotCache.set(statePath, cached);
-      return cached.snapshot;
+    const cached = snapshotCache.get(statePath);
+    if (cached && sameSnapshotStat(cached.stat, snapshotStatOf(stat))) {
+      touchSnapshot(statePath, cached); // LRU refresh
+      return cached.readerSnapshot;
     }
     const snapshot = parseSnapshot(
       await fs.promises.readFile(statePath, 'utf8'),
     );
-    rememberAsyncSnapshot(statePath, statKey, snapshot);
+    // Race-safe publication: publish only when the stat is stable across
+    // the read window. A concurrent tmp+rename makes the read return
+    // pre-rename content that must not be stamped with the post-rename
+    // identity — such a memoized fallback would then serve stale data
+    // until the next stat change. A vanished file skips publication but
+    // still returns what was read.
+    try {
+      const after = await fs.promises.stat(statePath);
+      if (sameSnapshotStat(snapshotStatOf(stat), snapshotStatOf(after))) {
+        return cacheSnapshot(statePath, snapshot, snapshotStatOf(after))
+          .readerSnapshot;
+      }
+    } catch {
+      // Publication only; the read itself succeeded.
+    }
     return snapshot;
   } catch {
-    asyncSnapshotCache.delete(statePath);
+    // A failed read is never memoized: the fallback must not swallow a
+    // later retry of the real file.
+    snapshotCache.delete(statePath);
     return emptySnapshot();
   }
 }
@@ -416,35 +479,14 @@ function releaseStateLock(lock: TuiStateLock): void {
   }
 }
 
-// Last confirmed on-disk snapshot per project, keyed by identity
-// (ino,mtime,size). No-ops return before the lock; failed writes do not
-// seed the memo. An identity mismatch (external rename) invalidates it.
-const lastKnownSnapshots = new Map<
-  string,
-  {
-    snapshot: TuiSnapshot;
-    ino: number;
-    mtimeMs: number;
-    ctimeMs: number;
-    size: number;
-  }
->();
-const LAST_KNOWN_SNAPSHOTS_MAX = 32;
+// The shared snapshot cache doubles as the locked writer's last-known
+// on-disk snapshot per project. No-ops return before the lock; failed
+// writes do not seed the memo. An identity mismatch (external rename or
+// in-place rewrite) invalidates it.
 
-function statSnapshotFile(statePath: string): {
-  ino: number;
-  mtimeMs: number;
-  ctimeMs: number;
-  size: number;
-} | null {
+function statSnapshotFile(statePath: string): SnapshotStat | null {
   try {
-    const stat = fs.statSync(statePath);
-    return {
-      ino: stat.ino,
-      mtimeMs: stat.mtimeMs,
-      ctimeMs: stat.ctimeMs,
-      size: stat.size,
-    };
+    return snapshotStatOf(fs.statSync(statePath));
   } catch {
     return null;
   }
@@ -458,48 +500,69 @@ function cloneSnapshot(snapshot: TuiSnapshot): TuiSnapshot {
 }
 
 export function snapshotSectionsEqual(a: TuiSnapshot, b: TuiSnapshot): boolean {
-  return (
-    JSON.stringify(a.agentModels) === JSON.stringify(b.agentModels) &&
-    JSON.stringify(a.agentVariants) === JSON.stringify(b.agentVariants) &&
-    JSON.stringify(a.agentDisplayNames) ===
-      JSON.stringify(b.agentDisplayNames) &&
-    JSON.stringify(a.activeSessions) === JSON.stringify(b.activeSessions) &&
-    JSON.stringify(a.activityPids) === JSON.stringify(b.activityPids) &&
-    JSON.stringify(a.sessionParents) === JSON.stringify(b.sessionParents) &&
-    JSON.stringify(a.sessionDetails) === JSON.stringify(b.sessionDetails) &&
-    JSON.stringify(a.reusableByAgent) === JSON.stringify(b.reusableByAgent) &&
-    JSON.stringify(a.reusableOwners) === JSON.stringify(b.reusableOwners)
-  );
+  if (
+    !isDeepStrictEqual(
+      {
+        agentModels: a.agentModels,
+        agentVariants: a.agentVariants,
+        agentDisplayNames: a.agentDisplayNames,
+        activeSessions: a.activeSessions,
+        activityPids: a.activityPids,
+        sessionParents: a.sessionParents,
+        sessionDetails: a.sessionDetails,
+        reusableByAgent: a.reusableByAgent,
+        reusableOwners: a.reusableOwners,
+      },
+      {
+        agentModels: b.agentModels,
+        agentVariants: b.agentVariants,
+        agentDisplayNames: b.agentDisplayNames,
+        activeSessions: b.activeSessions,
+        activityPids: b.activityPids,
+        sessionParents: b.sessionParents,
+        sessionDetails: b.sessionDetails,
+        reusableByAgent: b.reusableByAgent,
+        reusableOwners: b.reusableOwners,
+      },
+    )
+  ) {
+    return false;
+  }
+  // sessionParents key insertion order is load-bearing even though the
+  // entries are deep-equal: the parent cap prunes the oldest-inserted
+  // links and a re-registered link moves to the end, so a pure reorder
+  // must still count as a change.
+  return sameSessionParentOrder(a.sessionParents, b.sessionParents);
+}
+
+function sameSessionParentOrder(
+  a: Record<string, string>,
+  b: Record<string, string>,
+): boolean {
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) return false;
+  for (let i = 0; i < aKeys.length; i += 1) {
+    if (aKeys[i] !== bKeys[i]) return false;
+  }
+  return true;
 }
 
 function rememberSnapshot(statePath: string, snapshot: TuiSnapshot): void {
   const stat = statSnapshotFile(statePath);
   if (!stat) {
-    lastKnownSnapshots.delete(statePath);
+    snapshotCache.delete(statePath);
     return;
   }
-  if (
-    !lastKnownSnapshots.has(statePath) &&
-    lastKnownSnapshots.size >= LAST_KNOWN_SNAPSHOTS_MAX
-  ) {
-    const oldest = lastKnownSnapshots.keys().next().value;
-    if (oldest !== undefined) lastKnownSnapshots.delete(oldest);
-  }
-  lastKnownSnapshots.set(statePath, { snapshot, ...stat });
+  cacheSnapshot(statePath, snapshot, stat);
 }
 
 function memoFor(statePath: string): TuiSnapshot | undefined {
-  const entry = lastKnownSnapshots.get(statePath);
+  const entry = snapshotCache.get(statePath);
   if (!entry) return undefined;
   const stat = statSnapshotFile(statePath);
-  if (
-    !stat ||
-    stat.ino !== entry.ino ||
-    stat.mtimeMs !== entry.mtimeMs ||
-    stat.ctimeMs !== entry.ctimeMs ||
-    stat.size !== entry.size
-  ) {
-    lastKnownSnapshots.delete(statePath);
+  if (!stat || !sameSnapshotStat(entry.stat, stat)) {
+    snapshotCache.delete(statePath);
     return undefined;
   }
   return entry.snapshot;
@@ -554,6 +617,151 @@ export function updateSnapshot(
 }
 
 /**
+ * One native event's fan-out scope. Every recorder call and every
+ * projection publish made inside the scope stages its work; the scope
+ * commits once, in its finally, with one locked update per project.
+ *
+ * The scope is a VALUE carried by AsyncLocalStorage, never a global flag:
+ * overlapping fan-outs each run their own value and can never merge.
+ * A nested `withTuiSnapshotBatch` reuses the open value.
+ */
+interface TuiSnapshotBatch {
+  /** False once the scope closed: late continuations record immediately. */
+  open: boolean;
+  /** Staged mutators per project directory, in stage order. */
+  mutations: Map<
+    string,
+    Array<{
+      mutator: (snapshot: TuiSnapshot) => void;
+      onCommit?: (applied: boolean) => void;
+    }>
+  >;
+  /** Deferred projections keyed by their coalescing key (one per key). */
+  projections: Map<object, () => void>;
+}
+
+const tuiSnapshotBatch = new AsyncLocalStorage<TuiSnapshotBatch>();
+
+/**
+ * Run a native event's fan-out as one batch: staged recorder writes and
+ * deferred projections commit together in the finally, even when the
+ * operation rejects. A nested call joins the open scope.
+ */
+export async function withTuiSnapshotBatch<T>(
+  operation: () => Promise<T> | T,
+): Promise<T> {
+  const active = tuiSnapshotBatch.getStore();
+  if (active?.open) return await operation();
+  const batch: TuiSnapshotBatch = {
+    open: true,
+    mutations: new Map(),
+    projections: new Map(),
+  };
+  return tuiSnapshotBatch.run(batch, async () => {
+    try {
+      return await operation();
+    } finally {
+      drainTuiSnapshotBatch(batch);
+    }
+  });
+}
+
+function drainTuiSnapshotBatch(batch: TuiSnapshotBatch): void {
+  // Run the deferred projections while the scope is still open: each
+  // publishes by staging, so every section lands in the same per-project
+  // update below — one physical write including the recorder updates.
+  try {
+    const projections = [...batch.projections.values()];
+    batch.projections.clear();
+    for (const project of projections) {
+      try {
+        project();
+      } catch {
+        // Best-effort: one projection must not prevent other commits.
+      }
+    }
+    for (const [projectDir, pending] of batch.mutations) {
+      let applied = false;
+      try {
+        applied = updateSnapshot(projectDir, (snapshot) => {
+          for (const { mutator } of pending) mutator(snapshot);
+        });
+      } catch {
+        // A failed projection is not a committed ownership update.
+      }
+      for (const { onCommit } of pending) {
+        try {
+          onCommit?.(applied);
+        } catch {
+          // Isolate each best-effort observer from the remaining commits.
+        }
+      }
+    }
+  } finally {
+    batch.open = false;
+    batch.projections.clear();
+    batch.mutations.clear();
+  }
+}
+
+/**
+ * Stage one mutator into the open scope, or write it immediately when no
+ * scope is open. Mutators must be replay-safe: the commit applies them
+ * against a candidate clone first and again against the locked snapshot.
+ */
+function recordSnapshotUpdate(
+  projectDir: string,
+  mutator: (snapshot: TuiSnapshot) => void,
+  onCommit?: (applied: boolean) => void,
+): void {
+  const batch = tuiSnapshotBatch.getStore();
+  if (batch?.open) {
+    const pending = batch.mutations.get(projectDir);
+    if (pending) pending.push({ mutator, onCommit });
+    else batch.mutations.set(projectDir, [{ mutator, onCommit }]);
+    return;
+  }
+  const applied = updateSnapshot(projectDir, mutator);
+  onCommit?.(applied);
+}
+
+/**
+ * Publish a projection section. Inside an open scope the write is staged
+ * and `onCommit` reports the real commit result; outside one it is an
+ * immediate locked write.
+ */
+export function publishTuiProjection(
+  projectDir: string,
+  mutator: (snapshot: TuiSnapshot) => void,
+  onCommit?: (applied: boolean) => void,
+): void {
+  recordSnapshotUpdate(projectDir, mutator, onCommit);
+}
+
+/**
+ * Defer a projection until the open scope commits. Repeated calls with
+ * the same key coalesce into one run; without an open scope the
+ * projection runs synchronously.
+ */
+export function deferTuiProjection(key: object, project: () => void): void {
+  const batch = tuiSnapshotBatch.getStore();
+  if (batch?.open) {
+    if (!batch.projections.has(key)) batch.projections.set(key, project);
+    return;
+  }
+  project();
+}
+
+/** Run a deferred projection now (disposal path). */
+export function flushTuiProjection(key: object): void {
+  const batch = tuiSnapshotBatch.getStore();
+  const pending = batch?.projections.get(key);
+  if (!pending) return;
+  batch?.projections.delete(key);
+  pending();
+}
+
+/**
  * Project the registry's canonical→display identity table into the sidebar
  * map. Only labels whose display differs from the canonical ID are stored;
  * routing, model lookup, activity, expansion, and history keep canonical keys.
@@ -572,7 +780,7 @@ export function recordTuiAgentDisplayNames(
   displayNames: Record<string, string>,
   projectDir: string,
 ): void {
-  updateSnapshot(projectDir, (snapshot) => {
+  recordSnapshotUpdate(projectDir, (snapshot) => {
     snapshot.agentDisplayNames = { ...displayNames };
   });
 }
@@ -586,7 +794,7 @@ export function recordTuiAgentModels(
   },
   projectDir: string,
 ): void {
-  updateSnapshot(projectDir, (snapshot) => {
+  recordSnapshotUpdate(projectDir, (snapshot) => {
     snapshot.agentModels = { ...input.agentModels };
     snapshot.agentVariants = { ...(input.agentVariants ?? {}) };
     if (input.agentDisplayNames !== undefined) {
@@ -603,7 +811,7 @@ export function recordTuiAgentModel(
   },
   projectDir: string,
 ): void {
-  updateSnapshot(projectDir, (snapshot) => {
+  recordSnapshotUpdate(projectDir, (snapshot) => {
     snapshot.agentModels[input.agentName] = input.model;
     if (input.variant !== undefined) {
       if (input.variant === null) {
@@ -626,7 +834,7 @@ export function recordTuiAgentActivity(
     | { sessionID: string; active: false },
   projectDir: string,
 ): void {
-  updateSnapshot(projectDir, (snapshot) => {
+  recordSnapshotUpdate(projectDir, (snapshot) => {
     if (input.active) {
       snapshot.activeSessions[input.sessionID] = input.agentName;
       snapshot.activityPids[input.sessionID] = process.pid;
@@ -656,7 +864,7 @@ export function updateTuiSessionDetails(
   details: TuiSessionDetails,
   projectDir: string,
 ): void {
-  updateSnapshot(projectDir, (snapshot) => {
+  recordSnapshotUpdate(projectDir, (snapshot) => {
     if (snapshot.activeSessions[sessionID] === undefined) return;
     const current = snapshot.sessionDetails[sessionID] ?? {};
     snapshot.sessionDetails[sessionID] = { ...current, ...details };
@@ -672,7 +880,7 @@ export function clearTuiSessionAlias(
   sessionID: string,
   projectDir: string,
 ): void {
-  updateSnapshot(projectDir, (snapshot) => {
+  recordSnapshotUpdate(projectDir, (snapshot) => {
     if (snapshot.activeSessions[sessionID] === undefined) return;
     const current = snapshot.sessionDetails[sessionID];
     if (current === undefined || current.alias === undefined) return;
@@ -694,7 +902,7 @@ export function clearTuiSessionAlias(
 // dispose, not this sweep. Sidebar visibility is still scoped by
 // session tree at render time (#1147).
 export function clearTuiAgentActivities(projectDir: string): void {
-  updateSnapshot(projectDir, (snapshot) => {
+  recordSnapshotUpdate(projectDir, (snapshot) => {
     for (const sessionID of Object.keys(snapshot.activeSessions)) {
       const pid = snapshot.activityPids[sessionID];
       if (pid === undefined || !isProcessRunning(pid)) {
@@ -724,7 +932,7 @@ export function recordTuiSessionParent(
   parentID: string,
   projectDir: string,
 ): void {
-  updateSnapshot(projectDir, (snapshot) => {
+  recordSnapshotUpdate(projectDir, (snapshot) => {
     delete snapshot.sessionParents[sessionID]; // Re-registered link is newest.
     snapshot.sessionParents[sessionID] = parentID;
   });

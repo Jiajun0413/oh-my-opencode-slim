@@ -1429,3 +1429,62 @@ describe('mapV2EventToV1 session.deleted synthesis', () => {
     ).toBe(true);
   });
 });
+
+describe('mapV2EventToV1 shared payload fact (resolveV2EventPayload)', () => {
+  test('data and properties spellings map identically, raw first and unmutated', () => {
+    // The mapper resolves the event payload through the ONE shared fact
+    // (resolveV2EventPayload, also used by the permission-rules and
+    // runtime-profile bridges) instead of a private copy: both wire
+    // spellings of the same event must synthesize the exact same v1
+    // shapes, and the raw event stays the byte-identical first element.
+    const base = {
+      id: 'evt_shared_1',
+      created: 1_788_961_637_000,
+      durable: { aggregateID: 'ses_shared', seq: 1, version: 1 },
+    };
+    const viaData = deepFreeze({
+      ...base,
+      type: 'session.execution.succeeded',
+      data: { sessionID: 'ses_shared' },
+    });
+    const viaProperties = deepFreeze({
+      ...base,
+      type: 'session.execution.succeeded',
+      properties: { sessionID: 'ses_shared' },
+    });
+    const outData = mapV2EventToV1(viaData);
+    const outProperties = mapV2EventToV1(viaProperties);
+    expect(outData[0]).toBe(viaData);
+    expect(outProperties[0]).toBe(viaProperties);
+    expect(outProperties.slice(1)).toEqual(outData.slice(1));
+    expect(outData.slice(1)).toEqual([
+      {
+        type: 'session.status',
+        properties: {
+          sessionID: 'ses_shared',
+          status: { type: 'idle' },
+          activityAt: 1_788_961_637_000,
+        },
+      },
+      {
+        type: 'session.idle',
+        properties: {
+          sessionID: 'ses_shared',
+          activityAt: 1_788_961_637_000,
+        },
+      },
+    ]);
+  });
+
+  test('a non-record payload under neither key synthesizes nothing extra', () => {
+    const ev = deepFreeze({
+      id: 'evt_shared_2',
+      created: 1,
+      type: 'session.usage.updated',
+      data: 'not-a-record',
+      properties: 42,
+    });
+    const out = mapV2EventToV1(ev);
+    expect(out).toEqual([ev]);
+  });
+});

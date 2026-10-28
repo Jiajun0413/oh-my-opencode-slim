@@ -14,6 +14,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { resolveImageRouting } from '../config/constants';
 import { processImageAttachments } from './image-hook';
+import { createMessageTransformView } from './message-transform-view';
 import type { MessageWithParts } from './types';
 
 const TEST_DIR = path.join(os.tmpdir(), `image-hook-test-${process.pid}`);
@@ -816,5 +817,124 @@ describe('resolveImageRouting', () => {
   it('preserves explicit routing choices', () => {
     expect(resolveImageRouting('auto', false)).toBe('auto');
     expect(resolveImageRouting('direct', true)).toBe('direct');
+  });
+});
+
+describe('processImageAttachments (request-local view mode)', () => {
+  it('view mode renders byte-identical output to no-view mode', () => {
+    // Both runs share a workDir so the nudge's saved paths compare equal —
+    // only the view plumbing differs.
+    const workDir = path.join(TEST_DIR, 'view-equiv');
+    for (const fixture of [
+      () => [makeUserMsg([IMG])],
+      () => [
+        makeUserMsg([IMG]),
+        makeUserMsg([{ type: 'image', url: 'https://example.com/remote.png' }]),
+      ],
+      () => [makeUserMsg([{ type: 'text', text: 'no image' }])],
+    ]) {
+      const withoutView = fixture();
+      processImageAttachments({
+        messages: withoutView,
+        workDir,
+        ...AUTO,
+      });
+
+      const withView = fixture();
+      processImageAttachments({
+        messages: withView,
+        workDir,
+        view: createMessageTransformView(withView),
+        ...AUTO,
+      });
+
+      expect(JSON.stringify(withView)).toBe(JSON.stringify(withoutView));
+    }
+  });
+
+  it('a stale view (built before a tail message) still matches no-view mode', () => {
+    const workDir = path.join(TEST_DIR, 'view-stale');
+    const base = [makeUserMsg([{ type: 'text', text: 'earlier' }])];
+    const staleView = createMessageTransformView(base);
+    // An earlier stage appends a newer image-bearing user turn after the
+    // view was built: the hook must refollow the live array.
+    base.push(makeUserMsg([IMG]));
+
+    processImageAttachments({
+      messages: base,
+      workDir,
+      view: staleView,
+      ...AUTO,
+    });
+
+    const expected = [
+      makeUserMsg([{ type: 'text', text: 'earlier' }]),
+      makeUserMsg([IMG]),
+    ];
+    processImageAttachments({
+      messages: expected,
+      workDir,
+      ...AUTO,
+    });
+
+    expect(JSON.stringify(base)).toBe(JSON.stringify(expected));
+  });
+
+  it('observer-disabled warning stays latest-user-only with a view', () => {
+    const earlier = makeUserMsg([IMG]);
+    const latest = makeUserMsg([{ type: 'text', text: 'follow-up' }]);
+    const logMessages: string[] = [];
+    const messages = [earlier, latest];
+
+    const result = processImageAttachments({
+      messages,
+      workDir: path.join(TEST_DIR, 'view-disabled-earlier'),
+      imageRouting: 'auto',
+      disabledAgents: new Set(['observer']),
+      view: createMessageTransformView(messages),
+      log: (entry) => logMessages.push(entry),
+    });
+
+    expect(result).toBe(false);
+    expect(imagePartCount(earlier)).toBe(1);
+    expect(logMessages).toEqual([]);
+
+    const newestImage = makeUserMsg([IMG]);
+    const secondMessages = [earlier, newestImage];
+    const secondResult = processImageAttachments({
+      messages: secondMessages,
+      workDir: path.join(TEST_DIR, 'view-disabled-newest'),
+      imageRouting: 'auto',
+      disabledAgents: new Set(['observer']),
+      view: createMessageTransformView(secondMessages),
+      log: (entry) => logMessages.push(entry),
+    });
+
+    expect(secondResult).toBe(true);
+    expect(imagePartCount(newestImage)).toBe(1);
+    expect(logMessages.at(-1)).toContain('retained inline');
+  });
+
+  it('the view decodes each image part once per request and never shares state', () => {
+    const message = makeUserMsg([IMG]);
+    const messages = [message];
+    const imagePart = message.parts[0];
+
+    const first = createMessageTransformView(messages);
+    const second = createMessageTransformView(messages);
+
+    const a = first.imageView(imagePart);
+    expect(a).not.toBeNull();
+    // Memoized inside one view: the same decoded object comes back.
+    expect(first.imageView(imagePart)).toBe(a);
+    // Two views over the same messages decode independently — no global
+    // or persistent memo the request could leak into the next.
+    expect(second.imageView(imagePart)).not.toBe(a);
+    expect(second.imageView(imagePart)).toEqual(a);
+
+    // Text parts are rejected by shape and never decode.
+    const textPart = { type: 'text', text: 'no decode' };
+    expect(first.imageView(textPart)).toBeNull();
+    expect(first.imageView(textPart)).toBeNull();
   });
 });

@@ -78,3 +78,38 @@ describe('getAgentMcpList rename continuity', () => {
     expect(getAgentMcpList('explorer', runtime)).toEqual(['canonical-mcp']);
   });
 });
+
+describe('getAgentMcpList pass-local agents record', () => {
+  test('uses the provided record instead of deriving from the runtime', () => {
+    const runtime = runtimeFor({
+      agents: { explorer: { mcps: ['runtime-mcp'] } },
+    });
+    expect(
+      getAgentMcpList('explorer', runtime, {
+        explorer: { mcps: ['pass-mcp'] },
+      }),
+    ).toEqual(['pass-mcp']);
+  });
+
+  test('legacy aliases resolve inside the provided record', () => {
+    const runtime = runtimeFor({});
+    expect(
+      getAgentMcpList('explorer', runtime, {
+        librarian: { mcps: ['legacy-mcp'] },
+      }),
+    ).toEqual(['legacy-mcp']);
+  });
+
+  test('per-agent defaults apply for entries absent from the record', () => {
+    const runtime = runtimeFor({});
+    expect(getAgentMcpList('oracle', runtime, {})).toEqual([]);
+    expect(getAgentMcpList('custom-unknown', runtime, {})).toEqual([]);
+  });
+
+  test('without the record the runtime derivation still applies', () => {
+    const runtime = runtimeFor({
+      agents: { explorer: { mcps: ['configured-mcp'] } },
+    });
+    expect(getAgentMcpList('explorer', runtime)).toEqual(['configured-mcp']);
+  });
+});

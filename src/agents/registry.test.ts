@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { CouncilConfigSchema } from '../config';
 import { RuntimeConfig } from '../config/runtime';
 import type { MarketplaceActivationStore } from '../marketplace/activation';
+import * as marketplaceImplementation from '../marketplace/registry-runtime';
 import { MarketplacePackageManifestSchema } from '../marketplace/schemas';
 import {
   adaptPermissions,
@@ -12,7 +13,7 @@ import {
 } from '../v2/adapters';
 import { compilePermissionPolicy } from '../v2/permissions';
 import type { V2PermissionRule } from '../v2/types';
-import { createAgents } from './index';
+import { createAgents, getAgentConfigsFromDefinitions } from './index';
 import { buildResolvedAgentRegistry } from './registry';
 
 const DIR = 'runtime-test-final-agent-registry';
@@ -96,6 +97,7 @@ function marketplaceOptions(
 ) {
   return {
     marketplace: {
+      implementation: marketplaceImplementation,
       selectedPackageIds,
       store,
       pluginVersion: '3.2.0',
@@ -1856,6 +1858,7 @@ describe('finalized existing-agent registry', () => {
       hostSnapshot: { mcp: { 'host-mcp': { type: 'local' } } },
       definitions,
       marketplace: {
+        implementation: marketplaceImplementation,
         selectedPackageIds: ['team/builtin'],
         store: marketplaceStore(packages),
         pluginVersion: '3.2.0',
@@ -1878,6 +1881,7 @@ describe('finalized existing-agent registry', () => {
       },
       definitions,
       marketplace: {
+        implementation: marketplaceImplementation,
         selectedPackageIds: ['team/orchestrator'],
         store: marketplaceStore(packages),
         pluginVersion: '3.2.0',
@@ -1894,6 +1898,7 @@ describe('finalized existing-agent registry', () => {
       hostSnapshot: { mcp: { 'host-mcp': { type: 'local' } } },
       definitions,
       marketplace: {
+        implementation: marketplaceImplementation,
         selectedPackageIds: ['team/unbound-builtin'],
         store: marketplaceStore(packages),
         pluginVersion: '3.2.0',
@@ -1922,6 +1927,7 @@ describe('finalized existing-agent registry', () => {
       hostSnapshot: { mcp: { 'host-mcp': { type: 'local' } } },
       definitions,
       marketplace: {
+        implementation: marketplaceImplementation,
         selectedPackageIds: ['team/orchestrator-fallback'],
         store: marketplaceStore({
           'team/orchestrator-fallback': marketplacePackage(
@@ -3992,5 +3998,171 @@ describe('marketplace agent customization', () => {
         '/approved/*',
       ),
     ).toBe('deny');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pass-local derived inputs
+//
+// The registry hoists the merged override record and the model arrays once
+// per build instead of re-deriving them per agent. These tests pin the
+// constant derivation budget (independent of roster size) and the unchanged
+// output of the hoisted paths.
+// ---------------------------------------------------------------------------
+
+type RegistryDerivationCounts = {
+  agentsCalls: number;
+  arraysCalls: number;
+};
+
+/**
+ * Count `RuntimeConfig.agents()` and `modelArrays` derivations. Patches the
+ * prototype while the sampled code runs and restores the original members
+ * afterwards, even when the caller throws.
+ */
+function instrumentRuntimeDerivations() {
+  const agentsMethod = RuntimeConfig.prototype.agents;
+  const arraysDescriptor = Object.getOwnPropertyDescriptor(
+    RuntimeConfig.prototype,
+    'modelArrays',
+  );
+  if (!arraysDescriptor?.get) {
+    throw new Error('RuntimeConfig.modelArrays is not an accessor');
+  }
+  const arraysGetter = arraysDescriptor.get;
+  let agentsCalls = 0;
+  let arraysCalls = 0;
+  RuntimeConfig.prototype.agents = function (
+    this: RuntimeConfig,
+    defaultSkills: Parameters<RuntimeConfig['agents']>[0] = {},
+  ): ReturnType<RuntimeConfig['agents']> {
+    agentsCalls += 1;
+    return agentsMethod.call(this, defaultSkills);
+  };
+  Object.defineProperty(RuntimeConfig.prototype, 'modelArrays', {
+    configurable: true,
+    get(this: RuntimeConfig) {
+      arraysCalls += 1;
+      return arraysGetter.call(this);
+    },
+  });
+  return {
+    sample: (): RegistryDerivationCounts => ({ agentsCalls, arraysCalls }),
+    restore: () => {
+      RuntimeConfig.prototype.agents = agentsMethod;
+      Object.defineProperty(
+        RuntimeConfig.prototype,
+        'modelArrays',
+        arraysDescriptor,
+      );
+    },
+  };
+}
+
+describe('pass-local derived inputs', () => {
+  test('agents() and modelArrays derivations stay constant as the roster grows', () => {
+    const run = (customCount: number) => {
+      const directory = `runtime-test-registry-budget-${customCount}`;
+      RuntimeConfig.reset(directory);
+      const runtime = RuntimeConfig.init(directory, {
+        agents: Object.fromEntries(
+          Array.from({ length: customCount }, (_, index) => [
+            `custom-${index}`,
+            { model: 'provider/gpt-test' },
+          ]),
+        ),
+      });
+      let definitions: ReturnType<typeof createAgents> = [];
+      const checkpoints: Record<string, RegistryDerivationCounts> = {};
+      const instrumented = instrumentRuntimeDerivations();
+      try {
+        definitions = createAgents(runtime, { hostFlavor: 'v2' });
+        checkpoints.definitions = instrumented.sample();
+        getAgentConfigsFromDefinitions(runtime, definitions);
+        checkpoints.sdk = instrumented.sample();
+        buildResolvedAgentRegistry(runtime, {
+          definitions,
+          hostSnapshot: {},
+          pluginMcps: {},
+          hostFlavor: 'v2',
+        });
+        checkpoints.registry = instrumented.sample();
+      } finally {
+        instrumented.restore();
+      }
+      return { definitionCount: definitions.length, checkpoints };
+    };
+
+    const small = run(0);
+    const large = run(10);
+    expect(large.definitionCount).toBe(small.definitionCount + 10);
+    expect(large.checkpoints).toEqual(small.checkpoints);
+    // Pin the constant budget across the three phases: one merged-override
+    // derivation in createAgents, one per MCP-projection pass, one hoist +
+    // one modelArrays derivation + one marketplace-defaults flavor inside
+    // the registry build.
+    expect(small.checkpoints).toEqual({
+      definitions: { agentsCalls: 1, arraysCalls: 0 },
+      sdk: { agentsCalls: 2, arraysCalls: 0 },
+      registry: { agentsCalls: 6, arraysCalls: 1 },
+    });
+  });
+
+  test('hoisted derivations keep host precedence, session inheritance, and alias MCP projection intact', () => {
+    const runtime = runtimeFor({
+      agents: {
+        fixer: { model: ['provider/fix-a', 'provider/fix-b'] },
+        explorer: {
+          model: ['provider/exp-a', 'provider/exp-b'],
+          inheritModelFrom: 'session',
+        },
+        librarian: { mcps: ['legacy-mcp'] },
+        'custom-planner': { model: 'provider/planner' },
+      },
+    });
+    const hostSelected: string[] = [];
+    const definitions = createAgents(runtime);
+    const registry = buildResolvedAgentRegistry(runtime, {
+      hostSnapshot: {
+        agent: {
+          fixer: { model: 'host/fixer' },
+          explorer: { model: 'host/exp' },
+        },
+      },
+      definitions,
+      pluginMcps: {},
+      onHostModelSelected: (name) => {
+        hostSelected.push(name);
+      },
+    });
+
+    // Static chain: the host-selected model wins (host precedence) and the
+    // plugin array stays the candidate list. Only the static-chain agent is
+    // reported as a host switch — the combined session-inheritance agent
+    // keeps its chain as a fallback tail, not a primary model.
+    expect(hostSelected).toEqual(['fixer']);
+    expect(registry.modelCandidates.fixer).toEqual([
+      { id: 'provider/fix-a' },
+      { id: 'provider/fix-b' },
+    ]);
+    expect(registry.effectiveStartupModels.fixer).toEqual({
+      model: 'host/fixer',
+    });
+    expect(registry.tuiAgentModels.fixer).toBe('host/fixer');
+
+    // Combined array-chain + session inheritance: no startup model of its
+    // own, the host model is cleared, and the TUI follows the session.
+    expect(registry.effectiveStartupModels.explorer).toEqual({});
+    expect(registry.tuiAgentModels.explorer).toBe('default');
+    const sdkProjection = registry.getSdkAgentProjection() as Record<
+      string,
+      Record<string, unknown>
+    >;
+    expect(sdkProjection.explorer.model).toBeUndefined();
+    // The hoisted MCP projection still resolves the legacy alias record.
+    expect(sdkProjection.explorer.mcps).toEqual(['legacy-mcp']);
+
+    // Scalar-model custom agents keep their model through the pass.
+    expect(sdkProjection['custom-planner'].model).toBe('provider/planner');
   });
 });

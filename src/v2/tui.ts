@@ -25,7 +25,11 @@ import {
   switchPresetOnDisk,
 } from '../tools/preset-switch';
 import type { TuiRouteView } from '../tui';
-import omoTui, { renderUpdateBadge, resolveRouteSessionId } from '../tui';
+import omoTui, {
+  readTuiGates,
+  renderUpdateBadge,
+  resolveRouteSessionId,
+} from '../tui';
 import {
   KILL_ALL_COMMAND_ID,
   KILL_ALL_KEYBIND,
@@ -342,17 +346,6 @@ async function runKillAllFlow(ctx: {
 }
 
 /**
- * Whether the update notice may be scheduled. Only an explicit
- * `disabled_hooks: ["auto-update-checker"]` turns it off — a config read
- * failure resolves to `undefined` upstream and keeps the notice
- * (best-effort, matching every other degraded path here, and never silently
- * dropping a user-visible feature).
- */
-function updateNoticeEnabled(config: PluginConfig | undefined): boolean {
-  return !(config?.disabled_hooks ?? []).includes('auto-update-checker');
-}
-
-/**
  * Which TUI keymap commands the config still enables, resolved from one
  * config read via the shared `disabled_commands` decision surface.
  * `undefined` (config read failure) keeps every command — fail-open,
@@ -364,8 +357,7 @@ interface V2CommandGates {
   subagent: boolean;
 }
 
-function commandGates(config: PluginConfig | undefined): V2CommandGates {
-  const disabledCommands = new Set(config?.disabled_commands ?? []);
+function commandGates(disabledCommands: ReadonlySet<string>): V2CommandGates {
   return {
     preset: isCommandEnabled('preset', { disabledCommands }),
     killall: isCommandEnabled('killall', { disabledCommands }),
@@ -387,19 +379,8 @@ const plugin = {
     if (isPluginDisabledByEnv()) return;
 
     const directory = ctx.location?.directory ?? process.cwd();
-    // One config read gates every surface registered below. Fail-open: a
-    // read failure keeps the TUI and all of its commands (never silently
-    // drops a user-visible feature).
-    let config: PluginConfig | undefined;
-    try {
-      config = loadPluginConfig(directory, { silent: true, hostFlavor: 'v2' });
-    } catch (err) {
-      log(
-        '[v2][tui] tui config read failed; keeping all TUI surfaces',
-        String(err),
-      );
-    }
-    if (config?.tui === false) {
+    const gatesRead = readTuiGates(directory, 'v2');
+    if (!gatesRead.gates.tuiEnabled) {
       // `tui: false` master switch: the TUI entry registers nothing — no
       // sidebar, no keymap, no preset manager, no update notice.
       log('[v2][tui] tui disabled by config (tui: false); registering nothing');
@@ -407,13 +388,13 @@ const plugin = {
     }
 
     const disposers: Array<() => void> = [];
-    const baseCleanup = await omoTui.setup(ctx);
+    const baseCleanup = await omoTui.setup(ctx, gatesRead);
     if (typeof baseCleanup === 'function') disposers.push(baseCleanup);
 
     // `disabled_commands` gates the TUI entry exactly like it gates the
     // server command: a disabled command's palette/slash/keybind does not
     // exist anywhere.
-    const gates = commandGates(config);
+    const gates = commandGates(gatesRead.gates.disabledCommands);
 
     const slotApi = (ctx.ui as { slot?: V2SlotApi } | undefined)?.slot;
     if (typeof slotApi !== 'function') {
@@ -447,7 +428,7 @@ const plugin = {
     // shim — so the TUI owns the message. Scheduled off the startup path and
     // silent on every failure; see ./update-notice.
     // `disabled_hooks: ["auto-update-checker"]` is the explicit off switch.
-    if (updateNoticeEnabled(config)) {
+    if (!gatesRead.gates.disabledHooks.has('auto-update-checker')) {
       disposers.push(
         registerUpdateNotice(ctx, {
           renderBadge: (latest, color) => renderUpdateBadge(latest, color),

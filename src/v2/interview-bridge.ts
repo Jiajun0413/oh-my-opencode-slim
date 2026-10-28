@@ -9,6 +9,7 @@ import type { InterviewMessage } from '../interview/types';
 import { isRecord } from '../utils/guards';
 import { log } from '../utils/logger';
 import { createSessionListShim, resolveV2Directory } from './client-shim';
+import { resolveV2EventPayload } from './runtime-profiles';
 import { createSessionSubmit, userTextFromContent } from './session-submit';
 import type {
   V2CommandDraft,
@@ -334,22 +335,11 @@ export function createV2InterviewBridge(
     transcripts.set(sessionID, messages);
   }
 
-  /** Resolve the assistant message id carried by a v2 text event, when the
-   * host surfaces one (live payloads vary: messageID/info.id/message.id). */
   function textMessageID(
     properties: Record<string, unknown>,
   ): string | undefined {
-    const direct = properties.messageID;
-    if (typeof direct === 'string' && direct) return direct;
-    const info = isRecord(properties.info) ? properties.info : undefined;
-    if (info && typeof info.id === 'string' && info.id) return info.id;
-    const message = isRecord(properties.message)
-      ? properties.message
-      : undefined;
-    if (message && typeof message.id === 'string' && message.id) {
-      return message.id;
-    }
-    return undefined;
+    const id = properties.assistantMessageID;
+    return typeof id === 'string' && id ? id : undefined;
   }
 
   async function handleEvent(event: Record<string, unknown>): Promise<void> {
@@ -358,18 +348,14 @@ export function createV2InterviewBridge(
     // OpenCodeEvent wire shape); `properties` is the legacy/test spelling.
     // Reading only `properties` left this handler dead on live v2 for ALL
     // events. handleContext is unaffected (different event type).
-    const properties = isRecord(event.data)
-      ? event.data
-      : isRecord(event.properties)
-        ? event.properties
-        : {};
+    const properties = resolveV2EventPayload(event);
     const sessionID =
       (typeof properties.sessionID === 'string' && properties.sessionID) ||
       ((properties.info as { id?: string } | undefined)?.id ?? '');
     if (!sessionID) return;
 
     const managed = isManagedInterviewSession(sessionID);
-    if (type === 'session.next.text.started') {
+    if (type === 'session.text.started') {
       if (!managed) return;
       const messageID = textMessageID(properties);
       activeText.set(sessionID, '');
@@ -377,7 +363,7 @@ export function createV2InterviewBridge(
       beginText(sessionID, messageID);
       return;
     }
-    if (type === 'session.next.text.delta') {
+    if (type === 'session.text.delta') {
       if (!managed) return;
       const text = `${activeText.get(sessionID) ?? ''}${typeof properties.delta === 'string' ? properties.delta : ''}`;
       activeText.set(sessionID, text);
@@ -388,7 +374,7 @@ export function createV2InterviewBridge(
       );
       return;
     }
-    if (type === 'session.next.text.ended') {
+    if (type === 'session.text.ended') {
       if (!managed) return;
       const text =
         typeof properties.text === 'string'

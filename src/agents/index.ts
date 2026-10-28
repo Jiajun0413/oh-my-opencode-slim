@@ -14,7 +14,7 @@ import { getAgentMcpList } from '../config/agent-mcps';
 import type { HostAgentConfig, RuntimeConfig } from '../config/runtime';
 import { hostLegacyAgent } from '../config/runtime';
 import { applyOrchestratorModelConfig } from '../config/strip-orchestrator-model';
-import { mergeWithAliases } from '../config/utils';
+import { lookupWithAliases, mergeWithAliases } from '../config/utils';
 import { escapeRegExp, normalizeAgentName } from '../utils/agent-variant';
 import { delegationVocabulary, parseModelRef } from '../v2/adapters';
 
@@ -272,10 +272,12 @@ function applyModelInheritance(
 export function applyModelInheritanceToConfig(
   configAgent: Record<string, unknown>,
   runtime: RuntimeConfig,
+  /** Pass-local merged agents record, when the caller already derived it. */
+  mergedAgents?: Record<string, AgentOverrideConfig>,
 ): void {
-  const mergedAgents = runtime.agents();
+  const overrides = mergedAgents ?? runtime.agents();
   for (const agentName of Object.keys(configAgent)) {
-    const override = getOverrideFromAgents(mergedAgents, agentName);
+    const override = getOverrideFromAgents(overrides, agentName);
     if (!override) continue;
     if (
       (override.model !== undefined && !Array.isArray(override.model)) ||
@@ -418,10 +420,18 @@ export function projectAgentRuntimeState(input: {
   runtimePreset?: Preset;
 }): { profiles: AgentRuntimeProfiles; projection: AgentModelProjection } {
   const { runtime, agentDefs, agentConfigs, runtimePreset } = input;
+  // One merged-override derivation for the whole pass. The sidebar probe,
+  // the inheritance pass, and the profile loop below all read this
+  // pass-local copy so `agents()` is never re-derived per agent.
+  const mergedAgents = runtime.agents();
 
-  // 1. Array-primary pass.
-  if (Object.keys(runtime.modelArrays).length > 0) {
-    for (const [agentName, models] of Object.entries(runtime.modelArrays)) {
+  // 1. Array-primary pass. One `modelArrays` derivation per pass; the
+  // sidebar chain-head probe below reuses this pass-local copy instead of
+  // re-deriving `runtimeChains` (itself derived from `modelArrays`) per
+  // agent.
+  const modelArrays = runtime.modelArrays;
+  if (Object.keys(modelArrays).length > 0) {
+    for (const [agentName, models] of Object.entries(modelArrays)) {
       if (models.length === 0) continue;
       const chosen = models[0];
       const entry = agentConfigs[agentName];
@@ -485,7 +495,7 @@ export function projectAgentRuntimeState(input: {
   }
 
   // 3. Model-inheritance policy (authoritative for inheritModelFrom agents).
-  applyModelInheritanceToConfig(agentConfigs, runtime);
+  applyModelInheritanceToConfig(agentConfigs, runtime, mergedAgents);
 
   // 4. Sidebar projection (pre-strip; mirrors the historical capture).
   const projection: AgentModelProjection = {
@@ -504,18 +514,22 @@ export function projectAgentRuntimeState(input: {
     // Session-following combined agents have no launch model of their own:
     // entry.model is cleared, the chain head is only a fallback tail, and
     // agentDef.config.model is deleted by inheritance. Skip the chain-head
-    // probe so they display 'default'.
+    // probe so they display 'default'. Same lookup+predicate as
+    // RuntimeConfig.combinedModelInheritanceSource, computed pass-locally
+    // over the hoisted merged record so the loop does not re-derive
+    // `agents()` per agent.
+    const override = lookupWithAliases(mergedAgents, agentDef.name);
     const followsSessionModel =
-      runtime.combinedModelInheritanceSource(agentDef.name) === 'session';
+      Array.isArray(override?.model) &&
+      override.model.length > 0 &&
+      override.inheritModelFrom === 'session';
+    const chainHead = followsSessionModel
+      ? undefined
+      : modelArrays[agentDef.name]?.[0];
     const resolvedModel =
       entryModelString(entry) ??
-      (followsSessionModel
-        ? undefined
-        : runtime.runtimeChains[agentDef.name]?.[0]
-          ? runtime.runtimeChains[agentDef.name][0]
-          : typeof agentDef.config.model === 'string'
-            ? agentDef.config.model
-            : undefined);
+      chainHead?.id ??
+      chainedModelFromDefinition(agentDef);
     const resolvedVariant =
       typeof entry?.variant === 'string'
         ? entry.variant
@@ -536,6 +550,7 @@ export function projectAgentRuntimeState(input: {
   for (const [name, entry] of Object.entries(agentConfigs)) {
     const modelString = entryModelString(entry);
     const ref = parseModelRef(modelString);
+
     const variant =
       typeof entry.variant === 'string' ? entry.variant : undefined;
     const temperature =
@@ -570,6 +585,15 @@ export function projectAgentRuntimeState(input: {
   });
 
   return { profiles, projection };
+}
+
+/** Chain-head model id for one definition (the factory fall-through). */
+function chainedModelFromDefinition(
+  agentDef: AgentDefinition,
+): string | undefined {
+  return typeof agentDef.config.model === 'string'
+    ? agentDef.config.model
+    : undefined;
 }
 
 function normalizeCustomAgentName(name: string): string {
@@ -1272,6 +1296,11 @@ export function getAgentConfigsFromDefinitions(
   runtime: RuntimeConfig,
   agents: readonly AgentDefinition[],
 ): Record<string, SDKAgentConfig> {
+  // One merged-override derivation for the whole projection pass: every
+  // agent's MCP list reads this pass-local copy instead of re-deriving
+  // `runtime.agents()` per agent.
+  const mergedAgents = runtime.agents();
+
   const applyClassification = (
     name: string,
     sdkConfig: SDKAgentConfig & {
@@ -1307,7 +1336,7 @@ export function getAgentConfigsFromDefinitions(
     } = {
       ...a.config,
       description: a.description,
-      mcps: getAgentMcpList(a.name, runtime),
+      mcps: getAgentMcpList(a.name, runtime, mergedAgents),
     };
 
     if (a.displayName) {

@@ -13,12 +13,12 @@ import * as path from 'node:path';
 import {
   CompanionManager,
   companionSessionIdForDirectory,
-  normalizeCompanionSessionStatus,
   rememberKnownCompanionProject,
   resolveCompanionBinaryPath,
   resolveKnownCompanionProject,
   stateFilePath,
 } from './manager';
+import { normalizeCompanionSessionStatus } from './status';
 
 // Point writes at a temp dir so tests don't touch the real state file.
 const TEST_DIR = path.join(os.tmpdir(), `companion-test-${process.pid}`);

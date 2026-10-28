@@ -451,12 +451,17 @@ describe('v2 interview bridge', () => {
     expect(bridge.service.getActiveInterviewId('ses_exec')).not.toBeNull();
 
     await bridge.handleEvent({
-      type: 'session.next.text.started',
-      properties: { sessionID: 'ses_exec', messageID: 'msg-1' },
+      type: 'session.text.started',
+      data: { sessionID: 'ses_exec', assistantMessageID: 'msg-1', ordinal: 0 },
     });
     await bridge.handleEvent({
-      type: 'session.next.text.ended',
-      properties: { sessionID: 'ses_exec', messageID: 'msg-1', text: 'Done.' },
+      type: 'session.text.ended',
+      data: {
+        sessionID: 'ses_exec',
+        assistantMessageID: 'msg-1',
+        ordinal: 0,
+        text: 'Done.',
+      },
     });
 
     // Live v2 emits execution.started (busy) before the turn's tool submit.
@@ -508,15 +513,15 @@ describe('v2 interview bridge', () => {
       ],
     });
     await bridge.handleEvent({
-      type: 'session.next.text.started',
+      type: 'session.text.started',
       properties: { sessionID: 'ses_text' },
     });
     await bridge.handleEvent({
-      type: 'session.next.text.delta',
+      type: 'session.text.delta',
       properties: { sessionID: 'ses_text', delta: 'one' },
     });
     await bridge.handleEvent({
-      type: 'session.next.text.delta',
+      type: 'session.text.delta',
       properties: { sessionID: 'ses_text', delta: ' two' },
     });
     expect(bridge.getTranscript('ses_text').at(-1)?.parts?.[0]?.text).toBe(
@@ -557,11 +562,11 @@ describe('v2 interview bridge', () => {
       ],
     });
     await bridge.handleEvent({
-      type: 'session.next.text.started',
+      type: 'session.text.started',
       data: { sessionID: 'ses_live' },
     });
     await bridge.handleEvent({
-      type: 'session.next.text.delta',
+      type: 'session.text.delta',
       data: { sessionID: 'ses_live', delta: 'from data' },
     });
     expect(bridge.getTranscript('ses_live').at(-1)?.parts?.[0]?.text).toBe(
@@ -597,11 +602,11 @@ describe('v2 interview bridge', () => {
       ],
     });
     await bridge.handleEvent({
-      type: 'session.next.text.started',
+      type: 'session.text.started',
       properties: { sessionID: 'ses_plain' },
     });
     await bridge.handleEvent({
-      type: 'session.next.text.delta',
+      type: 'session.text.delta',
       properties: { sessionID: 'ses_plain', delta: 'ignored' },
     });
     expect(bridge.getTranscript('ses_plain')).toEqual([]);

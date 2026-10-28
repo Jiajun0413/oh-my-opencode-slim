@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { MarketplacePackageIdSchema } from '../marketplace/schemas';
+import { MarketplacePackageIdSchema } from '../marketplace/id-schema';
 import {
   AGENT_THEME_COLORS,
   DEFAULT_CHILD_INPUT_WAKE_KINDS,

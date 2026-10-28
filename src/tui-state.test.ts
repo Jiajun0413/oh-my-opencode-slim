@@ -17,6 +17,7 @@ import {
   TUI_SESSION_PARENTS_MAX,
   updateSnapshot,
   updateTuiSessionDetails,
+  withTuiSnapshotBatch,
 } from './tui-state';
 
 let previousXdgDataHome: string | undefined;
@@ -1041,5 +1042,235 @@ describe('sessionDetails (clickable sidebar projection)', () => {
     const parsed = readTuiSnapshot(tempDir);
     expect(parsed.sessionDetails).toEqual({});
     expect(parsed.agentModels).toEqual({ oracle: 'openai/gpt-6' });
+  });
+});
+
+describe('snapshotSectionsEqual (structural deep equality)', () => {
+  test('key insertion order and updatedAt never manufacture differences', () => {
+    recordTuiAgentModels(
+      { agentModels: { explorer: 'model-a', oracle: 'model-b' } },
+      tempDir,
+    );
+    const snapshot = readTuiSnapshot(tempDir);
+    const reordered = readTuiSnapshot(tempDir);
+    reordered.agentModels = { oracle: 'model-b', explorer: 'model-a' };
+    reordered.updatedAt = snapshot.updatedAt + 1_000;
+    expect(snapshotSectionsEqual(snapshot, reordered)).toBe(true);
+  });
+
+  test('nested value differences still break equality', () => {
+    const a = readTuiSnapshot(tempDir);
+    const b = readTuiSnapshot(tempDir);
+    const entry = (lastUsedAt: number) => ({
+      taskID: 'ses_1',
+      alias: 'ora-1',
+      terminalState: 'completed' as const,
+      lastUsedAt,
+    });
+    a.reusableByAgent['parent-1'] = { oracle: [entry(5)] };
+    b.reusableByAgent['parent-1'] = { oracle: [entry(6)] };
+    expect(snapshotSectionsEqual(a, b)).toBe(false);
+
+    b.reusableByAgent['parent-1'] = { oracle: [entry(5)] };
+    expect(snapshotSectionsEqual(a, b)).toBe(true);
+
+    a.sessionDetails.ses_1 = { alias: 'ora-1', status: 'busy' };
+    b.sessionDetails.ses_1 = { alias: 'ora-1', status: 'retry' };
+    expect(snapshotSectionsEqual(a, b)).toBe(false);
+  });
+});
+
+describe('unified snapshot cache (writer memo + async reader)', () => {
+  test('readTuiSnapshotAsync serves a snapshot the writer published without re-reading', async () => {
+    recordTuiAgentModel(LUNA, tempDir);
+    const fsModule = await import('node:fs');
+    const readSpy = spyOn(fsModule.promises, 'readFile').mockImplementation(
+      (() =>
+        Promise.reject(
+          new Error('unreadable'),
+        )) as unknown as typeof fsModule.promises.readFile,
+    );
+    try {
+      // The shared cache holds the writer's post-write snapshot at the
+      // post-write stat: a hit never touches the file.
+      const snapshot = await readTuiSnapshotAsync(tempDir);
+      expect(snapshot.agentModels.explorer).toBe(LUNA.model);
+      expect(readSpy).not.toHaveBeenCalled();
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+
+  test('readTuiSnapshotAsync never stamps pre-rename data with the post-read stat', async () => {
+    recordTuiAgentModel(LUNA, tempDir);
+    const statePath = getTuiStatePath(tempDir);
+    // First replacement: the writer's cache entry no longer matches, so
+    // the raced read below takes the miss path.
+    const mid = readTuiSnapshot(tempDir);
+    mid.agentModels.explorer = 'model-mid';
+    const midTmp = `${statePath}.race-mid.tmp`;
+    fs.writeFileSync(midTmp, `${JSON.stringify(mid)}\n`);
+    fs.renameSync(midTmp, statePath);
+
+    const fsModule = await import('node:fs');
+    const originalReadFile = fsModule.promises.readFile.bind(fsModule.promises);
+    const stale = (await originalReadFile(statePath, 'utf8')) as string;
+    const readSpy = spyOn(fsModule.promises, 'readFile').mockImplementation(
+      (async () => {
+        // The file is atomically replaced between the pre-read stat and
+        // the read; the read observes the pre-rename bytes.
+        recordTuiAgentModel(GPT, tempDir);
+        return stale;
+      }) as unknown as typeof fsModule.promises.readFile,
+    );
+    try {
+      const raced = await readTuiSnapshotAsync(tempDir);
+      // The read returns what it actually read...
+      expect(raced.agentModels.explorer).toBe('model-mid');
+      // ...but the stat moved during the read, so nothing was published:
+      // the next poll must observe the replaced file, not stale bytes.
+      const next = await readTuiSnapshotAsync(tempDir);
+      expect(next.agentModels.explorer).toBe(GPT.model);
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+
+  test('a read that succeeds but cannot re-stat still returns the parsed snapshot', async () => {
+    const statePath = getTuiStatePath(tempDir);
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    fs.writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        updatedAt: 1,
+        agentModels: { explorer: 'model-x' },
+      })}\n`,
+    );
+    const fsModule = await import('node:fs');
+    const originalStat = fsModule.promises.stat.bind(fsModule.promises);
+    let statCalls = 0;
+    const statSpy = spyOn(fsModule.promises, 'stat').mockImplementation((async (
+      ...args: Parameters<typeof fsModule.promises.stat>
+    ) => {
+      statCalls += 1;
+      if (statCalls === 2) {
+        // The publication stat fails after a successful read.
+        throw Object.assign(new Error('vanished'), { code: 'ENOENT' });
+      }
+      return originalStat(...args);
+    }) as unknown as typeof fsModule.promises.stat);
+    try {
+      // No cache entry exists, so the read takes the miss path.
+      const snapshot = await readTuiSnapshotAsync(tempDir);
+      expect(snapshot.agentModels.explorer).toBe('model-x');
+      expect(statCalls).toBe(2);
+    } finally {
+      statSpy.mockRestore();
+    }
+  });
+});
+
+describe('withTuiSnapshotBatch (native event fan-out scope)', () => {
+  test('a recorder outside any batch writes immediately', () => {
+    recordTuiAgentModel(LUNA, tempDir);
+    expect(readTuiSnapshot(tempDir).agentModels.explorer).toBe(LUNA.model);
+  });
+
+  test('staged writes are invisible until the commit', async () => {
+    await withTuiSnapshotBatch(async () => {
+      recordTuiAgentModel(LUNA, tempDir);
+      expect(readTuiSnapshot(tempDir).agentModels.explorer).toBeUndefined();
+    });
+    expect(readTuiSnapshot(tempDir).agentModels.explorer).toBe(LUNA.model);
+  });
+
+  test('the finally commits staged writes even when the fan-out throws', async () => {
+    await expect(
+      withTuiSnapshotBatch(async () => {
+        recordTuiAgentModel(LUNA, tempDir);
+        recordTuiAgentActivity(
+          { sessionID: 's1', agentName: 'oracle', active: true },
+          tempDir,
+        );
+        throw new Error('event failed');
+      }),
+    ).rejects.toThrow('event failed');
+
+    const snapshot = readTuiSnapshot(tempDir);
+    expect(snapshot.agentModels.explorer).toBe(LUNA.model);
+    expect(snapshot.activeSessions.s1).toBe('oracle');
+  });
+
+  test('overlapping wrappers never merge their staged writes', async () => {
+    let releaseFirst: () => void = () => {};
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const first = withTuiSnapshotBatch(async () => {
+      recordTuiAgentModel(LUNA, tempDir);
+      await firstBlocked;
+      recordTuiAgentModel({ agentName: 'oracle', model: 'model-o' }, tempDir);
+    });
+    // The first wrapper is suspended inside its batch; a second wrapper
+    // commits its own staged writes independently.
+    const second = withTuiSnapshotBatch(async () => {
+      recordTuiAgentModel(GPT, tempDir);
+    });
+    await second;
+
+    expect(readTuiSnapshot(tempDir).agentModels).toEqual({
+      explorer: GPT.model,
+    });
+
+    releaseFirst();
+    await first;
+
+    expect(readTuiSnapshot(tempDir).agentModels).toEqual({
+      explorer: LUNA.model,
+      oracle: 'model-o',
+    });
+  });
+
+  test('a nested wrapper joins the open scope and adds to its commit', async () => {
+    await withTuiSnapshotBatch(async () => {
+      recordTuiAgentModel(LUNA, tempDir);
+      await withTuiSnapshotBatch(async () => {
+        recordTuiAgentModel({ agentName: 'oracle', model: 'model-o' }, tempDir);
+      });
+      // The nested call staged rather than committing its own write.
+      expect(readTuiSnapshot(tempDir).agentModels).toEqual({});
+    });
+    expect(readTuiSnapshot(tempDir).agentModels).toEqual({
+      explorer: LUNA.model,
+      oracle: 'model-o',
+    });
+  });
+
+  test('the commit keeps fields another process wrote mid-batch', async () => {
+    recordTuiAgentModel(GPT, tempDir); // seed the state file
+    await withTuiSnapshotBatch(async () => {
+      recordTuiAgentModel(LUNA, tempDir);
+      // Another process rewrites the file directly while the batch is
+      // open: the commit re-reads under the lock and preserves its field.
+      const external = readTuiSnapshot(tempDir);
+      external.agentModels.builder = 'foreign-model';
+      fs.writeFileSync(
+        getTuiStatePath(tempDir),
+        `${JSON.stringify(external)}\n`,
+      );
+    });
+
+    const snapshot = readTuiSnapshot(tempDir);
+    expect(snapshot.agentModels.explorer).toBe(LUNA.model);
+    expect(snapshot.agentModels.builder).toBe('foreign-model');
+  });
+
+  test('a continuation after the closed scope records immediately', async () => {
+    await withTuiSnapshotBatch(async () => {
+      await Promise.resolve();
+    });
+    recordTuiAgentModel(LUNA, tempDir);
+    expect(readTuiSnapshot(tempDir).agentModels.explorer).toBe(LUNA.model);
   });
 });

@@ -36,7 +36,8 @@ import {
   appendTaggedSyntheticPart,
   hasTaggedPart,
 } from '../cache-safe-injection';
-import { findLatestUserMessage, isUserMessageWithParts } from '../types';
+import type { MessageTransformView } from '../message-transform-view';
+import { resolveView } from '../message-transform-view';
 
 export const COUNCIL_INJECT_METADATA_KEY = 'oh-my-opencode-slim.councilInject';
 
@@ -123,6 +124,12 @@ interface CouncilInjectOptions {
  * message whose text matches a council trigger carries the block — later
  * triggering messages reuse the block already planted in history (first-hit,
  * one block per transcript).
+ *
+ * `view` is an internal wiring argument (see ../message-transform-view): the
+ * root transform passes the request-local view so the latest-user lookup and
+ * both user scans reuse one traversal. When omitted the hook builds its own
+ * view; `resolveView` rebuilds when the view's identity or length no longer
+ * matches the array.
  */
 export function createCouncilInjectHook(options: CouncilInjectOptions) {
   const block = formatSystemReminder(buildCouncilModeBlock(options.wording));
@@ -131,10 +138,13 @@ export function createCouncilInjectHook(options: CouncilInjectOptions) {
     'experimental.chat.messages.transform': async (
       _input: Record<string, never>,
       output: { messages?: unknown },
+      view?: MessageTransformView,
     ): Promise<void> => {
       const messages = Array.isArray(output.messages) ? output.messages : [];
 
-      const lastUserMessage = findLatestUserMessage(messages);
+      const resolved = resolveView(view, messages);
+
+      const lastUserMessage = resolved.latestUser;
       if (!lastUserMessage) {
         return;
       }
@@ -143,9 +153,8 @@ export function createCouncilInjectHook(options: CouncilInjectOptions) {
 
       // First-hit dedupe: if this payload already carries a block (e.g. the
       // same output object transformed twice), add nothing anywhere.
-      const alreadyInjected = messages.some(
+      const alreadyInjected = resolved.userMessages.some(
         (message) =>
-          isUserMessageWithParts(message) &&
           message.info.agent === 'orchestrator' &&
           message.info.sessionID === sessionID &&
           hasTaggedPart(message, COUNCIL_INJECT_METADATA_KEY),
@@ -155,12 +164,11 @@ export function createCouncilInjectHook(options: CouncilInjectOptions) {
       }
 
       let injected = false;
-      for (const message of messages) {
+      for (const message of resolved.userMessages) {
         if (injected) {
           break;
         }
         if (
-          !isUserMessageWithParts(message) ||
           message.info.agent !== 'orchestrator' ||
           message.info.sessionID !== sessionID
         ) {

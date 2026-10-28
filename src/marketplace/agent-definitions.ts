@@ -11,9 +11,9 @@ import type {
   MarketplaceActivationAdmission,
   MarketplaceActivationPlan,
 } from './activation.js';
+import { MARKETPLACE_TOOL_NAMES } from './capabilities.js';
 import { renderMarketplaceAutoDelegationBlock } from './routing.js';
 import type { MarketplaceModelPolicy } from './schemas.js';
-import { MARKETPLACE_TOOL_NAMES } from './schemas.js';
 
 export interface MarketplaceAgentCapabilityCeiling {
   readonly tools: readonly string[];

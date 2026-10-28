@@ -239,12 +239,14 @@ export class RuntimeConfig {
   // Memoized disabled-* sets: computed once per instance per config
   // generation (re-seeding clears them) instead of allocating a fresh Set
   // on every hot-path read.
+  private disabledAgentsCache: ReadonlySet<string> | undefined;
   private disabledHooksCache: ReadonlySet<string> | undefined;
   private disabledCommandsCache: ReadonlySet<string> | undefined;
 
   private seedPlugin(pluginConfig: ResolvedPluginConfig): void {
     this.pluginConfig = deepFreeze(clonePlain(pluginConfig));
     this.localSkillNamesCache = undefined;
+    this.disabledAgentsCache = undefined;
     this.disabledHooksCache = undefined;
     this.disabledCommandsCache = undefined;
   }
@@ -324,6 +326,7 @@ export class RuntimeConfig {
   /** Disabled agent names, minus protected agents. Legacy alias names
    * (e.g. `librarian`) canonicalize onto their merged agent. */
   get disabledAgents(): ReadonlySet<string> {
+    if (this.disabledAgentsCache !== undefined) return this.disabledAgentsCache;
     const userDisabled = this.pluginConfig?.disabled_agents;
     const disabledSource = Array.isArray(userDisabled)
       ? userDisabled
@@ -335,6 +338,7 @@ export class RuntimeConfig {
         disabled.add(canonical);
       }
     }
+    this.disabledAgentsCache = disabled;
     return disabled;
   }
 

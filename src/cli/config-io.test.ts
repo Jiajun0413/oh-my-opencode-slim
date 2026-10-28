@@ -24,25 +24,27 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import {
+  mutateJsonFile,
+  prepareJsonConfigWrite,
+  publishPreparedJsonConfig,
+  removeTopLevelJsonProperty,
+  restorePreparedJsonConfig,
+  writeJsonAtomic,
+} from '../config/json-file';
+import { stripJsonComments } from '../config/jsonc';
+import * as paths from '../config/paths';
 import * as marketplaceLease from '../marketplace/lease';
 import {
   addPluginToOpenCodeConfig,
   addPluginToOpenCodeTuiConfig,
   detectCurrentConfig,
   enableLspByDefault,
-  mutateJsonFile,
   parseConfig,
   parseConfigFile,
-  prepareJsonConfigWrite,
-  publishPreparedJsonConfig,
-  removeTopLevelJsonProperty,
-  restorePreparedJsonConfig,
-  stripJsonComments,
   writeConfig,
-  writeJsonAtomic,
   writeLiteConfig,
 } from './config-io';
-import * as paths from './paths';
 
 describe('config-io', () => {
   let tmpDir: string;
@@ -416,7 +418,7 @@ describe('config-io', () => {
     const path = join(tmpDir, 'shared.json');
     writeFileSync(path, '{"writers": 0}');
     const script =
-      `import { mutateJsonFile } from './src/cli/config-io.ts';\n` +
+      `import { mutateJsonFile } from './src/config/json-file.ts';\n` +
       `mutateJsonFile(process.env.CONFIG_PATH!, (current) => ({ ...current, writers: Number(current.writers) + 1 }));`;
 
     await Promise.all(

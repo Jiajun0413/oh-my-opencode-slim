@@ -64,21 +64,12 @@
  */
 
 import { isRecord } from '../utils/guards';
+import { resolveV2EventPayload } from './runtime-profiles';
 
 function finiteNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value)
     ? value
     : undefined;
-}
-
-/**
- * Resolve the v2 event payload: live hosts carry it under `data` (the
- * `OpenCodeEvent` wire shape); `properties` is the legacy/test spelling.
- */
-function payloadOf(event: Record<string, unknown>): Record<string, unknown> {
-  if (isRecord(event.data)) return event.data;
-  if (isRecord(event.properties)) return event.properties;
-  return {};
 }
 
 /**
@@ -314,7 +305,9 @@ export function mapV2EventToV1(
 ): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = [event];
   const type = typeof event.type === 'string' ? event.type : '';
-  const props = payloadOf(event);
+  // Common payload fact shared with every raw-event bridge (permission
+  // rules, runtime profiles): `data` on live hosts, `properties` legacy.
+  const props = resolveV2EventPayload(event);
   // Shutdown suspends the execution claim for native restart recovery. The
   // host intentionally writes no terminal idle/outcome for this event.
   if (type === 'session.execution.interrupted' && props.reason === 'shutdown')

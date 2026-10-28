@@ -409,6 +409,31 @@ describe('buildV2PaneWiringOptions', () => {
     }
   });
 
+  test('shared startup reuses server info for the first probe only', async () => {
+    let reads = 0;
+    let alive = true;
+    const setup = await buildV2PaneWiringOptions({
+      argv: ['opencode'],
+      client: {
+        server: {
+          info: async () => {
+            reads += 1;
+            if (!alive) throw new Error('offline');
+            return { urls: ['http://shared:1'] };
+          },
+        },
+      },
+    });
+    expect(reads).toBe(1);
+    expect(await setup.options?.probeHost?.()).toBe(true);
+    expect(reads).toBe(1);
+    expect(await setup.options?.probeHost?.()).toBe(true);
+    expect(reads).toBe(2);
+    alive = false;
+    expect(await setup.options?.probeHost?.()).toBe(false);
+    expect(reads).toBe(3);
+  });
+
   test('shared mode wires with the discovered URL, flavor and password', async () => {
     const setup = await buildV2PaneWiringOptions({
       argv: ['opencode'],

@@ -5,9 +5,12 @@ import * as path from 'node:path';
 import {
   getTuiStatePath,
   readTuiSnapshot,
+  recordTuiAgentModel,
   recordTuiSessionParent,
   updateSnapshot,
+  withTuiSnapshotBatch,
 } from '../tui-state';
+import { BackgroundJobBoard as ProductionBoard } from './background-job-board';
 import { BackgroundJobBoard } from './background-job-fixture';
 import { createTuiReusableProjection } from './tui-reusable-projection';
 
@@ -51,6 +54,58 @@ describe('tui-reusable-projection', () => {
     });
     board.markReconciled(taskID, opts.reconciledAt ?? launchAt + 100);
   }
+
+  test('one event batch computes and writes the final projection only once', async () => {
+    const board = new BackgroundJobBoard();
+    const projection = createTuiReusableProjection({ board, projectDir });
+    // Retention may list independently; count only projection snapshots.
+    const projectionSpy = spyOn(
+      ProductionBoard.prototype,
+      'sidebarHistoryByParentAgent',
+    );
+    const statePath = getTuiStatePath(projectDir);
+    const rename = fs.renameSync;
+    let writes = 0;
+    const renameSpy = spyOn(fs, 'renameSync').mockImplementation((...args) => {
+      if (String(args[1]) === statePath) writes += 1;
+      return rename(...args);
+    });
+    try {
+      await withTuiSnapshotBatch(async () => {
+        seedReconciled(board, 'batched-child');
+        recordTuiAgentModel(
+          { agentName: 'oracle', model: 'provider/model' },
+          projectDir,
+        );
+      });
+      expect(projectionSpy).toHaveBeenCalledTimes(1);
+      expect(writes).toBe(1);
+      expect(readTuiSnapshot(projectDir).agentModels.oracle).toBe(
+        'provider/model',
+      );
+      expect(
+        readTuiSnapshot(projectDir).reusableByAgent['parent-1']?.oracle?.[0]
+          ?.taskID,
+      ).toBe('batched-child');
+    } finally {
+      projectionSpy.mockRestore();
+      renameSpy.mockRestore();
+      projection.dispose();
+    }
+  });
+
+  test('a disposed projection cannot reappear when an open batch commits', async () => {
+    const board = new BackgroundJobBoard();
+    const projection = createTuiReusableProjection({ board, projectDir });
+    await withTuiSnapshotBatch(async () => {
+      seedReconciled(board, 'late-child');
+      projection.dispose();
+    });
+    expect(
+      readTuiSnapshot(projectDir).reusableByAgent['parent-1'],
+    ).toBeUndefined();
+    projection.dispose();
+  });
 
   test('a finished session is projected before the parent acknowledges it', () => {
     const board = new BackgroundJobBoard();
@@ -569,6 +624,105 @@ describe('tui-reusable-projection', () => {
         'ses_fix',
       );
     } finally {
+      projection.dispose();
+    }
+  });
+
+  test('one list snapshot per projection groups history and running entries', () => {
+    const board = new BackgroundJobBoard();
+    let listCalls = 0;
+    const originalList = board.list.bind(board);
+    board.list = (parentSessionID?: string) => {
+      listCalls += 1;
+      return originalList(parentSessionID);
+    };
+    const projection = createTuiReusableProjection({ board, projectDir });
+
+    try {
+      seedReconciled(board, 'ses_done', { launchAt: 100 });
+      const afterSetup = listCalls;
+      board.registerLaunch({
+        taskID: 'ses_run_old',
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        now: 200,
+      });
+      // One mutation → one projection → exactly one sorted list() read;
+      // the same snapshot feeds the grouping and the running pass.
+      expect(listCalls - afterSetup).toBe(1);
+      board.registerLaunch({
+        taskID: 'ses_run_new',
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        now: 300,
+      });
+      expect(listCalls - afterSetup).toBe(2);
+
+      // Running entries are unshifted in launch order: newest first, ahead
+      // of the recency-sorted terminal group.
+      const entries =
+        readTuiSnapshot(projectDir).reusableByAgent['parent-1']?.oracle ?? [];
+      expect(entries.map((entry) => entry.taskID)).toEqual([
+        'ses_run_new',
+        'ses_run_old',
+        'ses_done',
+      ]);
+    } finally {
+      projection.dispose();
+    }
+  });
+
+  test('a projected payload with an absent completedAt round-trips without rewrites', async () => {
+    const fsModule = await import('node:fs');
+    const board = new BackgroundJobBoard();
+    const projection = createTuiReusableProjection({ board, projectDir });
+    const statePath = getTuiStatePath(projectDir);
+    let writes = 0;
+    const originalRename = fsModule.renameSync;
+    const renameSpy = spyOn(fsModule, 'renameSync').mockImplementation(
+      (...args: Parameters<typeof fs.renameSync>) => {
+        if (String(args[1]) === statePath) writes += 1;
+        return originalRename(...args);
+      },
+    );
+
+    try {
+      // A restored stopped row carries no completedAt: the projected
+      // payload must stay parse-shape clean (no undefined-valued key).
+      board.restoreRetainedSession({
+        taskID: 'ses_stopped',
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        description: 'recovered stop',
+        state: 'stopped',
+        background: true,
+        launchedAt: 100,
+      });
+      expect(writes).toBe(1);
+      expect(
+        readTuiSnapshot(projectDir).reusableByAgent['parent-1']?.oracle?.[0],
+      ).toMatchObject({ taskID: 'ses_stopped', terminalState: 'stopped' });
+
+      // Evict the shared snapshot cache so the next projection takes the
+      // locked path over the freshly parsed (key-less) shape.
+      for (let i = 0; i < 8; i += 1) {
+        recordTuiAgentModel(
+          { agentName: 'explorer', model: `model-${i}` },
+          path.join(projectDir, `cache-filler-${i}`),
+        );
+      }
+
+      // A provisional launch is excluded from the section: the projection
+      // must be a structural no-op even on the locked path.
+      board.registerLaunch({
+        taskID: 'ses_placeholder',
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        provisional: true,
+      });
+      expect(writes).toBe(1);
+    } finally {
+      renameSpy.mockRestore();
       projection.dispose();
     }
   });

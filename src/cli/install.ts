@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
+import { getExistingLiteConfigPath } from '../config/paths';
 import {
   detectBackgroundSubagentsTarget,
   expandHomePath,
@@ -20,7 +21,6 @@ import {
   warmOpenCodePluginCache,
   writeLiteConfig,
 } from './config-manager';
-import { getExistingLiteConfigPath } from './paths';
 import type { ConfigMergeResult, InstallArgs, InstallConfig } from './types';
 
 // Colors

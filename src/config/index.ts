@@ -12,6 +12,15 @@ export {
 } from './loader';
 export * from './schema';
 export {
+  type LoadPresetCatalogOptions,
+  loadPresetCatalog,
+  type PluginConfigSnapshot,
+  type PluginConfigSnapshotPaths,
+  type PresetCatalog,
+  type ReadPluginConfigSnapshotOptions,
+  readPluginConfigSnapshot,
+} from './snapshot';
+export {
   getAcpAgentNames,
   getAgentOverride,
   getCustomAgentNames,

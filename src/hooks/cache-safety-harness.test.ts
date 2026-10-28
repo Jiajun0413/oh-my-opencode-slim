@@ -16,6 +16,7 @@ import { isTaggedPart } from './cache-safe-injection';
 import { createCouncilInjectHook } from './council-inject';
 import { createDeepworkGoalHook } from './deepwork-goal';
 import { processImageAttachments } from './image-hook';
+import { createMessageTransformView } from './message-transform-view';
 import { createPhaseReminderHook } from './phase-reminder';
 import { SessionLifecycle } from './session-lifecycle';
 import {
@@ -109,8 +110,8 @@ export function createPipeline(options: PipelineOptions = {}): Pipeline {
     if (options.activeInterview) {
       collapseInterviewHistory(output.messages as never);
     }
-    for (const message of output.messages as MessageWithParts[]) {
-      if (message.info.role !== 'user') continue;
+    const view = createMessageTransformView(output.messages);
+    for (const message of view.userMessages) {
       for (const part of message.parts) {
         if (part.type !== 'text' || typeof part.text !== 'string') continue;
         part.text = rewriteDisplayNameMentions(part.text);
@@ -123,24 +124,30 @@ export function createPipeline(options: PipelineOptions = {}): Pipeline {
       imageRouting: resolveImageRouting(undefined, true),
       disabledAgents: new Set(),
       log: noopLog,
+      view,
     });
 
     await taskSessionManagerHook['experimental.chat.messages.transform'](
       {} as never,
       output as never,
+      view,
     );
     await phaseReminder['experimental.chat.messages.transform'](
       {} as never,
       output as never,
+      view,
     );
     await councilInject['experimental.chat.messages.transform'](
       {} as never,
       output as never,
+      view,
     );
+    await taskSessionManagerHook.injectBackgroundJobBoard({}, output);
     // Trailing-most volatile message (src/index.ts order).
     await deepworkGoal['experimental.chat.messages.transform'](
       {} as never,
       output as never,
+      createMessageTransformView(output.messages),
     );
   };
 

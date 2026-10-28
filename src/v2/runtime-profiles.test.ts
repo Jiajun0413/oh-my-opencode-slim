@@ -1098,3 +1098,128 @@ describe('applyRuntimeProfileOptions', () => {
     expect(event.options).toEqual({ unrelated: true });
   });
 });
+
+describe('ensureSessionProfile admission capture (identity + bound profiles)', () => {
+  test('uses the authoritative identity and capture: no host read, no profilesForSession', async () => {
+    const forSessionCalls: Array<string> = [];
+    const { bridge, getCalls, switchCalls } = makeBridge({
+      profilesForSession: (sessionID) => {
+        forSessionCalls.push(sessionID);
+        return Promise.resolve(PROFILES);
+      },
+    });
+    await bridge.ensureSessionProfile(
+      'child-1',
+      {
+        parentID: 'p',
+        agent: 'explorer',
+        authoritative: true,
+      },
+      { profiles: PROFILES },
+    );
+    // One switched model from the captured table; the host identity
+    // lookup and profilesForSession re-ensure never ran.
+    expect(getCalls).toHaveLength(0);
+    expect(forSessionCalls).toHaveLength(0);
+    expect(switchCalls).toEqual([GPT5_SWITCH]);
+  });
+
+  test('supplying the capture alone does not bind the identity source', async () => {
+    // Capture without an authoritative identity keeps the historic
+    // request-path behavior: identity resolved via session.get.
+    const { bridge, getCalls, switchCalls } = makeBridge({
+      get: async () => ({ id: 'child-1', parentID: 'p', agent: 'explorer' }),
+    });
+    await bridge.ensureSessionProfile('child-1', undefined, {
+      profiles: PROFILES,
+    });
+    expect(getCalls).toEqual([{ sessionID: 'child-1' }]);
+    expect(switchCalls).toEqual([GPT5_SWITCH]);
+  });
+
+  test('authoritative identity without parentID is a proven root — host not re-read', async () => {
+    const { bridge, getCalls, switchCalls } = makeBridge({
+      knownAgent: () => 'orchestrator',
+    });
+    await bridge.ensureSessionProfile(
+      'root-1',
+      {
+        parentID: undefined,
+        agent: 'orchestrator',
+        authoritative: true,
+      },
+      { profiles: PROFILES },
+    );
+    expect(getCalls).toHaveLength(0);
+    expect(switchCalls).toHaveLength(0);
+    // Root latched: the next admission is O(1) without a host read.
+    await bridge.ensureSessionProfile(
+      'root-1',
+      {
+        parentID: undefined,
+        agent: 'orchestrator',
+        authoritative: true,
+      },
+      { profiles: PROFILES },
+    );
+    expect(getCalls).toHaveLength(0);
+  });
+
+  test('event hints keep the enriching host re-read (no authoritative flag)', async () => {
+    const { bridge, getCalls } = makeBridge({
+      get: async () => ({ id: 'child-1', parentID: 'p', agent: 'explorer' }),
+      profilesForSession: () => Promise.resolve(PROFILES),
+    });
+    await bridge.ensureSessionProfile('child-1', { parentID: 'p' });
+    // agent was missing → host read filled it (unchanged historic path).
+    expect(getCalls).toEqual([{ sessionID: 'child-1' }]);
+  });
+
+  test('model switch is fully awaited with the same fences', async () => {
+    const captured: Array<string> = [];
+    const failed: Array<string> = [];
+    const { bridge, switchCalls } = makeBridge({
+      switchModel: async () => {
+        throw new Error('switch rejected');
+      },
+      onSessionCaptured: (id) => captured.push(id),
+      onSessionCaptureFailed: (id) => failed.push(id),
+    });
+    await expect(
+      bridge.ensureSessionProfile(
+        'child-1',
+        {
+          parentID: 'p',
+          agent: 'explorer',
+          authoritative: true,
+        },
+        { profiles: PROFILES },
+      ),
+    ).rejects.toThrow('switch rejected');
+    // The admission-failed fence fired; the capture pin was released.
+    expect(failed).toEqual(['child-1']);
+    expect(switchCalls).toHaveLength(1);
+    // Not captured: a retry re-awaits the idempotent switch.
+    expect(bridge.size()).toBe(0);
+  });
+
+  test('capture profiles are used as-is; per-call models still preserved', async () => {
+    const { bridge, switchCalls } = makeBridge({
+      registeredProfiles: PROFILES,
+    });
+    // A per-call model on the authoritative identity: no switch, but the
+    // captured profile is still frozen.
+    await bridge.ensureSessionProfile(
+      'child-1',
+      {
+        parentID: 'p',
+        agent: 'explorer',
+        model: { providerID: 'openai', id: 'other', variant: 'x' },
+        authoritative: true,
+      },
+      { profiles: PROFILES },
+    );
+    expect(switchCalls).toHaveLength(0);
+    expect(bridge.profileForSession('child-1')).toEqual(PROFILES.explorer);
+  });
+});

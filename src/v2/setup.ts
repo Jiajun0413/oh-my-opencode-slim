@@ -24,8 +24,9 @@ import {
   AGENT_ALIASES,
   BUILTIN_OPENCODE_SUBAGENTS_TO_DISABLE,
 } from '../config/constants';
-import { loadPluginConfig } from '../config/loader';
 import { InterviewConfigSchema } from '../config/schema';
+import type { PluginConfigSnapshot } from '../config/snapshot';
+import { readPluginConfigSnapshot } from '../config/snapshot';
 import { getBuildInfo } from '../generated/build-info';
 import { getCurrentRuntimePackageJsonPath } from '../hooks/auto-update-checker/checker';
 import {
@@ -50,6 +51,7 @@ import type { McpConfig } from '../mcp/types';
 import {
   collectAgentDisplayNames,
   recordTuiAgentDisplayNames,
+  withTuiSnapshotBatch,
 } from '../tui-state';
 import {
   configureBackgroundJobPersistence,
@@ -67,6 +69,7 @@ import {
   snapshotNativeAgentForRegistry,
   v1PermKeyToV2,
 } from './adapters';
+import { sessionAdmissionProfiles } from './admission-view';
 import {
   buildPluginInput,
   resetClientShimGenerationWarnings,
@@ -86,17 +89,22 @@ import {
 } from './delegation';
 import { mapV2EventToV1 } from './event-adapter';
 import {
+  buildV2EventSubscriptionTypes,
+  isV2StreamDeltaType,
+} from './event-subscription';
+import {
   INTERNAL_SYNTHETIC_MESSAGE_PREFIX,
   isInternalAdmission,
   recordInternalAdmission,
 } from './internal-admissions';
-import { createV2InterviewBridge } from './interview-bridge';
+import type { V2InterviewBridge } from './interview-bridge';
 import { createPresetCommand, PRESET_COMMAND_NAME } from './preset-command';
 import { sessionPresetRpc } from './preset-rpc';
 import {
   applyRuntimeProfileOptions,
   createSessionProfileBridge,
   reconcileRuntimeProfileOptionKeys,
+  resolveV2EventPayload,
   type V2AgentRuntimeProfiles,
 } from './runtime-profiles';
 import {
@@ -125,6 +133,7 @@ import type {
   V2ToolAfterEvent,
   V2ToolBeforeEvent,
 } from './types';
+import { updateFactsRpc } from './update-facts-rpc';
 
 /** v1 `command.execute.before` hook shape (see src/index.ts wiring). */
 export type V1CommandBeforeHook = (
@@ -474,10 +483,16 @@ export function createSessionContextHandler(
       // wakes need their first text part re-flagged (host drops internal
       // part metadata). Idempotent across context events.
       let storedHistory: Array<Record<string, unknown>> | undefined;
-      try {
-        storedHistory = await deps.sessionContext?.(event.sessionID);
-      } catch (err) {
-        log('[v2] session.context attribution read failed', String(err));
+      if (
+        event.messages.some(
+          (message) => message.role === 'user' && message.agent === undefined,
+        )
+      ) {
+        try {
+          storedHistory = await deps.sessionContext?.(event.sessionID);
+        } catch (err) {
+          log('[v2] session.context attribution read failed', String(err));
+        }
       }
       const attribution = attributeAgentsByHistory(storedHistory);
       for (const message of event.messages) {
@@ -1399,20 +1414,10 @@ export function createPermissionRulesBridge(
     await applyChildSessionRules(sessionID, identity.agent, identity);
   }
 
-  function readEventPayload(
-    event: Record<string, unknown>,
-  ): Record<string, unknown> {
-    return isRecord(event.data)
-      ? event.data
-      : isRecord(event.properties)
-        ? event.properties
-        : {};
-  }
-
   async function observeEvent(event: Record<string, unknown>): Promise<void> {
     try {
       if (!isRecord(event) || typeof event.type !== 'string') return;
-      const payload = readEventPayload(event);
+      const payload = resolveV2EventPayload(event);
       const sessionID =
         typeof payload.sessionID === 'string'
           ? payload.sessionID
@@ -2176,7 +2181,10 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
     // Skipped entirely when the managed lifecycle is disabled: no board
     // state is loaded or seeded, and the v1 task-manager paths stay frozen
     // out (the v1 event hook already no-ops them without a seeded board).
-    const preFlightConfig = loadPluginConfig(directory, { hostFlavor: 'v2' });
+    const startupConfigSnapshot = readPluginConfigSnapshot(directory, {
+      hostFlavor: 'v2',
+    });
+    const preFlightConfig = startupConfigSnapshot.config;
     const lifecycleEnabled = preFlightConfig.backgroundJobs?.enabled !== false;
     if (lifecycleEnabled) {
       try {
@@ -2224,9 +2232,12 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         ? (ctx as V2Context).model
         : undefined;
       log('[v2] ctx.model', { available: Boolean(modelDomain) });
-      const pluginInput = buildPluginInput(ctx, {
-        ...(modelDomain ? { modelDomain } : {}),
-      });
+      const pluginInput = {
+        ...buildPluginInput(ctx, {
+          ...(modelDomain ? { modelDomain } : {}),
+        }),
+        pluginConfigSnapshot: startupConfigSnapshot,
+      };
       log('[v2] calling OhMyOpenCodeLite...');
       v1Hooks = (await OhMyOpenCodeLite(
         pluginInput as never,
@@ -2265,7 +2276,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
     // error unchanged. The success path's returned cleanup keeps its
     // own semantics.
     try {
-      const pluginConfig = loadPluginConfig(directory, { hostFlavor: 'v2' });
+      const pluginConfig = startupConfigSnapshot.config;
       const interviewConfig = InterviewConfigSchema.parse(
         pluginConfig.interview ?? {},
       );
@@ -2295,12 +2306,14 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         liveConfigRefresh: liveRefreshEnabled,
         updateChecker: updateCheckerEnabled,
       });
-      const interviewBridge = interviewEnabled
-        ? createV2InterviewBridge(ctx, interviewConfig, {
-            commandEnabled: interviewCommandEnabled,
-            implementEnabled: implementCommandEnabled,
-          })
-        : undefined;
+      let interviewBridge: V2InterviewBridge | undefined;
+      if (interviewEnabled) {
+        const { createV2InterviewBridge } = await import('./interview-bridge');
+        interviewBridge = createV2InterviewBridge(ctx, interviewConfig, {
+          commandEnabled: interviewCommandEnabled,
+          implementEnabled: implementCommandEnabled,
+        });
+      }
       if (interviewBridge) disposers.push(() => interviewBridge.dispose());
       // The submit tool and text-complete fallback are built inside the v1
       // factory against the v1 interview manager. On v2 the bridge owns the
@@ -2587,6 +2600,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
             allowInvalidFallback?: boolean;
             presetName?: string;
             detached?: boolean;
+            configSnapshot?: PluginConfigSnapshot;
           }) => Promise<
             | {
                 ok: true;
@@ -2598,6 +2612,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         | undefined;
       const refreshProfiles = async (options?: {
         allowInvalidFallback?: boolean;
+        configSnapshot?: PluginConfigSnapshot;
       }) => {
         const registryAtResolution = finalizedRegistry;
         if (!factoryRefreshProfiles)
@@ -2664,6 +2679,23 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         });
         disposers.push(() => registration.dispose());
       }
+      if (updateCheckerEnabled && ctx.rpc?.register) {
+        const registration = await ctx.rpc.register(updateFactsRpc, {
+          get: async () => {
+            const readFacts = v1Hooks['v2.readUpdateFacts'] as
+              | (() => Promise<{
+                  distTags: Record<string, string>;
+                  versions: string[];
+                } | null>)
+              | undefined;
+            const facts = await readFacts?.();
+            return facts
+              ? { available: true as const, facts }
+              : { available: false as const };
+          },
+        });
+        disposers.push(() => registration.dispose());
+      }
       try {
         if (typeof factoryRefreshProfiles === 'function') {
           // Startup has no last-good table. Seed from the loader's normal
@@ -2671,7 +2703,10 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
           // later watcher refreshes strict and retain this seed on failure.
           // The one-shot seed is unconditional: an explicit `/preset` write
           // must keep resolving even when the file watcher is disabled.
-          const initial = await refreshProfiles({ allowInvalidFallback: true });
+          const initial = await refreshProfiles({
+            allowInvalidFallback: true,
+            configSnapshot: startupConfigSnapshot,
+          });
           if (!initial.ok) {
             throw new Error(initial.reason);
           }
@@ -2850,10 +2885,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
             );
           } else {
             const packageRoot = path.dirname(runtimePackageJson);
-            const disabled = [
-              ...(loadPluginConfig(directory, { hostFlavor: 'v2' })
-                .disabled_skills ?? []),
-            ];
+            const disabled = [...(pluginConfig.disabled_skills ?? [])];
             const infos = buildBundledSkillInfos(packageRoot, disabled);
             if (infos.length === 0) {
               log(
@@ -2994,28 +3026,12 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       };
       const sessionProfileBridge = createSessionProfileBridge({
         profiles: () => currentProfiles,
-        profilesForSession: async (sessionID) => {
-          const record = await sessionPresets.ensure(sessionID);
-          if (!record) return currentProfiles;
-          const profiles = (record.execution ?? record.bundle).profiles;
-          return Object.fromEntries(
-            Object.entries(profiles).map(([agent, profile]) => [
-              agent,
-              {
-                ...profile,
-                managedProviderOptionKeys: [
-                  ...new Set([
-                    ...(profile.managedProviderOptionKeys ?? []),
-                    ...Object.keys(
-                      registeredProfiles[agent]?.providerOptions ?? {},
-                    ),
-                    ...Object.keys(profile.providerOptions ?? {}),
-                  ]),
-                ],
-              },
-            ]),
-          );
-        },
+        profilesForSession: async (sessionID) =>
+          sessionAdmissionProfiles(
+            await sessionPresets.ensure(sessionID),
+            currentProfiles,
+            registeredProfiles,
+          ),
         preserveSessionModel: (sessionID) =>
           sessionPresets.peek(sessionID)?.preserveModel === true,
         registeredProfiles,
@@ -3072,12 +3088,27 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
             await ensureFinalizedProfiles();
             // Freeze and switch the inference profile before the admitted
             // input's first model request; the event stream is only a prewarm.
-            const binding = await sessionPresets.ensure(event.sessionID);
+            const admission = await sessionPresets.ensureAdmission(
+              event.sessionID,
+            );
+            const binding = admission?.record;
             // A resumed, already-profiled child may acquire an explicit
             // per-call model. Re-pin its execution policy on every admission.
             if (binding?.parentID && binding.explicitModel)
               pinBoundSessionChains(event.sessionID);
-            await sessionProfileBridge.ensureSessionProfile(event.sessionID);
+            await sessionProfileBridge.ensureSessionProfile(
+              event.sessionID,
+              admission?.identity,
+              admission
+                ? {
+                    profiles: sessionAdmissionProfiles(
+                      binding,
+                      currentProfiles,
+                      registeredProfiles,
+                    ),
+                  }
+                : undefined,
+            );
             await bridge.handlePrompt(event);
           });
           stopPermissionPromptAdmission = boundedPermissionStop(
@@ -3547,7 +3578,10 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
               const permissionBridge = permissionRulesBridge;
               disposers.push(() => permissionBridge.dispose());
             }
-            const iter = ctx.event.subscribe();
+            const eventTypes = buildV2EventSubscriptionTypes({
+              interview: interviewEnabled,
+            });
+            const iter = ctx.event.subscribe({ types: eventTypes });
             const eventIterator = iter[Symbol.asyncIterator]();
             let eventStopped = false;
             void (async () => {
@@ -3562,10 +3596,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
                   // and fire per token, so they skip the directory scope too.
                   const rawType =
                     typeof next.value?.type === 'string' ? next.value.type : '';
-                  const isStreamDelta =
-                    rawType === 'session.next.text.delta' ||
-                    rawType === 'session.next.reasoning.delta' ||
-                    rawType === 'message.part.delta';
+                  const isStreamDelta = isV2StreamDeltaType(rawType);
                   if (!isStreamDelta) {
                     // Keep directory-local bridges scoped, while allowing the
                     // task owner to observe children moved to live locations.
@@ -3579,9 +3610,11 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
                         | undefined;
                       if (foreignTaskEvent) {
                         try {
-                          for (const ev of mapV2EventToV1(next.value)) {
-                            await foreignTaskEvent({ event: ev });
-                          }
+                          await withTuiSnapshotBatch(async () => {
+                            for (const ev of mapV2EventToV1(next.value)) {
+                              await foreignTaskEvent({ event: ev });
+                            }
+                          });
                         } catch (err) {
                           log('[v2] foreign task event failed', String(err));
                         }
@@ -3590,42 +3623,45 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
                     }
                   }
                   try {
-                    await interviewBridge?.handleEvent(next.value);
-                    if (isStreamDelta) {
-                      if (eventHook) await eventHook({ event: next.value });
-                      continue;
-                    }
-                    // Only reduced hosts retain legacy created prewarming.
-                    // With persistence, native progress must bind before the
-                    // first capture; a created event may precede that barrier.
-                    if (
-                      rawType === 'session.created' &&
-                      !sessionPresets.available
-                    ) {
-                      // Never hold the shared event pump behind a deferred
-                      // roster. The awaited prompt barrier captures later.
+                    await withTuiSnapshotBatch(async () => {
+                      await interviewBridge?.handleEvent(next.value);
+                      if (isStreamDelta) {
+                        if (eventHook) await eventHook({ event: next.value });
+                        return;
+                      }
+                      // Only reduced hosts retain legacy created prewarming.
+                      // With persistence, native progress must bind before the
+                      // first capture; a created event may precede that barrier.
                       if (
-                        permissionSnapshotReady &&
-                        !permissionSnapshotFailure
+                        rawType === 'session.created' &&
+                        !sessionPresets.available
                       ) {
-                        await ensureFinalizedProfiles();
+                        // Never hold the shared event pump behind a deferred
+                        // roster. The awaited prompt barrier captures later.
+                        if (
+                          permissionSnapshotReady &&
+                          !permissionSnapshotFailure
+                        ) {
+                          await ensureFinalizedProfiles();
+                          await sessionProfileBridge.observeEvent(next.value);
+                        }
+                      } else if (rawType === 'session.deleted') {
                         await sessionProfileBridge.observeEvent(next.value);
+                        const payload =
+                          next.value.data ?? next.value.properties;
+                        if (isRecord(payload)) {
+                          const id = payload.sessionID ?? payload.id;
+                          if (typeof id === 'string')
+                            await sessionPresets.remove(id);
+                        }
                       }
-                    } else if (rawType === 'session.deleted') {
-                      await sessionProfileBridge.observeEvent(next.value);
-                      const payload = next.value.data ?? next.value.properties;
-                      if (isRecord(payload)) {
-                        const id = payload.sessionID ?? payload.id;
-                        if (typeof id === 'string')
-                          await sessionPresets.remove(id);
+                      await permissionRulesBridge?.observeEvent(next.value);
+                      if (eventHook) {
+                        for (const ev of mapV2EventToV1(next.value)) {
+                          await eventHook({ event: ev });
+                        }
                       }
-                    }
-                    await permissionRulesBridge?.observeEvent(next.value);
-                    if (eventHook) {
-                      for (const ev of mapV2EventToV1(next.value)) {
-                        await eventHook({ event: ev });
-                      }
-                    }
+                    });
                   } catch (err) {
                     log('[v2] event handler failed', String(err));
                   }

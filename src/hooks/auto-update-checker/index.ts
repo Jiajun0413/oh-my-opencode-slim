@@ -1,9 +1,5 @@
 import * as path from 'node:path';
 import type { PluginInput } from '@opencode-ai/plugin';
-import {
-  ensureCompanionVersion,
-  loadCompanionManifestFromPackageRoot,
-} from '../../companion/updater';
 import { TOAST_DURATION_MS } from '../../config/constants';
 import { crossSpawn } from '../../utils/compat';
 import { log } from '../../utils/logger';
@@ -18,16 +14,30 @@ import {
   verifyInstalledPackage,
 } from './cache';
 import {
+  createUpdateFactsReader,
   extractChannel,
   findPluginEntry,
   getCachedVersion,
   getCurrentRuntimePackageJsonPath,
   getLatestCompatibleVersion,
   getLocalDevVersion,
+  type UpdateFactsProvider,
   updateInstallerManagedVersions,
 } from './checker';
 import { CACHE_DIR, PACKAGE_NAME } from './constants';
 import type { AutoUpdateCheckerOptions } from './types';
+
+/**
+ * The update-checker hook: the background update flow plus the facts reader
+ * that belongs to this activation. `readUpdateFacts` is exposed so the v2
+ * setup can register the update-facts RPC against the very reader the
+ * background check uses — one registry request per activation, shared by the
+ * server checker and the TUI notice.
+ */
+export interface AutoUpdateCheckerHook {
+  event: (input: { event: { type: string; properties?: unknown } }) => void;
+  readUpdateFacts: UpdateFactsProvider;
+}
 
 /**
  * Creates an OpenCode hook that checks for plugin updates when a new session is created.
@@ -38,10 +48,13 @@ import type { AutoUpdateCheckerOptions } from './types';
 export function createAutoUpdateCheckerHook(
   ctx: PluginInput,
   options: AutoUpdateCheckerOptions = {},
-) {
+): AutoUpdateCheckerHook {
   const { autoUpdate = true, companion } = options;
 
   let hasChecked = false;
+  // One reader per hook construction — nothing module-global, so the next
+  // plugin activation starts a fresh read.
+  const readUpdateFacts = createUpdateFactsReader();
 
   return {
     event: ({ event }: { event: { type: string; properties?: unknown } }) => {
@@ -63,11 +76,17 @@ export function createAutoUpdateCheckerHook(
           return;
         }
 
-        runBackgroundUpdateCheck(ctx, autoUpdate, companion).catch((err) => {
+        runBackgroundUpdateCheck(
+          ctx,
+          autoUpdate,
+          companion,
+          readUpdateFacts,
+        ).catch((err) => {
           log('[auto-update-checker] Background update check failed:', err);
         });
       }, 0);
     },
+    readUpdateFacts,
   };
 }
 
@@ -86,6 +105,8 @@ async function ensureCompanionForPackageRoot(
 
   if (companion?.enabled === true) {
     try {
+      const { ensureCompanionVersion, loadCompanionManifestFromPackageRoot } =
+        await import('../../companion/updater');
       const manifest = loadCompanionManifestFromPackageRoot(packageRoot);
       const companionResult = await ensureCompanionVersion({
         config: companion,
@@ -126,6 +147,7 @@ async function runBackgroundUpdateCheck(
   ctx: PluginInput,
   autoUpdate: boolean,
   companion: AutoUpdateCheckerOptions['companion'],
+  readUpdateFacts: UpdateFactsProvider,
 ): Promise<void> {
   const pluginInfo = findPluginEntry(ctx.directory);
   if (!pluginInfo) {
@@ -141,7 +163,11 @@ async function runBackgroundUpdateCheck(
   }
 
   const channel = extractChannel(pluginInfo.pinnedVersion ?? currentVersion);
-  const latestInfo = await getLatestCompatibleVersion(currentVersion, channel);
+  const latestInfo = await getLatestCompatibleVersion(
+    currentVersion,
+    channel,
+    readUpdateFacts,
+  );
   if (latestInfo.unsafeReason === 'unparseable-current-version') {
     log(
       `[auto-update-checker] Current version is not semver; skipping auto-update: ${currentVersion}`,

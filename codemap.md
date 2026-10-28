@@ -119,6 +119,24 @@ This codemap covers the plugin repository itself and excludes the nested `openco
   plus `/implement` (including newest completed-spec fallback). The
   `interview_submit_state` tool is registered statically and bridged for v1/v2.
 
+## Runtime Reuse Seams
+
+- `src/config/snapshot.ts` owns bounded shared source reads, resolved config
+  outcomes and raw/validated preset catalog views. `jsonc.ts`, `json-file.ts`
+  and `paths.ts` sit below CLI and runtime callers; installer logic stays in CLI.
+- Agent registry/projection passes reuse override/model/MCP tables locally.
+  Marketplace admission receives the lazily loaded `registry-runtime.ts`
+  Implementation after its feature gate; schema primitives have small owners.
+- `src/hooks/message-transform-view.ts` is request-local, rebuilt after
+  structural transcript edits; injected bytes and hook ordering are unchanged.
+- `src/tui-state.ts` batches native-event recorder/projection work in an isolated
+  asynchronous scope and commits synchronously under the existing file lock.
+- v2 admission shares its validated record/identity with profile capture. Native
+  event filters freeze the required type union once; Interview has one owner.
+- Update facts use the existing native RPC seam. Optional implementations are
+  emitted as packaged ESM chunks; entry paths remain unchanged. See
+  [Runtime Efficiency](docs/runtime-efficiency.md) and release import checks.
+
 ## Root Assets
 
 - `README.md`: user-facing product overview, install docs, and agent descriptions.

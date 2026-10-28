@@ -22,9 +22,10 @@ v2.2.0; the latest live-host smoke baseline remains the version stated below.
 
 The 2.2.0 release adds the Desktop GUI plugin SDK, per-session
 `session.instructions.entry.*`, type-filtered event subscriptions,
-`experimental.generate`, and richer media endpoints. OMOS consumes none of the
-GUI surface and keeps its existing promise-adapter bridges; the additions are
-backward-compatible on the paths this adapter uses. The native patch tool is
+`experimental.generate`, and richer media endpoints. OMOS freezes its required
+event-type union at setup and subscribes to Interview text streams only when
+Interview is enabled. It consumes none of the GUI surface and retains the
+existing promise-adapter bridges. The native patch tool is
 still named `patch` with a `{ patchText }` input, and the apply-patch preflight
 now serves both that name and v1's `apply_patch`.
 
@@ -97,15 +98,20 @@ plugin rejected with "invalid tui export".
   the entry through the package's `exports["./tui"]` map — the server-side
   export plays no role in that discovery.
 
-Three builds are produced:
+The host entry builds retain their public paths and include ESM chunks for
+optional implementations. Install or copy the complete package: an entry file
+alone is no longer self-contained. Packed-artifact verification checks every
+relative static and dynamic import target.
+
+Three host entry builds are produced:
 
 | Export | File | Build | Externals |
 |---|---|---|---|
 | `.` (main) | `dist/index.js` | `build:plugin` | zod, jsdom, @opencode-ai/*, @opentui/* (shared with v1 host) |
-| `./server` | `dist/server/index.js` | `build:v2` | jsdom only (self-contained for v2) |
+| `./server` | `dist/server/index.js` + chunks | `build:v2` | jsdom, jsonc-parser (other runtime dependencies bundled) |
 | `./tui` | `dist/tui2.js` | `build:tui` | same external set as `build:plugin` (composes the v1 TUI entry; inlines zod) |
 
-The optional `@opentui/*` pins (0.5.11) provide the v2 TUI entry's rendering
+The optional `@opentui/*` dependencies provide the v2 TUI entry's rendering
 stack. The development-only `@opencode/plugin` 2.2.0 contract declares an
 optional OpenTUI peer floor of `0.7.0`; the runtime pins track that family
 (`@opentui/core`/`@opentui/solid` 0.7.0) so the dependency-contract test and
@@ -114,7 +120,7 @@ the host agree. `@opentui/solid` pins `solid-js` exactly (0.7.0 requires
 
 v2's plugin resolver tries the `server` subpath first
 (`subpaths: ["server", ""]`), which the exports map resolves directly to
-`dist/server/index.js` — the self-contained v2 server bundle, and the
+`dist/server/index.js` — the v2 server entry with its packaged chunks, and the
 artifact the release check requires. Local source development registers an
 external shim directory instead of pointing at `dist/` (see
 [Local source development](#local-source-development-no-publishing)); v1

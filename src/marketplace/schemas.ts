@@ -3,6 +3,11 @@ import { z } from 'zod';
 import { SUPPORTED_SPECIALIST_ROLES } from '../config/agent-roles.js';
 import { AGENT_THEME_COLORS } from '../config/constants.js';
 import { ProviderModelIdSchema } from '../config/model-id-schema.js';
+import { MARKETPLACE_TOOL_NAMES } from './capabilities.js';
+import { MarketplacePackageIdSchema } from './id-schema.js';
+
+export { MARKETPLACE_TOOL_NAMES } from './capabilities.js';
+export { MarketplacePackageIdSchema } from './id-schema.js';
 
 export const MARKETPLACE_MANIFEST_SCHEMA_VERSION = 2 as const;
 export const MARKETPLACE_MANIFEST_SCHEMA_VERSION_V3 = 3 as const;
@@ -10,17 +15,6 @@ export const MARKETPLACE_DIGEST_DOMAIN = 'marketplace-agent-bundle-v2' as const;
 export const MARKETPLACE_DIGEST_DOMAIN_V3 =
   'marketplace-agent-bundle-v3' as const;
 export const MARKETPLACE_ROUTING_LINE_MAX_LENGTH = 256 as const;
-
-const packageIdPattern =
-  /^[a-z0-9][a-z0-9._-]{0,63}\/[a-z0-9][a-z0-9._-]{0,63}$/;
-
-export const MarketplacePackageIdSchema = z
-  .string()
-  .trim()
-  .regex(
-    packageIdPattern,
-    'Expected a canonical package ID such as author/name',
-  );
 
 export const MarketplaceVersionSchema = z
   .string()
@@ -113,20 +107,6 @@ const UniqueSingleLineStringArraySchema = z
   .refine((values) => new Set(values).size === values.length, {
     message: 'Values must be unique',
   });
-
-export const MARKETPLACE_TOOL_NAMES = [
-  'read',
-  'glob',
-  'grep',
-  'ast_grep_search',
-  'edit',
-  'write',
-  'apply_patch',
-  'ast_grep_replace',
-  'bash',
-  'webfetch',
-  'websearch',
-] as const;
 
 const MarketplaceToolSchema = z.enum(MARKETPLACE_TOOL_NAMES);
 

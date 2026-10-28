@@ -1,5 +1,6 @@
 import type { AgentName } from './constants';
 import type { RuntimeConfig } from './runtime';
+import type { AgentOverrideConfig } from './schema';
 import { lookupWithAliases } from './utils';
 
 /** Default MCPs per agent - "*" means all MCPs, "!item" excludes specific MCPs */
@@ -45,12 +46,15 @@ export function parseList(
 /**
  * Get the MCP list for an agent (from config or defaults).
  * Reads the merged (preset-aware) plugin-layer agents via RuntimeConfig.
+ * A caller that already derived the merged record for this pass may pass it
+ * as `derivedAgents` to avoid re-deriving per agent.
  */
 export function getAgentMcpList(
   agentName: string,
   runtime: RuntimeConfig,
+  derivedAgents?: Record<string, AgentOverrideConfig>,
 ): string[] {
-  const agents = runtime.agents();
+  const agents = derivedAgents ?? runtime.agents();
   const agentConfig = lookupWithAliases(agents, agentName);
   if (agentConfig?.mcps !== undefined) {
     return agentConfig.mcps;

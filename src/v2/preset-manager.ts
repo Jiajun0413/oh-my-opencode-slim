@@ -28,7 +28,10 @@
  */
 import type { AgentOverrideConfig, Preset, PresetDefinition } from '../config';
 import { resolvePreset } from '../config';
-import { loadPluginConfig } from '../config/loader';
+import {
+  loadPresetCatalog,
+  readPluginConfigSnapshot,
+} from '../config/snapshot';
 import {
   applyInheritModelChoice,
   applyModelChoice,
@@ -488,11 +491,11 @@ async function reportConfigWrite(
 /** Level 1: preset list (apply / edit / delete / create). */
 async function runPresetList(run: ManagerRun): Promise<void> {
   for (;;) {
-    const config = loadPluginConfig(run.directory, {
-      silent: true,
+    const config = readPluginConfigSnapshot(run.directory, {
       hostFlavor: 'v2',
-    });
-    const allPresets = getAllConfiguredPresets(run.directory, 'v2');
+    }).config;
+    const catalog = loadPresetCatalog(run.directory, 'v2');
+    const allPresets = getAllConfiguredPresets(run.directory, 'v2', catalog);
     const names = Array.from(
       new Set([
         ...Object.keys(allPresets),
@@ -529,7 +532,7 @@ async function runPresetList(run: ManagerRun): Promise<void> {
 
     const options: V2PresetDialogOption<PresetChoice>[] = names.map((name) => {
       const isProject =
-        getPresetSource(run.directory, name, 'v2') === 'project';
+        getPresetSource(run.directory, name, 'v2', catalog) === 'project';
       const tag = isProject ? ' [project - read-only]' : '';
       return {
         title:
@@ -657,10 +660,9 @@ async function applyPresetWithMessage(
       );
       return;
     }
-    const config = loadPluginConfig(run.directory, {
-      silent: true,
+    const config = readPluginConfigSnapshot(run.directory, {
       hostFlavor: 'v2',
-    });
+    }).config;
     const result = switchPresetOnDisk(run.directory, presetName, config, {
       hostFlavor: 'v2',
     });

@@ -1069,7 +1069,7 @@ export function createInterviewService(
 
   /**
    * Post the one status/error notice for the turn that just ended. Called on
-   * busy→idle only, never on `session.next.text.ended`.
+   * busy→idle only, never on `session.text.ended`.
    * Concurrent calls (v1 fires `session.status idle` and `session.idle` back
    * to back) share one in-flight decision so exactly one notice is posted.
    */
@@ -1751,7 +1751,7 @@ export function createInterviewService(
       return;
     }
 
-    if (event.type === 'session.next.text.ended') {
+    if (event.type === 'session.text.ended') {
       // Not a turn-end boundary: never post the notice here.
       const sessionID =
         (properties.sessionID as string | undefined) ??

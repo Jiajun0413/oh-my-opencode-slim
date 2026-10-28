@@ -3036,3 +3036,226 @@ describe('BackgroundJobBoard subscription seams', () => {
     }
   });
 });
+
+describe('BackgroundJobBoard direct queries and projection reuse', () => {
+  test('resolve hits full task IDs through the map, scoped per parent', () => {
+    const board = new BackgroundJobBoard();
+    const first = board.registerLaunch({
+      taskID: 'ses_1',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      now: 100,
+    });
+    const second = board.registerLaunch({
+      taskID: 'ses_2',
+      parentSessionID: 'parent-2',
+      agent: 'explorer',
+      now: 500,
+    });
+
+    expect(board.resolve('parent-1', 'ses_1')).toBe(first);
+    expect(board.resolve('parent-2', 'ses_2')).toBe(second);
+    // Whitespace is trimmed; foreign parents and unknown ids miss.
+    expect(board.resolve('parent-1', '  ses_1  ')).toBe(first);
+    expect(board.resolve('parent-1', 'ses_2')).toBeUndefined();
+    expect(board.resolve('parent-1', 'ses_missing')).toBeUndefined();
+  });
+
+  test('resolve alias fallback stays scoped per parent and is order-independent', () => {
+    const board = new BackgroundJobBoard();
+    const first = board.registerLaunch({
+      taskID: 'ses_1',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      now: 100,
+    });
+    const second = board.registerLaunch({
+      taskID: 'ses_2',
+      parentSessionID: 'parent-2',
+      agent: 'explorer',
+      now: 500,
+    });
+
+    expect(board.resolve('parent-1', first.alias)).toBe(first);
+    expect(board.resolve('parent-2', second.alias)).toBe(second);
+    // Numbered aliases are namespaced per parent: the same alias string
+    // resolves to each parent's own record, never across parents.
+    expect(first.alias).toBe(second.alias);
+    expect(board.resolve('parent-1', second.alias)).toBe(first);
+    // The map hit wins even when the record launched after its siblings.
+    expect(board.resolve('parent-2', 'ses_2')).toBe(second);
+  });
+
+  test('hasRunning and hasTerminalUnreconciled answer per parent without sorting', () => {
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'ses_run',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      now: 100,
+    });
+    board.registerLaunch({
+      taskID: 'ses_stopped',
+      parentSessionID: 'parent-2',
+      agent: 'oracle',
+      now: 100,
+    });
+    board.markStopped('ses_stopped', 'no native result', 110, undefined, 110);
+
+    expect(board.hasRunning('parent-1')).toBe(true);
+    expect(board.hasRunning('parent-2')).toBe(false);
+    expect(board.hasTerminalUnreconciled('parent-1')).toBe(false);
+    expect(board.hasTerminalUnreconciled('parent-2')).toBe(true);
+  });
+
+  test('restoreRetainedSession alias availability is scoped per parent', () => {
+    const board = new BackgroundJobBoard();
+    const restore = (taskID: string, parentSessionID: string) =>
+      board.restoreRetainedSession({
+        taskID,
+        parentSessionID,
+        agent: 'oracle',
+        description: taskID,
+        state: 'completed',
+        background: true,
+        resultSummary: 'done',
+        alias: 'ora-7',
+        launchedAt: 100,
+        completedAt: 110,
+      });
+
+    expect(restore('ses_a', 'parent-1')?.alias).toBe('ora-7');
+    // Taken within the same parent: the row keeps its task ID.
+    expect(restore('ses_b', 'parent-1')?.alias).toBe('ses_b');
+    // A sibling parent holding the alias does not block another parent.
+    expect(restore('ses_c', 'parent-2')?.alias).toBe('ora-7');
+  });
+
+  test('sidebar history selections omit absent timestamps (no undefined keys)', () => {
+    const board = new BackgroundJobBoard();
+    // A restored stopped row carries only launch evidence; completedAt
+    // stays absent.
+    board.restoreRetainedSession({
+      taskID: 'ses_stopped',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'recovered stop',
+      state: 'stopped',
+      background: true,
+      launchedAt: 100,
+    });
+
+    const selection = board
+      .sidebarHistoryByParentAgent()
+      .get('parent-1')
+      ?.get('oracle')?.[0];
+    expect(selection).toMatchObject({
+      taskID: 'ses_stopped',
+      terminalState: 'stopped',
+      lastUsedAt: 100,
+    });
+    expect(selection && 'completedAt' in selection).toBe(false);
+  });
+
+  test('sidebarHistoryByParentAgent reuses an explicit sorted snapshot', () => {
+    const board = new BackgroundJobBoard();
+    const seed = (taskID: string, parentSessionID: string, now: number) => {
+      board.registerLaunch({
+        taskID,
+        parentSessionID,
+        agent: 'oracle',
+        now,
+      });
+      board.updateStatus({
+        taskID,
+        state: 'completed',
+        resultSummary: 'done',
+        now: now + 100,
+      });
+      board.markReconciled(taskID, now + 200);
+    };
+    seed('ses_1', 'parent-1', 100);
+    seed('ses_2', 'parent-2', 400);
+
+    const records = board.list();
+    expect(board.sidebarHistoryByParentAgent(records)).toEqual(
+      board.sidebarHistoryByParentAgent(),
+    );
+    // A parent-scoped slice of the same snapshot groups only its records.
+    const scoped = board.sidebarHistoryByParentAgent(
+      records.filter((job) => job.parentSessionID === 'parent-1'),
+    );
+    expect([...scoped.keys()]).toEqual(['parent-1']);
+  });
+
+  test('aliases stay unique per parent across launch, restore, and adoption', () => {
+    const board = new BackgroundJobBoard();
+    const owners = new Map<string, string>();
+    const claim = (parentSessionID: string, alias: string, taskID: string) => {
+      const key = `${parentSessionID}\u0000${alias}`;
+      expect(owners.has(key)).toBe(false);
+      owners.set(key, taskID);
+    };
+
+    const first = board.registerLaunch({
+      taskID: 'ses_1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+    });
+    const second = board.registerLaunch({
+      taskID: 'ses_2',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+    });
+    claim('parent-1', first.alias, 'ses_1');
+    claim('parent-1', second.alias, 'ses_2');
+
+    // A restored trusted alias claims it; a second restore with the same
+    // historical alias falls back to its own task ID.
+    const restore = (taskID: string, alias: string, launchedAt: number) =>
+      board.restoreRetainedSession({
+        taskID,
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        description: taskID,
+        state: 'completed',
+        background: true,
+        resultSummary: 'done',
+        alias,
+        launchedAt,
+        completedAt: launchedAt + 10,
+      });
+    const trusted = restore('ses_3', 'ora-9', 100);
+    claim('parent-1', trusted?.alias ?? '', 'ses_3');
+    const fallback = restore('ses_4', 'ora-9', 200);
+    expect(fallback?.alias).toBe('ses_4');
+    claim('parent-1', fallback.alias, 'ses_4');
+
+    // An adopted row aliases to its own task ID.
+    const adopted = board.registerLaunch({
+      taskID: 'ses_5',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      adopted: true,
+    });
+    expect(adopted.alias).toBe('ses_5');
+    claim('parent-1', adopted.alias, 'ses_5');
+
+    // The same alias string may live under another parent: resolution is
+    // parent-scoped, never global.
+    const cross = board.registerLaunch({
+      taskID: 'ses_6',
+      parentSessionID: 'parent-2',
+      agent: 'oracle',
+    });
+    expect(cross.alias).toBe(first.alias);
+    claim('parent-2', cross.alias, 'ses_6');
+
+    // Every record resolves through both identity paths.
+    for (const [key, taskID] of owners) {
+      const [parentSessionID, alias] = key.split('\u0000');
+      expect(board.resolve(parentSessionID, alias)?.taskID).toBe(taskID);
+      expect(board.resolve(parentSessionID, taskID)?.taskID).toBe(taskID);
+    }
+  });
+});

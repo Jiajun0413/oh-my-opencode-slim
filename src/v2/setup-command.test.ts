@@ -968,6 +968,26 @@ describe('context bridge: transcript identity enrichment', () => {
     },
   );
 
+  test('attributed user messages skip the stored-history read', async () => {
+    const sessionContext = mock(async () => []);
+    const handler = createSessionContextHandler({
+      interviewHandleContext: async () => {},
+      messagesTransform: async () => {},
+      sessionContext,
+    });
+    const user = {
+      id: 'u1',
+      role: 'user',
+      agent: 'planner',
+      content: [{ type: 'text', text: 'hi' }],
+    };
+    await handler(makeEvent([user]));
+    expect(sessionContext).not.toHaveBeenCalled();
+    expect(user.agent).toBe('planner');
+    await handler(makeEvent([{ id: 'a1', role: 'assistant', content: [] }]));
+    expect(sessionContext).not.toHaveBeenCalled();
+  });
+
   test('attribution falls back to the event agent on a markerless history', async () => {
     const user = {
       id: 'u1',

@@ -218,34 +218,19 @@ export class MarketplaceService {
   }
 
   status(): MarketplaceRuntimeStatus {
-    const livePackages = this.getLivePackages?.();
-    const inspection = this.store.inspectAll();
-    const desired = this.readDesiredPackages(inspection);
-    const presetOverride = this.getPresetOverride?.();
-    return readMarketplaceRuntimeStatus({
-      directory: this.projectDir,
-      store: this.store,
-      inspection,
-      ...(presetOverride === undefined ? {} : { presetOverride }),
-      ...(desired === undefined
-        ? {}
-        : { desiredPackageIds: desired.packageIds }),
-      ...(livePackages === undefined ? {} : { livePackages }),
-      ...(desired?.packages === undefined
-        ? {}
-        : { desiredPackages: desired.packages }),
-      ...(desired?.error === undefined
-        ? {}
-        : { desiredConfigError: desired.error }),
-    });
+    return readMarketplaceRuntimeStatus(this.statusInput());
   }
 
   requestReload(): MarketplaceReloadRequest {
+    return requestMarketplaceReload(this.statusInput());
+  }
+
+  private statusInput(): Parameters<typeof readMarketplaceRuntimeStatus>[0] {
     const livePackages = this.getLivePackages?.();
     const inspection = this.store.inspectAll();
     const desired = this.readDesiredPackages(inspection);
     const presetOverride = this.getPresetOverride?.();
-    return requestMarketplaceReload({
+    return {
       directory: this.projectDir,
       store: this.store,
       inspection,
@@ -260,7 +245,7 @@ export class MarketplaceService {
       ...(desired?.error === undefined
         ? {}
         : { desiredConfigError: desired.error }),
-    });
+    };
   }
 
   private readDesiredPackages(

@@ -1,13 +1,13 @@
 import { accessSync, constants, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { mutateJsonFile } from '../cli/config-io';
-import { getConfigSearchDirs } from '../cli/paths';
+import { mutateJsonFile } from '../config/json-file';
 import {
   findPluginConfigPaths,
   interpolateEnvironmentVariables,
   loadPluginConfig,
   loadPluginConfigFromPath,
 } from '../config/loader';
+import { getConfigSearchDirs } from '../config/paths';
 import {
   mergePresetMaps,
   normalizePreset,

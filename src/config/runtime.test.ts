@@ -149,6 +149,19 @@ describe('RuntimeConfig', () => {
     expect(runtime.disabledAgents).toEqual(new Set(['explorer']));
   });
 
+  test('disabled agent derivation is reused and invalidated on reseed', () => {
+    resetRegistry();
+    const runtime = RuntimeConfig.init(DIRECTORY, {
+      disabled_agents: ['librarian', 'orchestrator'],
+    });
+    const disabled = runtime.disabledAgents;
+    expect(disabled).toEqual(new Set(['explorer']));
+    expect(runtime.disabledAgents).toBe(disabled);
+    RuntimeConfig.init(DIRECTORY, { disabled_agents: ['observer'] });
+    expect(runtime.disabledAgents).toEqual(new Set(['observer']));
+    expect(runtime.disabledAgents).not.toBe(disabled);
+  });
+
   test('registry reset clears the instance state', () => {
     resetRegistry();
     const runtime = RuntimeConfig.init(DIRECTORY, {

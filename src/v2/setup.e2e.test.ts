@@ -621,8 +621,10 @@ describe('createV2Setup e2e', () => {
     const order: string[] = [];
     let rpc: any;
     (ctx as any).rpc = {
-      register: async (_contract: unknown, handlers: unknown) => {
-        rpc = handlers;
+      register: async (contract: { id: string }, handlers: unknown) => {
+        if (contract.id === 'oh-my-opencode-slim.session-preset.v1') {
+          rpc = handlers;
+        }
         return { dispose() {} };
       },
     };

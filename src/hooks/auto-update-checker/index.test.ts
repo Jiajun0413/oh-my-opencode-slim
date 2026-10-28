@@ -27,6 +27,8 @@ const checkerMocks = {
   getLocalDevVersion: mock(() => null),
   getCurrentRuntimePackageJsonPath: mock(() => null),
   updateInstallerManagedVersions: mock(() => ({ status: 'changed' })),
+  readUpdateFacts: mock(async () => null),
+  createUpdateFactsReader: mock(() => () => Promise.resolve(null)),
 };
 
 const releaseInstallLockMock = mock(() => {});

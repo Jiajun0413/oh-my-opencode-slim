@@ -1,9 +1,9 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { stripJsonComments } from '../cli/config-io';
-import { getConfigSearchDirs } from '../cli/paths';
 import { DEFAULT_DISABLED_AGENTS } from './constants';
 import { COUNCIL_CONFIG_KEYS } from './council-schema';
+import { stripJsonComments } from './jsonc';
+import { getConfigSearchDirs } from './paths';
 import type { ResolvedPresetMap } from './presets';
 import {
   deepMerge,
@@ -96,6 +96,14 @@ export interface LoadPluginConfigOptions {
   /** Select a preset for this read only, without creating a runtime agent
    * override. Ancestors < child preset < root agents remains unchanged. */
   presetName?: string;
+  /**
+   * INTERNAL seam for the shared snapshot reader (`config/snapshot.ts`): read
+   * a config layer's text through this hook instead of `fs.readFileSync`. The
+   * snapshot captures each selected file's bytes once per identity change and
+   * feeds them through here so the layered load never re-reads the disk. Callers
+   * outside the config package must leave this unset.
+   */
+  readText?: (configPath: string) => string;
 }
 
 const PROMPTS_DIR_NAME = 'oh-my-opencode-slim';
@@ -414,15 +422,40 @@ export function reportUnknownCouncilKeys(
   }
 }
 
-/** Validate a layer without changing its editable preset declaration syntax. */
+/**
+ * Read and validate a plugin config layer without changing its editable
+ * preset declaration syntax. Two policies share this seam:
+ *
+ * - default (interpolated + validated): env placeholders are interpolated and
+ *   the layer is schema-validated (removed keys/enum values stripped, disabled
+ *   key shapes normalized) before merge;
+ * - `raw: true`: plain JSONC only, no interpolation and no validation. The
+ *   user preset catalog reads this way so editable preset syntax (flat maps,
+ *   `extends`, marketplace directives) and prototype-sensitive preset names
+ *   survive verbatim for the editor. The two parses stay separate on purpose.
+ */
 export function loadRawPluginConfigFromPath(
   configPath: string,
   options?: LoadPluginConfigOptions,
-): RawPluginConfig | null {
+): RawPluginConfig | null;
+export function loadRawPluginConfigFromPath(
+  configPath: string,
+  options: LoadPluginConfigOptions & { raw: true },
+): Record<string, unknown> | null;
+export function loadRawPluginConfigFromPath(
+  configPath: string,
+  options?: LoadPluginConfigOptions & { raw?: boolean },
+): Record<string, unknown> | null {
+  if (options?.raw) {
+    return readRawConfigLayer(configPath, options);
+  }
   try {
     // Strip a UTF-8 BOM (RFC 8259 permits one); JSON.parse would otherwise
     // fail with "Unrecognized token" and silently drop the whole config.
-    const content = fs.readFileSync(configPath, 'utf-8').replace(/^\uFEFF/, '');
+    const content = readLayerFileText(configPath, options).replace(
+      /^\uFEFF/,
+      '',
+    );
     // Use stripJsonComments to support JSONC format (comments and trailing commas)
     let rawConfig: unknown;
     try {
@@ -548,6 +581,64 @@ export function loadRawPluginConfigFromPath(
     }
     return null;
   }
+}
+
+/**
+ * Raw layer policy: BOM strip, comment strip, JSON.parse. No interpolation,
+ * no removed-key/enum normalization, no schema validation — owner of the
+ * `raw` variant of `loadRawPluginConfigFromPath`. Read errors keep the same
+ * channel as the validated policy (ENOENT is expected; everything else is a
+ * warning and a null layer), so callers preserve their last-good fallbacks.
+ */
+function readRawConfigLayer(
+  configPath: string,
+  options?: LoadPluginConfigOptions,
+): Record<string, unknown> | null {
+  try {
+    // Strip a UTF-8 BOM (RFC 8259 permits one); JSON.parse would otherwise
+    // fail with "Unrecognized token" and silently drop the whole layer.
+    const content = readLayerFileText(configPath, options).replace(
+      /^\uFEFF/,
+      '',
+    );
+    return JSON.parse(stripJsonComments(content)) as Record<string, unknown>;
+  } catch (error) {
+    // Invalid JSON yields a null layer, matching the interpolation-free fetch
+    // the caller (the preset catalog) expects; only non-ENOENT read failures
+    // are surfaced through the warning channel.
+    if (
+      error instanceof Error &&
+      'code' in error &&
+      (error as NodeJS.ErrnoException).code !== 'ENOENT'
+    ) {
+      options?.onWarning?.({
+        path: configPath,
+        kind: 'read-error',
+        message: error.message,
+      });
+      if (!options?.silent) {
+        console.warn(
+          `[oh-my-opencode-slim] Error reading config from ${configPath}:`,
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    }
+    return null;
+  }
+}
+
+/**
+ * Read one layer's text: through the caller-supplied snapshot seam when
+ * present (the shared reader already captured the bytes), otherwise straight
+ * from disk. ENOENT propagates so both policies keep their missing-file
+ * fallbacks.
+ */
+function readLayerFileText(
+  configPath: string,
+  options?: LoadPluginConfigOptions,
+): string {
+  if (options?.readText) return options.readText(configPath);
+  return fs.readFileSync(configPath, 'utf-8');
 }
 
 /**

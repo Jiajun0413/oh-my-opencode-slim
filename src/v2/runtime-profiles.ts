@@ -133,6 +133,23 @@ export interface SessionProfileIdentity {
   parentID?: string;
   agent?: string;
   model?: unknown;
+  /** The hint IS the host's own identity read for this admission (from
+   * the session-preset `ensureAdmission` transaction): field absences are
+   * definitive — a missing `parentID` is a proven root — and the host is
+   * NOT re-consulted to fill missing fields. Omitted hints (event
+   * prewarm) keep the re-read enrichment behavior. */
+  authoritative?: boolean;
+}
+
+/**
+ * Per-admission capture input: the per-session profile table already
+ * bound by the SAME admission transaction (derived from the session
+ * preset record). Supplied only alongside an `authoritative` identity,
+ * it replaces the `profilesForSession` read so one admission performs
+ * one identity lookup and one KV lookup total.
+ */
+export interface SessionProfileCapture {
+  profiles: V2AgentRuntimeProfiles;
 }
 
 export interface SessionProfileBridge {
@@ -142,7 +159,12 @@ export interface SessionProfileBridge {
    * Idempotent capture-and-switch for ONE session, awaited on the request
    * path (the native `session.prompt` hook) before the admission's first
    * model request. When `identity` is omitted, `session.get` resolves the
-   * session's `parentID`/`agent`. For an identified plugin child, model
+   * session's `parentID`/`agent`. An `authoritative` identity (from the
+   * session-preset `ensureAdmission` transaction) is used as-is — a
+   * missing `parentID` is a proven root and the host is not re-read —
+   * and `capture` supplies profiles already bound by that same
+   * transaction so the admission performs one identity lookup and one
+   * KV lookup total. For an identified plugin child, model
    * switching is fully awaited and a failed switch rejects the admission;
    * unknown identity remains untouched because it may be a root or foreign
    * session. Once captured (or proven root/foreign) the call is O(1).
@@ -150,6 +172,7 @@ export interface SessionProfileBridge {
   ensureSessionProfile(
     sessionID: string,
     identity?: SessionProfileIdentity,
+    capture?: SessionProfileCapture,
   ): Promise<void>;
   /** Frozen profile for a session (undefined when not captured). */
   profileForSession(sessionID: string): V2AgentRuntimeProfile | undefined;
@@ -229,7 +252,15 @@ export function createSessionProfileBridge(
     let model = hint?.model;
     let authoritative = hint !== undefined;
     const get = options.session?.get;
-    if ((!parentID || !agent) && typeof get === 'function') {
+    // An authoritative hint IS the host identity read for this admission:
+    // re-reading the host could only duplicate it. Missing fields stay
+    // definitive (absent parentID = root); the known-agent fallback below
+    // still applies. Event hints (no flag) keep the enriching re-read.
+    if (
+      hint?.authoritative !== true &&
+      (!parentID || !agent) &&
+      typeof get === 'function'
+    ) {
       try {
         const response = await withProfileTimeout(
           get.call(options.session, { sessionID }),
@@ -266,6 +297,7 @@ export function createSessionProfileBridge(
   async function ensure(
     sessionID: string,
     identity?: SessionProfileIdentity,
+    capture?: SessionProfileCapture,
   ): Promise<void> {
     if (
       captured.has(sessionID) ||
@@ -304,9 +336,15 @@ export function createSessionProfileBridge(
         return;
       }
 
-      const profiles = options.profilesForSession
-        ? await options.profilesForSession(sessionID)
-        : options.profiles();
+      // Per-admission capture: profiles already bound by the same
+      // transaction as `identity` (a session-preset record's merged
+      // table). Never a persistent cache — the capture is only the
+      // admission-local reuse of a value the caller already read.
+      const profiles =
+        capture?.profiles ??
+        (options.profilesForSession
+          ? await options.profilesForSession(sessionID)
+          : options.profiles());
       const profile = profiles[resolved.agent];
       if (!profile) {
         // Plugin-managed but absent from the profile table (e.g. a
@@ -422,9 +460,9 @@ export function createSessionProfileBridge(
       }
     },
 
-    async ensureSessionProfile(sessionID, identity) {
+    async ensureSessionProfile(sessionID, identity, capture) {
       if (typeof sessionID !== 'string' || !sessionID) return;
-      await ensure(sessionID, identity);
+      await ensure(sessionID, identity, capture);
     },
 
     profileForSession(sessionID) {

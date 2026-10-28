@@ -1,8 +1,16 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import tuiPlugin from './tui';
+import tuiPlugin, { readConfigState, readTuiGates } from './tui';
 
 interface TestEnvironment {
   root: string;
@@ -120,7 +128,11 @@ async function runV1Entry(api: Record<string, unknown>): Promise<void> {
   );
 }
 
-function spyOnIntervals(): { delays: number[]; restore: () => void } {
+function spyOnIntervals(): {
+  delays: number[];
+  callbacks: Map<number, () => void>;
+  restore: () => void;
+} {
   const originalSetInterval = globalThis.setInterval;
   const originalClearInterval = globalThis.clearInterval;
   const timerHost = globalThis as unknown as {
@@ -128,8 +140,9 @@ function spyOnIntervals(): { delays: number[]; restore: () => void } {
     clearInterval: typeof clearInterval;
   };
   const delays: number[] = [];
+  const callbacks = new Map<number, () => void>();
   const setIntervalSpy = mock((callback: () => void, delay?: number) => {
-    void callback;
+    callbacks.set(delay ?? 0, callback);
     delays.push(delay ?? 0);
     return 0 as unknown as ReturnType<typeof setInterval>;
   });
@@ -138,6 +151,7 @@ function spyOnIntervals(): { delays: number[]; restore: () => void } {
   timerHost.clearInterval = clearIntervalSpy as unknown as typeof clearInterval;
   return {
     delays,
+    callbacks,
     restore: () => {
       timerHost.setInterval = originalSetInterval;
       timerHost.clearInterval = originalClearInterval;
@@ -155,6 +169,54 @@ describe('TUI feature gates', () => {
   afterEach(() => {
     env.restore();
     fs.rmSync(env.root, { recursive: true, force: true });
+  });
+
+  test('entry and unchanged polling share one parsed config snapshot', async () => {
+    writeUserConfig({ sidebar: false, disabled_commands: ['preset'] });
+    const configPath = path.join(
+      process.env.OPENCODE_CONFIG_DIR as string,
+      'oh-my-opencode-slim.json',
+    );
+    const realRead = fs.readFileSync;
+    let reads = 0;
+    const readSpy = spyOn(fs, 'readFileSync').mockImplementation((...args) => {
+      if (String(args[0]) === configPath) reads += 1;
+      return realRead(...(args as Parameters<typeof fs.readFileSync>));
+    });
+    const intervals = spyOnIntervals();
+    const { api, disposers } = makeV1Api(env.projectDir);
+    try {
+      await runV1Entry(api);
+      expect(reads).toBe(1);
+      intervals.callbacks.get(5000)?.();
+      intervals.callbacks.get(5000)?.();
+      expect(reads).toBe(1);
+      writeUserConfig({ sidebar: false, preset: 'edited' });
+      intervals.callbacks.get(5000)?.();
+      expect(reads).toBe(2);
+      expect(readConfigState(env.projectDir).presetName).toBe('edited');
+      expect(reads).toBe(2);
+    } finally {
+      for (const dispose of disposers) await dispose();
+      intervals.restore();
+      readSpy.mockRestore();
+    }
+  });
+
+  test('shared gates preserve invalid-config warnings and repair on edit', () => {
+    writeUserConfig({ tui: false });
+    expect(readTuiGates(env.projectDir).gates.tuiEnabled).toBe(false);
+    const configPath = path.join(
+      process.env.OPENCODE_CONFIG_DIR as string,
+      'oh-my-opencode-slim.json',
+    );
+    fs.writeFileSync(configPath, '{ invalid');
+    expect(readTuiGates(env.projectDir).gates.configInvalid).toBe(true);
+    writeUserConfig({ tui: true, compactSidebar: false });
+    const repaired = readTuiGates(env.projectDir);
+    expect(repaired.gates.configInvalid).toBe(false);
+    expect(repaired.gates.compactSidebar).toBe(false);
+    expect(repaired.gates.tuiEnabled).toBe(true);
   });
 
   test('v1 entry registers nothing when tui is false', async () => {

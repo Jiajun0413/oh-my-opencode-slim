@@ -15,6 +15,7 @@ import { CompanionManager, stateFilePath } from './companion/manager';
 import * as hookFactories from './hooks';
 import * as handoffFactories from './hooks/task-session-manager/fallback-observation-transfer';
 import { OhMyOpenCodeLite as plugin } from './index';
+import * as interviewFactories from './interview';
 import { getTuiStatePath, readTuiSnapshot } from './tui-state';
 import type { BackgroundJobRecord } from './utils/background-job-board';
 import * as gateFactories from './utils/background-job-terminal-gate';
@@ -218,6 +219,45 @@ describe('plugin feature gates through exported hooks', () => {
       expect(completed.text).toBe('hello');
     } finally {
       await hooks?.dispose?.();
+    }
+  });
+
+  test('v2 uses the bridge service without constructing a v1 interview owner', async () => {
+    await configure({ backgroundJobs: { enabled: false } });
+    const managerSpy = spyOn(interviewFactories, 'createInterviewManager');
+    const submitState = mock(async () => ({ ok: true, message: 'accepted' }));
+    const service = {
+      getActiveInterviewId: () => 'interview_1',
+      submitState,
+    };
+    let hooks: PluginHooks | undefined;
+    try {
+      hooks = await createHooks('v2');
+      expect(managerSpy).not.toHaveBeenCalled();
+      expect(hooks.tool?.interview_submit_state).toBeDefined();
+      hooks['v2.setInterviewService']?.(service as never);
+      const result = await hooks.tool?.interview_submit_state.execute(
+        { state: { summary: 'Specification', questions: [] } } as never,
+        { sessionID: 'ses_interview', messageID: 'msg_1' } as never,
+      );
+      expect(result).toBe('accepted');
+      expect(submitState).toHaveBeenCalledTimes(1);
+    } finally {
+      await hooks?.dispose?.();
+      managerSpy.mockRestore();
+    }
+  });
+
+  test('v1 still constructs exactly one enabled interview owner', async () => {
+    await configure({ backgroundJobs: { enabled: false } });
+    const managerSpy = spyOn(interviewFactories, 'createInterviewManager');
+    let hooks: PluginHooks | undefined;
+    try {
+      hooks = await createHooks('v1');
+      expect(managerSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      await hooks?.dispose?.();
+      managerSpy.mockRestore();
     }
   });
 

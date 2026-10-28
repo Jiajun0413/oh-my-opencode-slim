@@ -10,7 +10,11 @@ import {
 } from 'node:fs';
 import { basename, extname, join } from 'node:path';
 import { asImagePart, type ImagePartView } from './image-part';
-import { isUserMessageWithParts, type MessageWithParts } from './types';
+import {
+  type MessageTransformView,
+  resolveView,
+} from './message-transform-view';
+import type { MessageWithParts } from './types';
 
 /** Keep this aligned with the host read tool's MAX_MEDIA_INGEST_BYTES. */
 const MAX_MEDIA_INGEST_BYTES = 20 * 1024 * 1024;
@@ -189,6 +193,13 @@ export function processImageAttachments(args: {
   /** Whether the turn's model accepts image input, from the host-resolved
    * capabilities. Unknown (`undefined`) falls through to interception. */
   modelAcceptsImages?: boolean;
+  /** Internal wiring argument: the request-local view the root transform
+   * built over `messages` (see ./message-transform-view). Supplies the
+   * validated user-message refs and per-request memoized image decodes, so
+   * the scans and this save loop share one decode per part. When omitted the
+   * hook builds its own view; `resolveView` rebuilds on identity or length
+   * mismatch. */
+  view?: MessageTransformView;
   log: (msg: string) => void;
 }): boolean {
   const { messages, workDir, imageRouting, disabledAgents, log } = args;
@@ -201,12 +212,15 @@ export function processImageAttachments(args: {
   // the parts inline and let the model read them directly.
   if (args.modelAcceptsImages === true) return false;
 
+  const view = resolveView(args.view, messages);
+
   // Keep original parts when observer is unavailable. The caller displays a
   // debounced warning toast; this hook must never destroy user data.
   if (disabledAgents.has('observer')) {
-    const userMessages = messages.filter(isUserMessageWithParts);
-    const latestUserMessage = userMessages[userMessages.length - 1];
-    if (latestUserMessage?.parts.some(isImagePart)) {
+    const latestUserMessage = view.latestUser;
+    if (
+      latestUserMessage?.parts.some((part) => view.imageView(part) !== null)
+    ) {
       log(
         '[image-hook] images retained inline; observer disabled — enable observer or set image_routing "direct"',
       );
@@ -221,15 +235,14 @@ export function processImageAttachments(args: {
   // decoded exactly once per transform.
   const messagesWithImages: Array<{
     msg: MessageWithParts;
-    imageParts: Array<{ part: unknown; view: ImagePartView }>;
+    imageParts: Array<{ part: unknown; imageView: ImagePartView }>;
   }> = [];
 
-  for (const msg of messages) {
-    if (!isUserMessageWithParts(msg)) continue;
-    const imageParts: Array<{ part: unknown; view: ImagePartView }> = [];
+  for (const msg of view.userMessages) {
+    const imageParts: Array<{ part: unknown; imageView: ImagePartView }> = [];
     for (const part of msg.parts) {
-      const view = asImagePart(part);
-      if (view) imageParts.push({ part, view });
+      const imageView = view.imageView(part);
+      if (imageView) imageParts.push({ part, imageView });
     }
     if (imageParts.length > 0) {
       messagesWithImages.push({ msg, imageParts });
@@ -242,7 +255,7 @@ export function processImageAttachments(args: {
   // to save: skip all filesystem setup and leave the parts inline — the
   // host's capability replacement is the backstop.
   const hasMaterializable = messagesWithImages.some(({ imageParts }) =>
-    imageParts.some(({ view }) => view.view === 'bytes'),
+    imageParts.some(({ imageView }) => imageView.view === 'bytes'),
   );
   if (!hasMaterializable) return false;
 
@@ -307,17 +320,17 @@ export function processImageAttachments(args: {
       }
     };
 
-    for (const { part, view } of imageParts) {
+    for (const { part, imageView } of imageParts) {
       // Parts the adapter cannot materialize (remote sources, malformed
       // carriers) are never stripped; the host's capability replacement is
       // the backstop.
-      if (view.view !== 'bytes') continue;
-      const rawName = view.filename;
+      if (imageView.view !== 'bytes') continue;
+      const rawName = imageView.filename;
       const sanitized = rawName ? sanitizeFilename(rawName) : undefined;
       const baseName = sanitized
         ? sanitized.replace(/\.[^.]+$/, '') || 'image'
         : 'image';
-      saveDecoded(part, view.bytes, view.ext, baseName);
+      saveDecoded(part, imageView.bytes, imageView.ext, baseName);
     }
 
     // If no image could be saved, leave every original part in place. This is

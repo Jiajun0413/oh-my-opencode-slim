@@ -1,6 +1,6 @@
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { getOpenCodeConfigPaths } from '../../cli/config-manager';
+import { getOpenCodeConfigPaths } from '../../config/paths';
 
 export { INSTALLER_MANAGED_PLUGIN_OPTION } from '../../plugin-entry';
 

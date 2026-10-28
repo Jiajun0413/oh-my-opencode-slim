@@ -31,6 +31,15 @@ Each agent is a **prompt-driven specialist** with a factory function that create
 - **Skill permissions**: Per-agent MCP and tool access controlled via `getSkillPermissionsForAgent()`
 - **Council synthesis**: Uses `createSynthesisOnlyPermission()` to block tool calls while allowing synthesis from councillor responses
 
+### Pass-local Resolution
+
+SDK and registry projections derive merged agent overrides/model arrays once
+per pass. MCP consumers receive that same override view. Marketplace activation
+and agent construction arrive through `marketplace.implementation`, loaded by
+the asynchronous composition root only after its existing enabled gate; the
+registry remains synchronous. Permission policies and host precedence do not
+change. Shared capabilities/ID schemas do not load the full manifest graph.
+
 ### Agent Lifecycle
 
 1. **Agent creation**: `createAgents(config)` instantiates all agents with merged configuration

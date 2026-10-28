@@ -56,6 +56,11 @@ ancestor's file.
 Set `OPENCODE_CONFIG_DIR` to use a custom user config directory instead of
 `~/.config/opencode`; install and runtime config discovery both honor it.
 
+Runtime readers share source snapshots and revalidate file identities and
+referenced environment values before reuse. Unchanged polling does not parse
+configuration again; invalid input retains the existing warning and last-good
+refresh behavior. See [Runtime Efficiency](runtime-efficiency.md).
+
 Set `OH_MY_OPENCODE_SLIM_DISABLE` to `1`, `true`, `yes`, or `on` to make
 oh-my-opencode-slim exit setup without registering agents, tools, MCPs, hooks,
 Companion, or the TUI sidebar. OpenCode still loads the package and calls its

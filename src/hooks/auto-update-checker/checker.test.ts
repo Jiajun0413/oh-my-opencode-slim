@@ -16,8 +16,7 @@ mock.module('../../utils/logger', () => ({
   log: mock(() => {}),
 }));
 
-mock.module('../../cli/config-manager', () => ({
-  stripJsonComments: (s: string) => s,
+mock.module('../../config/paths', () => ({
   getOpenCodeConfigPaths: () => [
     '/mock/config/opencode.json',
     '/mock/config/opencode.jsonc',

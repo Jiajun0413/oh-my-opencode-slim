@@ -80,6 +80,37 @@ export type SessionTeamAdmission = {
   inheritedProviderID?: string;
 };
 
+/**
+ * Precise identity fields parsed from the ONE host read that guards a
+ * preset admission (`session.get` inside the `ensure` transaction). The
+ * fields are absent only when the host session info lacks them — a
+ * missing `parentID` is a proven root. See `ensureAdmission`.
+ */
+export interface SessionPresetAdmissionIdentity {
+  parentID?: string;
+  agent?: string;
+  model?: unknown;
+  /** The fields came from the host's own identity read inside the same
+   * transaction, so absences are definitive and consumers must not
+   * re-consult the host to fill them. */
+  readonly authoritative: true;
+}
+
+/**
+ * One-admission reuse view of a session preset binding: the record and
+ * the precise identity parsed from the SAME host read, produced by ONE
+ * `ensure` transaction (one `session.get` + one storage lookup). The
+ * `record` object is the exact object `ensure` would return — the
+ * internal cache map stays the single owner; there is no second cached
+ * copy. `undefined` only when the service is unavailable (reduced host
+ * without storage/identity); a historical unbound child yields
+ * `{ record: undefined, identity }`.
+ */
+export type SessionPresetAdmission = {
+  record: SessionPresetRecord | undefined;
+  identity: SessionPresetAdmissionIdentity;
+};
+
 function assertJSON(value: unknown): void {
   if (value === null || typeof value === 'string' || typeof value === 'boolean')
     return;
@@ -223,6 +254,53 @@ export function createSessionPresets(options: {
     }
     return info;
   }
+  async function ensureTransaction(
+    id: string,
+    signal: AbortSignal | undefined,
+    explicitModel: boolean,
+    info: Record<string, unknown>,
+  ): Promise<SessionPresetRecord | undefined> {
+    check(signal);
+    const existing = await read(id);
+    const parentID =
+      typeof info.parentID === 'string' ? info.parentID : undefined;
+    if (existing) {
+      if (existing.parentID !== parentID)
+        throw new Error('Session preset parent identity mismatch');
+      if (
+        explicitModel &&
+        (!existing.explicitModel || !existing.preserveModel)
+      ) {
+        return write(
+          id,
+          { ...existing, explicitModel: true, preserveModel: true },
+          signal,
+        );
+      }
+      return existing;
+    }
+    if (parentID) {
+      // Historical/host-created children have no proven launch snapshot.
+      // Keep their native compatibility workflow; never infer a team from
+      // the parent's *current* bundle after a create→bind interruption.
+      return undefined;
+    }
+    // First admission of an old, unbound root is migration, not recovery
+    // of historical settings. Capture now, not at its first delegation.
+    return write(id, { schemaVersion: 1, bundle: options.current() }, signal);
+  }
+
+  function admissionIdentity(
+    info: Record<string, unknown>,
+  ): SessionPresetAdmissionIdentity {
+    return {
+      ...(typeof info.parentID === 'string' ? { parentID: info.parentID } : {}),
+      ...(typeof info.agent === 'string' ? { agent: info.agent } : {}),
+      ...(info.model !== undefined ? { model: info.model } : {}),
+      authoritative: true,
+    };
+  }
+
   async function ensure(
     id: string,
     signal?: AbortSignal,
@@ -232,34 +310,21 @@ export function createSessionPresets(options: {
     if (!available) return undefined;
     return serial(id, async () => {
       const info = await identity(id);
+      return ensureTransaction(id, signal, explicitModel, info);
+    });
+  }
+  async function ensureAdmission(
+    id: string,
+    signal?: AbortSignal,
+    explicitModel = false,
+  ): Promise<SessionPresetAdmission | undefined> {
+    check(signal);
+    if (!available) return undefined;
+    return serial(id, async () => {
+      const info = await identity(id);
       check(signal);
-      const existing = await read(id);
-      const parentID =
-        typeof info.parentID === 'string' ? info.parentID : undefined;
-      if (existing) {
-        if (existing.parentID !== parentID)
-          throw new Error('Session preset parent identity mismatch');
-        if (
-          explicitModel &&
-          (!existing.explicitModel || !existing.preserveModel)
-        ) {
-          return write(
-            id,
-            { ...existing, explicitModel: true, preserveModel: true },
-            signal,
-          );
-        }
-        return existing;
-      }
-      if (parentID) {
-        // Historical/host-created children have no proven launch snapshot.
-        // Keep their native compatibility workflow; never infer a team from
-        // the parent's *current* bundle after a create→bind interruption.
-        return undefined;
-      }
-      // First admission of an old, unbound root is migration, not recovery
-      // of historical settings. Capture now, not at its first delegation.
-      return write(id, { schemaVersion: 1, bundle: options.current() }, signal);
+      const record = await ensureTransaction(id, signal, explicitModel, info);
+      return { record, identity: admissionIdentity(info) };
     });
   }
   async function bindChild(
@@ -319,6 +384,7 @@ export function createSessionPresets(options: {
   return {
     available,
     ensure,
+    ensureAdmission,
     bindChild,
     checkActive: check,
     peek: (id: string) => cache.get(id),

@@ -27,6 +27,9 @@
 import * as fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { log } from '../utils/logger';
+import { findOwnedPackageJson } from '../utils/package-root';
+import { compareNumericVersions, type NumericVersion } from '../utils/version';
+import { updateFactsRpc } from './update-facts-rpc';
 
 /** The package this notice is about; also the npm name on the registry. */
 export const PACKAGE_NAME = 'oh-my-opencode-slim';
@@ -47,7 +50,7 @@ export const UPDATE_FETCH_TIMEOUT_MS = 4_000;
 export const UPDATE_TOAST_DURATION_MS = 10_000;
 
 /** Parsed `major.minor.patch`; the tuple keeps comparison allocation-free. */
-export type VersionTriple = readonly [number, number, number];
+export type VersionTriple = NumericVersion;
 
 /** A `ui.toast.show` input (v2 `ToastOptions` subset this module sends). */
 export interface UpdateNoticeToast {
@@ -131,12 +134,7 @@ export function compareVersions(
   left: VersionTriple,
   right: VersionTriple,
 ): number {
-  for (let index = 0; index < 3; index += 1) {
-    const a = left[index] as number;
-    const b = right[index] as number;
-    if (a !== b) return a < b ? -1 : 1;
-  }
-  return 0;
+  return compareNumericVersions(left, right);
 }
 
 /**
@@ -199,33 +197,12 @@ function versionFromPluginList(result: unknown): string | undefined {
 }
 
 /**
- * Read a `package.json` and return its version when it is *our* package with
- * a version we could compare. The name check is what keeps a stray ancestor
- * `package.json` (a host's, a parent project's) from answering the question.
- */
-function versionAtPackageRoot(url: URL): string | undefined {
-  try {
-    const manifest = JSON.parse(
-      fs.readFileSync(fileURLToPath(url), 'utf8'),
-    ) as {
-      name?: unknown;
-      version?: unknown;
-    };
-    if (manifest.name !== PACKAGE_NAME) return undefined;
-    const version =
-      typeof manifest.version === 'string' ? manifest.version : undefined;
-    return parseVersion(version) === undefined ? undefined : version;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
  * Version of the copy that is actually executing — the only copy whose version
- * describes what the user is running. The module lives in three places over a
- * release and all of them resolve to the package root's manifest:
- * `src/v2/` in the source tree, `dist/tui2.js` in the bundle, and
- * `node_modules/<pkg>/dist/tui2.js` in a host install.
+ * describes what the user is running. The module lives in several places over
+ * a release — `src/v2/` in the source tree, `dist/tui2.js` in the bundle, and
+ * a split `dist/chunks/<hash>.js` in a host install — so the manifest is
+ * resolved by walking up from the running module itself, not by a fixed list
+ * of relative candidates (which the chunk layout breaks).
  *
  * This deliberately does NOT look around at sibling install directories. The
  * cache keeps several versions at once, so "newest on disk" can be an
@@ -235,25 +212,18 @@ function versionAtPackageRoot(url: URL): string | undefined {
 export function resolveRunningVersion(
   moduleUrl: string | URL = import.meta.url,
 ): string | undefined {
-  let base: URL;
+  let modulePath: string;
   try {
-    base = new URL(moduleUrl);
+    modulePath = fileURLToPath(new URL(moduleUrl));
   } catch {
     return undefined;
   }
-  for (const relative of [
-    '../../package.json',
-    '../package.json',
-    './package.json',
-  ]) {
-    try {
-      const version = versionAtPackageRoot(new URL(relative, base));
-      if (version !== undefined) return version;
-    } catch {
-      // Unresolvable candidate: try the next one.
-    }
-  }
-  return undefined;
+
+  const manifest = findOwnedPackageJson(modulePath, PACKAGE_NAME);
+  if (manifest === null) return undefined;
+  return parseVersion(manifest.version) === undefined
+    ? undefined
+    : manifest.version;
 }
 
 /**
@@ -352,13 +322,102 @@ export async function fetchLatestVersion(
   }
 }
 
+/** A defensive object check for the untrusted RPC response boundary. */
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Validate the facts shape before reading it. The native host normally applies
+ * the RPC output schema, but reduced/test hosts can return arbitrary values;
+ * malformed facts are unavailable, never a second HTTP request or a throw.
+ */
+function latestFromRpcResult(result: unknown): string | undefined {
+  if (!isObjectRecord(result) || result.available !== true) return undefined;
+  const facts = result.facts;
+  if (!isObjectRecord(facts)) return undefined;
+  if (
+    Object.keys(facts).some((key) => key !== 'distTags' && key !== 'versions')
+  )
+    return undefined;
+
+  const distTags = facts.distTags;
+  const versions = facts.versions;
+  if (!isObjectRecord(distTags) || !Array.isArray(versions)) return undefined;
+  if (!versions.every((version) => typeof version === 'string')) {
+    return undefined;
+  }
+  if (
+    !Object.values(distTags).every((version) => typeof version === 'string')
+  ) {
+    return undefined;
+  }
+  const latest = distTags.latest;
+  return typeof latest === 'string' ? latest : undefined;
+}
+
+/**
+ * Latest version from the server's shared npm facts (native RPC). Returns
+ * `{ supported: false }` when the host has no RPC capability, which is the
+ * only case that falls back to the direct registry request; a present RPC
+ * that fails is unknown and stays silent, so one host never fetches twice.
+ */
+async function fetchLatestVersionFromRpc(
+  context: unknown,
+  options: UpdateNoticeOptions,
+): Promise<{ supported: boolean; latest?: string }> {
+  const ctx = (context ?? {}) as UpdateNoticeContext;
+  const client = ctx.client as
+    | {
+        rpc?: (contract: typeof updateFactsRpc) => {
+          get: (
+            input: Record<string, never>,
+            call: { location: { directory: string }; signal: AbortSignal },
+          ) => Promise<unknown>;
+        };
+      }
+    | undefined;
+  if (typeof client?.rpc !== 'function') return { supported: false };
+
+  const timeoutMs = options.timeoutMs ?? UPDATE_FETCH_TIMEOUT_MS;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`update facts timed out after ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+  });
+  try {
+    const calls = client.rpc(updateFactsRpc);
+    const directory = ctx.location?.directory ?? process.cwd();
+    const result = await Promise.race([
+      calls.get(
+        {},
+        {
+          location: { ...ctx.location, directory },
+          signal: AbortSignal.timeout(timeoutMs),
+        },
+      ),
+      timedOut,
+    ]);
+    return { supported: true, latest: latestFromRpcResult(result) };
+  } catch {
+    return { supported: true };
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 /** Resolve both sides and decide. Total: every failure yields no `notify`. */
 export async function checkForUpdate(
   context: unknown,
   options: UpdateNoticeOptions = {},
 ): Promise<UpdateCheck> {
   const installed = await resolveInstalledVersion(context, options);
-  const latest = await fetchLatestVersion(options);
+  const viaRpc = await fetchLatestVersionFromRpc(context, options);
+  const latest = viaRpc.supported
+    ? viaRpc.latest
+    : await fetchLatestVersion(options);
   return { installed, latest, notify: decideUpdate(installed, latest) };
 }
 

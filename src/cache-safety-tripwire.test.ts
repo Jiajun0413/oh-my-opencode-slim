@@ -44,6 +44,10 @@ const VOLATILE_PATTERNS: Array<{ name: string; regex: RegExp }> = [
  */
 const ALLOWLIST = new Map<string, string>([
   [
+    'config/json-file.ts',
+    'Moved shared atomic config I/O from CLI: randomUUID names temporary backup/config files only; no value reaches prompt content or agent definitions.',
+  ],
+  [
     'hooks/loop-command/index.ts',
     'Timestamps/randomness name per-run loop-history directories; the path only appears inside a newly appended user turn (payload tail), never in earlier prefix bytes.',
   ],

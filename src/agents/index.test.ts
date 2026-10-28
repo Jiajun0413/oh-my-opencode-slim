@@ -9,8 +9,10 @@ import {
   PluginConfigSchema,
   SUBAGENT_NAMES,
 } from '../config';
+import { getAgentMcpList } from '../config/agent-mcps';
 import { RuntimeConfig } from '../config/runtime';
 import {
+  type AgentModelProjection,
   applyModelInheritanceToConfig,
   createAgents,
   getAgentConfigs,
@@ -2467,5 +2469,175 @@ describe('observer dispatch instruction injection', () => {
     // Non-advisory roles never gain the line.
     const fixer = disabledSet.find((a) => a.name === 'fixer');
     expect(fixer?.config.prompt).not.toContain('dispatch @observer');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Projection derivation budget
+//
+// The agent/MCP projections hoist the merged override record and the model
+// arrays once per pass instead of re-deriving them per agent. These tests
+// pin the constant derivation count (independent of the roster size) and
+// the unchanged output of the hoisted paths.
+// ---------------------------------------------------------------------------
+
+type RuntimeDerivationCounts = {
+  agentsCalls: number;
+  arraysCalls: number;
+};
+
+/**
+ * Count `RuntimeConfig.agents()` and `modelArrays` derivations. Patches the
+ * prototype while the sampled code runs and restores the original members
+ * afterwards, even when the caller throws.
+ */
+function instrumentRuntimeDerivations() {
+  const agentsMethod = RuntimeConfig.prototype.agents;
+  const arraysDescriptor = Object.getOwnPropertyDescriptor(
+    RuntimeConfig.prototype,
+    'modelArrays',
+  );
+  if (!arraysDescriptor?.get) {
+    throw new Error('RuntimeConfig.modelArrays is not an accessor');
+  }
+  const arraysGetter = arraysDescriptor.get;
+  let agentsCalls = 0;
+  let arraysCalls = 0;
+  RuntimeConfig.prototype.agents = function (
+    this: RuntimeConfig,
+    defaultSkills: Parameters<RuntimeConfig['agents']>[0] = {},
+  ): ReturnType<RuntimeConfig['agents']> {
+    agentsCalls += 1;
+    return agentsMethod.call(this, defaultSkills);
+  };
+  Object.defineProperty(RuntimeConfig.prototype, 'modelArrays', {
+    configurable: true,
+    get(this: RuntimeConfig) {
+      arraysCalls += 1;
+      return arraysGetter.call(this);
+    },
+  });
+  return {
+    sample: (): RuntimeDerivationCounts => ({ agentsCalls, arraysCalls }),
+    restore: () => {
+      RuntimeConfig.prototype.agents = agentsMethod;
+      Object.defineProperty(
+        RuntimeConfig.prototype,
+        'modelArrays',
+        arraysDescriptor,
+      );
+    },
+  };
+}
+
+/** Roster delta used to prove derivation counts are roster-independent. */
+const ROSTER_CUSTOM_AGENTS = 12;
+
+function runtimeForRoster(
+  directory: string,
+  extraAgents: NonNullable<PluginConfig['agents']> = {},
+) {
+  const agents: NonNullable<PluginConfig['agents']> = {
+    ...Object.fromEntries(
+      Array.from({ length: ROSTER_CUSTOM_AGENTS }, (_, index) => [
+        `custom-${index}`,
+        { model: `provider/custom-${index}` },
+      ]),
+    ),
+    ...extraAgents,
+  };
+  RuntimeConfig.reset(directory);
+  RuntimeConfig.init(directory, { agents });
+  return RuntimeConfig.get(directory);
+}
+
+describe('projection derivation budget', () => {
+  test('createAgents and the SDK projection derive agents() once each, independent of the roster', () => {
+    const countsFor = (rostered: boolean) => {
+      const runtime = runtimeForRoster(
+        rostered
+          ? 'runtime-test-agent-budget-rostered'
+          : 'runtime-test-agent-budget-baseline',
+      );
+      const instrumented = instrumentRuntimeDerivations();
+      try {
+        const definitions = createAgents(runtime);
+        getAgentConfigsFromDefinitions(runtime, definitions);
+      } finally {
+        instrumented.restore();
+      }
+      return instrumented.sample();
+    };
+
+    const baseline = countsFor(false);
+    const rostered = countsFor(true);
+    expect(rostered).toEqual(baseline);
+    // Pin the constant budget: one merged-override derivation in
+    // createAgents, one in the SDK projection pass.
+    expect(baseline).toEqual({ agentsCalls: 2, arraysCalls: 0 });
+  });
+
+  test('projectAgentRuntimeState derives modelArrays once per pass, independent of the roster', () => {
+    const projectionFor = (rostered: boolean) => {
+      const runtime = runtimeForRoster(
+        rostered
+          ? 'runtime-test-projection-budget-rostered'
+          : 'runtime-test-projection-budget-baseline',
+        // An array-configured model keeps the array-primary pass live.
+        { fixer: { model: ['provider/fix-a', 'provider/fix-b'] } },
+      );
+      const agentDefs = createAgents(runtime);
+      const agentConfigs = getAgentConfigsFromDefinitions(
+        runtime,
+        agentDefs,
+      ) as unknown as Record<string, Record<string, unknown>>;
+      let projection: AgentModelProjection | undefined;
+      const instrumented = instrumentRuntimeDerivations();
+      try {
+        projection = projectAgentRuntimeState({
+          runtime,
+          agentDefs,
+          agentConfigs,
+        }).projection;
+      } finally {
+        instrumented.restore();
+      }
+      return { counts: instrumented.sample(), projection };
+    };
+
+    const baseline = projectionFor(false);
+    const rostered = projectionFor(true);
+    // modelArrays is hoisted once; the per-agent chain-head probe reads the
+    // pass-local copy instead of re-deriving runtimeChains per agent, so the
+    // modelArrays count stays at one regardless of the roster size.
+    expect(baseline.counts.arraysCalls).toBe(1);
+    expect(rostered.counts.arraysCalls).toBe(1);
+    expect(rostered.counts).toEqual(baseline.counts);
+    // The hoisted array-primary pass still projects the chain head.
+    expect(baseline.projection?.agentModels.fixer).toBe('provider/fix-a');
+    expect(rostered.projection?.agentModels.fixer).toBe('provider/fix-a');
+  });
+
+  test('SDK projection MCP lists equal fresh per-agent derivations (default and configured paths)', () => {
+    const runtime = runtimeFor({
+      agents: {
+        'custom-analyst': {
+          model: 'provider/analyst',
+          mcps: ['analyst-mcp'],
+        },
+      },
+    });
+    const agentDefs = createAgents(runtime);
+    const configs = getAgentConfigsFromDefinitions(
+      runtime,
+      agentDefs,
+    ) as unknown as Record<string, { mcps?: string[] }>;
+    for (const definition of agentDefs) {
+      expect(configs[definition.name].mcps).toEqual(
+        getAgentMcpList(definition.name, runtime),
+      );
+    }
+    // The hoisted record keeps the per-agent default table fallback.
+    expect(configs.oracle.mcps).toEqual([]);
   });
 });
