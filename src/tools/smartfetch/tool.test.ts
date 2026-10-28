@@ -170,6 +170,54 @@ describe('smartfetch/tool', () => {
     );
   });
 
+  test('R1-01: isolates HTTP-fallback llms cache entries from HTTPS-only probes', async () => {
+    const requests: string[] = [];
+    globalThis.fetch = mock(async (input: string | URL | Request) => {
+      const url = String(input);
+      requests.push(url);
+      if (url === 'http://docs.example.com/llms-full.txt') {
+        return new Response('# HTTP legacy index', {
+          headers: { 'content-type': 'text/plain' },
+        });
+      }
+      if (url === 'https://docs.example.com/api') {
+        return new Response('# HTTPS current API', {
+          headers: { 'content-type': 'text/plain' },
+        });
+      }
+      if (
+        url === 'https://docs.example.com/llms-full.txt' ||
+        url === 'https://docs.example.com/llms.txt'
+      ) {
+        return new Response('Not found', { status: 404 });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    }) as typeof fetch;
+    const webfetch = createWebfetchTool({ client: {} } as any);
+    const ctx = createExecutionContext();
+
+    expect(
+      await webfetch.execute({ url: 'http://docs.example.com/guide' }, ctx),
+    ).toContain('# HTTP legacy index');
+    const https = await webfetch.execute(
+      { url: 'https://docs.example.com/api' },
+      ctx,
+    );
+    expect(https).toContain('# HTTPS current API');
+    expect(https).not.toContain('# HTTP legacy index');
+    expect(
+      await webfetch.execute({ url: 'http://docs.example.com/reference' }, ctx),
+    ).toContain('# HTTP legacy index');
+    expect(requests).toEqual([
+      'https://docs.example.com/llms-full.txt',
+      'https://docs.example.com/llms.txt',
+      'http://docs.example.com/llms-full.txt',
+      'https://docs.example.com/llms-full.txt',
+      'https://docs.example.com/llms.txt',
+      'https://docs.example.com/api',
+    ]);
+  });
+
   test('SF-03: caches empty text and zero-length binary responses', async () => {
     const fetchMock = mock(async (input: string | URL | Request) =>
       String(input).endsWith('.pdf')

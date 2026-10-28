@@ -126,7 +126,9 @@ export function createWebfetchTool(
         save_binary: args.save_binary,
       };
       const cacheKey = buildCacheKey(args.url, cacheOptions);
-      const llmsCacheKey = buildCacheKey(`${url.origin}/llms-full.txt`, {
+      // The requested origin distinguishes HTTPS-only and HTTP-fallback probes.
+      const llmsOrigin = new URL(args.url).origin;
+      const llmsCacheKey = buildCacheKey(`${llmsOrigin}/llms-full.txt`, {
         ...cacheOptions,
         format: undefined,
       });
