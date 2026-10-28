@@ -27,7 +27,7 @@ import type { PluginInput } from '@opencode-ai/plugin';
 import { log } from './logger';
 import { withTimeout } from './session';
 
-type OpencodeClient = PluginInput['client'];
+export type OpencodeClient = PluginInput['client'];
 
 /**
  * Agent used when the target session's own agent cannot be determined.

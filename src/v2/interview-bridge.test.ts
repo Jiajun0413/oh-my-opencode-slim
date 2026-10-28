@@ -294,6 +294,29 @@ describe('v2 interview bridge', () => {
     bridge.dispose();
   });
 
+  test('continue preserves the session live agent instead of forcing orchestrator', async () => {
+    const calls: Array<{ method: string; input: Record<string, unknown> }> = [];
+    const track =
+      (method: string) =>
+      async (input: Record<string, unknown>): Promise<unknown> => {
+        calls.push({ method, input });
+        return {};
+      };
+    const bridge = createV2InterviewBridge({
+      session: {
+        get: async () => ({ agent: 'coworker' }),
+        prompt: track('prompt'),
+        switchAgent: track('switchAgent'),
+      },
+    } as never);
+
+    await bridge.runtime.continue('ses_c', 'go on');
+    expect(calls).toContainEqual({
+      method: 'switchAgent',
+      input: { sessionID: 'ses_c', agent: 'coworker' },
+    });
+  });
+
   test('runtime methods probe the v2 session domain with flat inputs', async () => {
     const calls: Array<{ method: string; input: Record<string, unknown> }> = [];
     const track =

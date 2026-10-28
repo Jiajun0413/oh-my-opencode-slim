@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import type { PluginConfig } from '../config';
 import {
   AgentOverrideConfigSchema,
@@ -1589,6 +1589,27 @@ describe('createAgents', () => {
     const configs = getAgentConfigsFromDefinitions(runtime, agents);
     expect(configs.coworker.mode).toBe('primary');
     expect(configs.reviewer.mode).toBe('subagent');
+  });
+
+  test('primary warns only when set on a non-custom agent name', () => {
+    const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
+    createAgents(
+      runtimeFor({
+        disabled_agents: ['coworker'],
+        agents: {
+          // Disabled custom: valid flag, must not warn.
+          coworker: { primary: true, model: 'test/coworker-model' },
+          reviewer: { primary: true, model: 'test/reviewer-model' },
+          fixer: { primary: true, model: 'test/fixer-model' },
+        },
+      }),
+    );
+    const primaryWarns = warnSpy.mock.calls.filter((call) =>
+      String(call[0]).includes('.primary is ignored'),
+    );
+    expect(primaryWarns).toHaveLength(1);
+    expect(String(primaryWarns[0]?.[0])).toContain('agents.fixer.primary');
+    warnSpy.mockRestore();
   });
 
   test('creates exactly 5 agents by default (observer and council disabled)', () => {

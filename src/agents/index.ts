@@ -931,23 +931,22 @@ export function createAgents(
     });
 
   // 1b. Discover unknown keys in config.agents as custom subagents.
-  const customAgentNames = runtime.customAgentNames
+  // Declared names keep disabled entries: `primary` validation must not
+  // punish a valid flag on a temporarily disabled agent.
+  const declaredCustomAgentNames = runtime.customAgentNames
     .map(normalizeCustomAgentName)
-    .filter((name) => name.length > 0)
-    .filter((name) => {
-      if (!isSafeCustomAgentName(name)) {
-        throw new Error(`Unsafe custom agent name '${name}'`);
-      }
-      if (disabled.has(name)) {
-        return false;
-      }
-      return true;
-    });
+    .filter((name) => name.length > 0);
+  const customAgentNames = declaredCustomAgentNames.filter((name) => {
+    if (!isSafeCustomAgentName(name)) {
+      throw new Error(`Unsafe custom agent name '${name}'`);
+    }
+    return !disabled.has(name);
+  });
 
   for (const [name, override] of Object.entries(mergedAgents)) {
     if (
       override?.primary !== undefined &&
-      !customAgentNames.includes(name) &&
+      !declaredCustomAgentNames.includes(name) &&
       (name !== 'orchestrator' || override.primary === false)
     ) {
       console.warn(
