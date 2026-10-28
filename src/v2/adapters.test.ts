@@ -54,6 +54,62 @@ describe('parseModelRef', () => {
 });
 
 describe('adaptTool agent context', () => {
+  test('SF-02: passes the native cancellation signal to the v1 tool', async () => {
+    const controller = new AbortController();
+    let abort: AbortSignal | undefined;
+    const tool = adaptTool(
+      'webfetch',
+      {
+        execute: async (_args, context) => {
+          abort = (context as { abort: AbortSignal }).abort;
+          return 'body';
+        },
+      },
+      '/project',
+      {},
+    );
+
+    await tool.execute({}, { signal: controller.signal });
+    expect(abort).toBe(controller.signal);
+    controller.abort(new Error('cancelled by host'));
+    expect(abort?.aborted).toBe(true);
+    expect(abort?.reason).toBe(controller.signal.reason);
+  });
+
+  test('SF-08: forwards v1 metadata through native progress without changing the body', async () => {
+    const updates: unknown[] = [];
+    const metadata = {
+      url: 'https://example.com/final',
+      contentType: 'text/html',
+      truncated: true,
+    };
+    const tool = adaptTool(
+      'webfetch',
+      {
+        execute: async (_args, context) => {
+          (context as { metadata: (update: unknown) => void }).metadata({
+            title: 'Fetched page',
+            metadata,
+          });
+          return 'body';
+        },
+      },
+      '/project',
+      {},
+    );
+
+    const result = await tool.execute(
+      {},
+      {
+        progress: async (update: unknown) => {
+          updates.push(update);
+        },
+      },
+    );
+    expect(updates).toEqual([{ ...metadata, title: 'Fetched page' }]);
+    expect(result).toEqual({ content: 'body' });
+  });
+
   test('does not invent orchestrator identity for marketplace tools', async () => {
     let capturedAgent: string | undefined = 'not-called';
     const marketplaceTool = adaptTool(

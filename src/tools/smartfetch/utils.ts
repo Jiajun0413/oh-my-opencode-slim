@@ -107,7 +107,6 @@ function extractStructuredText(root: Element | null) {
   const isElement = (node: Node) => node.nodeType === node.ELEMENT_NODE;
   const pushText = (value: string) => {
     const normalized = value.replace(/\s+/g, ' ');
-    if (!normalized.trim()) return;
     const previous = chunks[chunks.length - 1];
     if (!previous || /\n$| $/.test(previous)) {
       chunks.push(normalized.trimStart());

@@ -2,13 +2,6 @@ export type SmartfetchOptions = {
   binaryDir?: string;
 };
 
-export type SecondaryModel = {
-  providerID: string;
-  modelID: string;
-  /** Optional model variant passed at the body level. */
-  variant?: string;
-};
-
 export type RedirectStep = {
   from: string;
   to: string;

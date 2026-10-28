@@ -16,8 +16,7 @@ const cacheOptions = { format: 'markdown' as const, save_binary: false };
 async function expireCached(key: string) {
   const entry = CACHE.get(key);
   if (!entry) throw new Error(`Missing cache entry: ${key}`);
-  CACHE.set(key, entry, { ttl: 1 });
-  await Bun.sleep(12);
+  CACHE.set(key, entry, { start: performance.now() - CACHE.ttl - 1_000 });
 }
 
 describe('smartfetch/tool', () => {
@@ -120,7 +119,7 @@ describe('smartfetch/tool', () => {
     );
   });
 
-  test('one llms.txt probe serves markdown and text; html fetches the raw page', async () => {
+  test('SF-07: one llms.txt probe serves different pages and formats with per-call permission', async () => {
     const requests: Array<[string, string | null]> = [];
     globalThis.fetch = mock(
       async (input: string | URL | Request, init?: RequestInit) => {
@@ -143,17 +142,18 @@ describe('smartfetch/tool', () => {
       },
     ) as typeof fetch;
     const webfetch = createWebfetchTool({ client: {} } as any);
+    const ctx = createExecutionContext();
     const markdown = await webfetch.execute(
       { url: 'https://docs.example.com/page' },
-      createExecutionContext(),
+      ctx,
     );
     const text = await webfetch.execute(
-      { url: 'https://docs.example.com/page', format: 'text' },
-      createExecutionContext(),
+      { url: 'https://docs.example.com/api', format: 'text' },
+      ctx,
     );
     const html = await webfetch.execute(
       { url: 'https://docs.example.com/page', format: 'html' },
-      createExecutionContext(),
+      ctx,
     );
     expect(markdown).toContain('# Shared llms docs');
     expect(text).toContain('# Shared llms docs');
@@ -164,6 +164,94 @@ describe('smartfetch/tool', () => {
       'https://docs.example.com/page',
     ]);
     expect(CACHE.size).toBe(2);
+    expect(ctx.ask).toHaveBeenCalledTimes(3);
+    expect(ctx.ask.mock.calls[1][0].patterns).toContain(
+      'https://docs.example.com/api',
+    );
+  });
+
+  test('SF-03: caches empty text and zero-length binary responses', async () => {
+    const fetchMock = mock(async (input: string | URL | Request) =>
+      String(input).endsWith('.pdf')
+        ? new Response(new Uint8Array(), {
+            headers: { 'content-type': 'application/pdf' },
+          })
+        : new Response(null, { status: 204 }),
+    );
+    globalThis.fetch = fetchMock as typeof fetch;
+    const webfetch = createWebfetchTool({ client: {} } as any);
+    const ctx = createExecutionContext();
+    const textArgs = { url: 'https://example.com/empty' };
+    const binaryArgs = { url: 'https://example.com/empty.pdf' };
+
+    expect(await webfetch.execute(textArgs, ctx)).toBe('');
+    expect(await webfetch.execute(textArgs, ctx)).toBe('');
+    expect(await webfetch.execute(binaryArgs, ctx)).toContain(
+      'PDF content fetched (0 bytes).',
+    );
+    expect(await webfetch.execute(binaryArgs, ctx)).toContain(
+      'PDF content fetched (0 bytes).',
+    );
+    expect(CACHE.size).toBe(2);
+    expect(CACHE.calculatedSize).toBe(2);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  test('SF-04: omits a sniffed binary over the byte limit without Content-Length', async () => {
+    const image = new Uint8Array(3 * 1024 * 1024);
+    image.set([137, 80, 78, 71, 13, 10, 26, 10]);
+    globalThis.fetch = mock(
+      async () =>
+        new Response(image, {
+          headers: { 'content-type': 'application/octet-stream' },
+        }),
+    ) as typeof fetch;
+    const url = 'https://example.com/unknown';
+    const result = await createWebfetchTool({ client: {} } as any).execute(
+      { url },
+      createExecutionContext(),
+    );
+
+    expect(result).toContain(
+      'IMAGE content omitted because it exceeds the download limit',
+    );
+    expect(CACHE.get(buildCacheKey(url, cacheOptions))).toMatchObject({
+      binary: true,
+      downloadLimitBytes: 2 * 1024 * 1024,
+      data: undefined,
+    });
+  });
+
+  test('SF-06: honors the HTML meta charset after MIME promotion unless HTTP declares one', async () => {
+    const html = Buffer.concat([
+      Buffer.from('<html><head><meta charset="windows-1251"></head><body><p>'),
+      Buffer.from([0xcf, 0xf0, 0xe8, 0xe2, 0xe5, 0xf2]),
+      Buffer.from('</p></body></html>'),
+    ]);
+    globalThis.fetch = mock(
+      async (input: string | URL | Request) =>
+        new Response(html, {
+          headers: {
+            'content-type': String(input).endsWith('/explicit')
+              ? 'text/plain; charset=windows-1252'
+              : 'text/plain',
+          },
+        }),
+    ) as typeof fetch;
+    const webfetch = createWebfetchTool({ client: {} } as any);
+
+    expect(
+      await webfetch.execute(
+        { url: 'https://example.com/promoted', format: 'text' },
+        createExecutionContext(),
+      ),
+    ).toContain('Привет');
+    expect(
+      await webfetch.execute(
+        { url: 'https://example.com/explicit', format: 'text' },
+        createExecutionContext(),
+      ),
+    ).toContain('Ïðèâåò');
   });
 
   test('no-llms docs pages keep per-format Accept and representations', async () => {
@@ -448,7 +536,7 @@ describe('smartfetch/tool', () => {
     const webfetch = createWebfetchTool({ client: {} } as any);
     const args = { url: 'https://docs.example.com/page' };
     await webfetch.execute(args, createExecutionContext());
-    const key = buildCacheKey(args.url, {
+    const key = buildCacheKey('https://docs.example.com/llms-full.txt', {
       ...cacheOptions,
       format: undefined,
     });
@@ -488,7 +576,7 @@ describe('smartfetch/tool', () => {
     expect(await webfetch.execute(args, createExecutionContext())).toContain(
       '# Old llms docs',
     );
-    const key = buildCacheKey(args.url, {
+    const key = buildCacheKey('https://docs.example.com/llms-full.txt', {
       ...cacheOptions,
       format: undefined,
     });

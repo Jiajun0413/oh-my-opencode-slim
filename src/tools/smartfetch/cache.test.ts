@@ -45,7 +45,7 @@ describe('smartfetch/cache', () => {
     expect(page1).not.toBe(page2);
   });
 
-  test('a stale cache lookup retains the entry but reports it as not fresh', async () => {
+  test('a stale cache lookup retains the entry but reports it as not fresh', () => {
     CACHE.set(
       'expired-entry',
       makeCached({
@@ -53,10 +53,9 @@ describe('smartfetch/cache', () => {
         etag: '"abc"',
         lastModified: 'Tue, 01 Jan 2030 00:00:00 GMT',
       }),
-      { ttl: 1 },
+      { start: performance.now() - CACHE.ttl - 1_000 },
     );
     try {
-      await Bun.sleep(12);
       const { entry, fresh } = lookup('expired-entry');
       expect(fresh).toBe(false);
       expect(entry?.etag).toBe('"abc"');

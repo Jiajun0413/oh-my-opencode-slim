@@ -8,7 +8,7 @@ type CacheOptions = {
 };
 
 export function calculateCacheSize(value: FetchResult): number {
-  if ('binary' in value) return value.data?.byteLength ?? 1024;
+  if ('binary' in value) return Math.max(1, value.data?.byteLength ?? 1024);
   // llms.txt and plain-text pages point all four fields at the same
   // content, so charge bytes once per distinct string value.
   const refs = [value.rawContent, value.html, value.markdown, value.text];
@@ -19,7 +19,7 @@ export function calculateCacheSize(value: FetchResult): number {
     seen.add(ref);
     total += Buffer.byteLength(ref);
   }
-  return total;
+  return Math.max(1, total);
 }
 
 export const CACHE = new LRUCache<string, FetchResult>({
