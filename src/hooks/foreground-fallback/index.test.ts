@@ -8773,10 +8773,7 @@ describe('ForegroundFallbackManager disableChain', () => {
 // ---------------------------------------------------------------------------
 
 describe('ForegroundFallbackManager dispose', () => {
-  afterEach(() => jest.useRealTimers());
-
   test('dispose cancels pending initial-delay timers and empties the map', async () => {
-    jest.useFakeTimers();
     // `opencode reload` destroys the plugin instance while an initial
     // fallback delay may still be scheduled. The stale timer must not
     // fire through the old context after dispose.
@@ -8806,7 +8803,7 @@ describe('ForegroundFallbackManager dispose', () => {
     mgr.dispose();
 
     expect((mgr as any).pendingInitialDelay.size).toBe(0);
-    jest.advanceTimersByTime(100);
+    await new Promise((resolve) => setTimeout(resolve, 100));
     expect(mocks.promptAsync).not.toHaveBeenCalled();
   });
 

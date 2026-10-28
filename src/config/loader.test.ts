@@ -333,9 +333,9 @@ describe('loadPluginConfig', () => {
     expect(loadPluginConfig(relative)).toEqual(loadPluginConfig(repo));
   });
 
-  test('enumerates absent v2 ancestor candidates through the filesystem root', () => {
+  test('enumerates absent ancestor candidates through the filesystem root', () => {
     const nested = path.join(tempDir, 'workspace', 'repo', 'nested');
-    const { project } = getPluginConfigCandidates(nested, 'v2');
+    const { project } = getPluginConfigCandidates(nested);
     const directories: string[] = [];
     let current = path.resolve(nested);
     for (;;) {
