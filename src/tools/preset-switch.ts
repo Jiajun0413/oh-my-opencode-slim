@@ -1,3 +1,4 @@
+import * as fs from 'node:fs';
 import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import type {
@@ -6,6 +7,7 @@ import type {
   Preset,
   PresetDefinition,
   PresetInput,
+  RawPluginConfig,
 } from '../config';
 import { normalizePreset, PresetResolutionError } from '../config';
 import { AGENT_ALIASES } from '../config/constants';
@@ -13,16 +15,14 @@ import {
   mutateJsonFile,
   removeTopLevelJsonProperty,
 } from '../config/json-file';
+import { stripJsonComments } from '../config/jsonc';
 import {
   findPluginConfigPaths,
   isProjectConfigDisabled,
+  loadRawPluginConfigFromPath,
+  mergePluginConfigs,
 } from '../config/loader';
-import { resolvePresetDefinition } from '../config/presets';
-import {
-  cloneConfigValue,
-  loadPresetCatalog,
-  type PresetCatalog,
-} from '../config/snapshot';
+import { mergePresetMaps, resolvePresetDefinition } from '../config/presets';
 import {
   isPrototypeSensitiveName,
   ownPresetValue,
@@ -161,13 +161,10 @@ export function switchPresetOnDisk(
       summary: [],
     };
   }
-  // One catalog shared by every read below (and by the project-config check):
-  // one stat pass per call instead of N independent full loads.
-  const catalog = loadPresetCatalog(directory, options.hostFlavor);
   const configuredPresets =
     scope === 'global'
-      ? readUserPresets(directory, catalog)
-      : getAllConfiguredPresets(directory, options.hostFlavor, catalog);
+      ? readUserPresets(directory)
+      : getAllConfiguredPresets(directory, options.hostFlavor);
   const presets: PresetMap =
     scope === 'global'
       ? { ...configuredPresets }
@@ -218,11 +215,7 @@ export function switchPresetOnDisk(
     };
   }
 
-  const projectConfig = readProjectConfig(
-    directory,
-    options.hostFlavor,
-    catalog,
-  );
+  const projectConfig = readProjectConfig(directory, options.hostFlavor);
   const projectPreset =
     typeof projectConfig?.preset === 'string'
       ? projectConfig.preset.trim()
@@ -276,12 +269,9 @@ export function switchPresetOnDisk(
 export function getPresetSelectionState(
   directory: string,
   hostFlavor?: string,
-  catalog?: PresetCatalog,
 ): PresetSelectionState {
-  // One catalog for every lookup below (user layer, project layers, catalogs).
-  const active = catalog ?? loadPresetCatalog(directory, hostFlavor);
-  const userConfig = readUserConfig(directory, active);
-  const projectConfig = readProjectConfig(directory, hostFlavor, active);
+  const userConfig = readUserConfig(directory);
+  const projectConfig = readProjectConfig(directory, hostFlavor);
   const globalPreset =
     typeof userConfig?.preset === 'string' &&
     interpolateConfigEnvironment(userConfig.preset).trim()
@@ -298,10 +288,10 @@ export function getPresetSelectionState(
     project: projectPreset,
     global: globalPreset,
     projectAvailable: Object.keys(
-      getAllConfiguredPresets(directory, hostFlavor, active),
+      getAllConfiguredPresets(directory, hostFlavor),
     ).sort((a, b) => a.localeCompare(b)),
-    globalAvailable: Object.keys(readUserPresets(directory, active)).sort(
-      (a, b) => a.localeCompare(b),
+    globalAvailable: Object.keys(readUserPresets(directory)).sort((a, b) =>
+      a.localeCompare(b),
     ),
   };
 }
@@ -609,16 +599,22 @@ function describeError(error: unknown): string {
 }
 
 /**
- * Read the user-level config file as a parsed object (raw JSON, no schema
- * validation, no environment interpolation — same policy as the catalog).
- * Returns null if the file is absent or unreadable. Accepts an optional
- * shared catalog so UI row loops reuse one read instead of re-reading.
+ * Read the user-level config file as a parsed object. Returns null if the
+ * file is absent or unreadable.
  */
 export function readUserConfig(
   directory: string,
-  catalog?: PresetCatalog,
 ): Record<string, unknown> | null {
-  return cloneConfigValue((catalog ?? loadPresetCatalog(directory)).userConfig);
+  try {
+    const { userConfigPath } = findPluginConfigPaths(directory);
+    if (!userConfigPath) return null;
+    // Strip a UTF-8 BOM (RFC 8259 permits one); JSON.parse would otherwise
+    // fail with "Unrecognized token" and the preset name would be lost.
+    const raw = fs.readFileSync(userConfigPath, 'utf-8').replace(/^\uFEFF/, '');
+    return JSON.parse(stripJsonComments(raw)) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -626,25 +622,35 @@ export function readUserConfig(
  */
 export function readUserPresets(
   directory: string,
-  catalog?: PresetCatalog,
 ): Record<string, PresetInput> {
-  return cloneConfigValue(
-    (catalog ?? loadPresetCatalog(directory)).userPresets,
-  );
+  const config = readUserConfig(directory);
+  if (
+    !config ||
+    typeof config.presets !== 'object' ||
+    config.presets === null ||
+    Array.isArray(config.presets)
+  ) {
+    return {};
+  }
+  return config.presets as Record<string, PresetInput>;
 }
 
 /**
- * Read and merge ancestor project config files (validated and interpolated
- * through the shared catalog). Returns null if absent.
+ * Read and merge ancestor project config files. Returns null if absent.
  */
 export function readProjectConfig(
   directory: string,
   hostFlavor?: string,
-  catalog?: PresetCatalog,
 ): Record<string, unknown> | null {
-  return cloneConfigValue(
-    (catalog ?? loadPresetCatalog(directory, hostFlavor)).projectConfig,
-  );
+  const { projectConfigPaths } = findPluginConfigPaths(directory, hostFlavor);
+  let config: RawPluginConfig | undefined;
+  for (const configPath of projectConfigPaths) {
+    const layer = loadRawPluginConfigFromPath(configPath, { silent: true });
+    if (layer) {
+      config = mergePluginConfigs(config ?? {}, layer);
+    }
+  }
+  return config ?? null;
 }
 
 /**
@@ -655,11 +661,23 @@ export function readProjectConfig(
 export function getAllConfiguredPresets(
   directory: string,
   hostFlavor?: string,
-  catalog?: PresetCatalog,
 ): Record<string, PresetInput> {
-  return cloneConfigValue(
-    (catalog ?? loadPresetCatalog(directory, hostFlavor)).presets,
-  );
+  const userPresets = readUserPresets(directory);
+  const projectConfig = readProjectConfig(directory, hostFlavor);
+  const projectPresets =
+    projectConfig &&
+    typeof projectConfig.presets === 'object' &&
+    projectConfig.presets !== null &&
+    !Array.isArray(projectConfig.presets)
+      ? (projectConfig.presets as Record<string, PresetInput>)
+      : {};
+  const merged = mergePresetMaps(userPresets, projectPresets) ?? {};
+  const safe: Record<string, PresetInput> = {};
+  for (const name of Object.keys(merged)) {
+    const value = ownPresetValue(merged, name);
+    if (value !== undefined) setOwn(safe, name, value);
+  }
+  return safe;
 }
 
 export type PresetSource = 'project' | 'user' | 'none';
@@ -673,13 +691,19 @@ export function getPresetSource(
   directory: string,
   name: string,
   hostFlavor?: string,
-  catalog?: PresetCatalog,
 ): PresetSource {
-  const active = catalog ?? loadPresetCatalog(directory, hostFlavor);
-  if (Object.hasOwn(active.projectPresets, name)) {
+  const projectConfig = readProjectConfig(directory, hostFlavor);
+  if (
+    projectConfig &&
+    typeof projectConfig.presets === 'object' &&
+    projectConfig.presets !== null &&
+    !Array.isArray(projectConfig.presets) &&
+    Object.hasOwn(projectConfig.presets, name)
+  ) {
     return 'project';
   }
-  if (Object.hasOwn(active.userPresets, name)) {
+  const userPresets = readUserPresets(directory);
+  if (Object.hasOwn(userPresets, name)) {
     return 'user';
   }
   return 'none';
@@ -693,17 +717,23 @@ export function getEditablePreset(
   directory: string,
   name: string,
   hostFlavor?: string,
-  catalog?: PresetCatalog,
 ): PresetDefinition {
-  const active = catalog ?? loadPresetCatalog(directory, hostFlavor);
-  // User-first editable policy: the user config wins over the project layer.
-  const userRaw = ownPresetValue(active.userPresets, name);
-  if (userRaw !== undefined) {
-    return cloneConfigValue(normalizePreset(userRaw));
+  const userPresets = readUserPresets(directory);
+  const raw = ownPresetValue(userPresets, name);
+  if (raw !== undefined) {
+    return normalizePreset(raw);
   }
-  const projectRaw = ownPresetValue(active.projectPresets, name);
+  const projectConfig = readProjectConfig(directory, hostFlavor);
+  const projectPresets =
+    projectConfig &&
+    typeof projectConfig.presets === 'object' &&
+    projectConfig.presets !== null &&
+    !Array.isArray(projectConfig.presets)
+      ? (projectConfig.presets as Record<string, PresetInput>)
+      : {};
+  const projectRaw = ownPresetValue(projectPresets, name);
   if (projectRaw !== undefined) {
-    return cloneConfigValue(normalizePreset(projectRaw));
+    return normalizePreset(projectRaw);
   }
   return { agents: {} };
 }

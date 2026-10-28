@@ -37,7 +37,7 @@ import type {
 } from './config';
 import { normalizePreset, resolvePreset } from './config';
 import { ALL_AGENT_NAMES } from './config/constants';
-import { loadPresetCatalog, readPluginConfigSnapshot } from './config/snapshot';
+import { loadPluginConfig } from './config/loader';
 import {
   deletePreset,
   findPresetDependents,
@@ -89,13 +89,8 @@ export function openPresetManager(
 }
 
 function showPresetList(state: ManagerState): void {
-  const config = readPluginConfigSnapshot(state.directory).config;
-  const catalog = loadPresetCatalog(state.directory);
-  const allPresets = getAllConfiguredPresets(
-    state.directory,
-    undefined,
-    catalog,
-  );
+  const config = loadPluginConfig(state.directory, { silent: true });
+  const allPresets = getAllConfiguredPresets(state.directory);
   const names = Array.from(
     new Set([...Object.keys(allPresets), ...Object.keys(config.presets ?? {})]),
   );
@@ -108,8 +103,7 @@ function showPresetList(state: ManagerState): void {
   }
 
   const options: TuiDialogSelectOption<string>[] = names.map((name) => {
-    const isProject =
-      getPresetSource(state.directory, name, undefined, catalog) === 'project';
+    const isProject = getPresetSource(state.directory, name) === 'project';
     const tag = isProject ? ' [project - read-only]' : '';
     const title =
       name === activePreset ? `${name} (active)${tag}` : `${name}${tag}`;
@@ -202,7 +196,7 @@ function applyPresetWithMessage(
   presetName: string,
   title: string,
 ): void {
-  const config = readPluginConfigSnapshot(state.directory).config;
+  const config = loadPluginConfig(state.directory, { silent: true });
   const result = switchPresetOnDisk(state.directory, presetName, config);
   state.api.ui.dialog.clear();
   state.api.ui.toast({

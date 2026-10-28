@@ -1,4 +1,3 @@
-import { isDeepStrictEqual } from 'node:util';
 import type { Hooks, Plugin, ToolDefinition } from '@opencode-ai/plugin';
 import {
   type AdmissionRuntimeLease,
@@ -27,12 +26,7 @@ import type { RegistryFactoryBridge } from './agents/registry-bridge';
 import { roleHasWriteCapability } from './agents/role-definitions';
 import type { CompanionManager } from './companion/manager';
 import { normalizeCompanionSessionStatus } from './companion/status';
-import {
-  deepMerge,
-  loadAgentPrompt,
-  type loadPluginConfig,
-  type Preset,
-} from './config';
+import { deepMerge, type loadPluginConfig, type Preset } from './config';
 import {
   BUILTIN_OPENCODE_SUBAGENTS_TO_DISABLE,
   DEFAULT_MAX_SESSION_METADATA_ENTRIES,
@@ -2040,16 +2034,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   const marketplaceEnabled = runtime.marketplaceEnabled;
   let marketplaceImplementation: MarketplaceRegistryImplementation | undefined;
   let marketplaceService: MarketplaceService | undefined;
-  let desiredProjection:
-    | {
-        snapshot: PluginConfigSnapshot;
-        host: RegistryHostSnapshot;
-        nativeRules: typeof latestNativePermissionsByAgent;
-        inputs: unknown;
-        agentNames: readonly string[];
-        packages: ResolvedAgentRegistry['marketplacePackages'];
-      }
-    | undefined;
   if (marketplaceEnabled) {
     const { MarketplaceService } = await import('./marketplace/service');
     const implementation = await import('./marketplace/registry-runtime');
@@ -2134,37 +2118,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           freshRuntime,
           ctx.directory,
         );
-        const inputFacts = {
-          runtimePreset,
-          effectiveAgents: freshRuntime.agents(),
-          skills: [...availableSkillNames].sort(),
-          packages: desiredPackageIds.map((id) => {
-            const stored = installedPackages.get(id);
-            return stored
-              ? [id, stored.manifest.version, stored.digest]
-              : [id, null];
-          }),
-          prompts: (desiredProjection?.agentNames ?? []).map((name) =>
-            loadAgentPrompt(name, {
-              preset: freshRuntime.preset,
-              projectDirectory: ctx.directory,
-              hostFlavor,
-            }),
-          ),
-        };
-        // Config/host/verification inputs must all agree. Skill and prompt
-        // facts stay fresh so external edits cannot hide a required reload.
-        if (
-          desiredProjection?.snapshot === snapshot &&
-          desiredProjection.host === latestHostSnapshot &&
-          desiredProjection.nativeRules === latestNativePermissionsByAgent &&
-          isDeepStrictEqual(desiredProjection.inputs, inputFacts)
-        ) {
-          return {
-            packageIds: desiredPackageIds,
-            packages: desiredProjection.packages,
-          };
-        }
         const freshPluginMcps = createBuiltinMcps(freshRuntime.disabledMcps);
         try {
           const freshRegistry = buildResolvedAgentRegistry(freshRuntime, {
@@ -2181,23 +2134,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
               availableSkillNames,
             },
           });
-          desiredProjection = {
-            snapshot,
-            host: latestHostSnapshot,
-            nativeRules: latestNativePermissionsByAgent,
-            inputs: {
-              ...inputFacts,
-              prompts: freshRegistry.agentNames.map((name) =>
-                loadAgentPrompt(name, {
-                  preset: freshRuntime.preset,
-                  projectDirectory: ctx.directory,
-                  hostFlavor,
-                }),
-              ),
-            },
-            agentNames: freshRegistry.agentNames,
-            packages: freshRegistry.marketplacePackages,
-          };
           return {
             packageIds: desiredPackageIds,
             packages: freshRegistry.marketplacePackages,
@@ -2738,8 +2674,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
   const hooks = {
     registryBridge,
-    'v2.readUpdateFacts': () =>
-      autoUpdateChecker?.readUpdateFacts?.() ?? Promise.resolve(null),
     name: 'oh-my-opencode-slim',
     // v2-only extension hook: re-read the plugin config and resolve the
     // inference/runtime profiles for new child sessions + the sidebar.
@@ -4035,10 +3969,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       enabled?: boolean,
     ) => void;
     'v2.releaseSessionChains': (sessionID: string) => void;
-    'v2.readUpdateFacts': () => Promise<{
-      distTags: Record<string, string>;
-      versions: string[];
-    } | null>;
     'v2.registerDelegatedLaunchFromStructured': NonNullable<
       NonNullable<
         typeof taskSessionManagerHook

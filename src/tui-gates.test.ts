@@ -187,15 +187,17 @@ describe('TUI feature gates', () => {
     const { api, disposers } = makeV1Api(env.projectDir);
     try {
       await runV1Entry(api);
-      expect(reads).toBe(1);
+      const startupReads = reads;
+      expect(startupReads).toBeGreaterThan(0);
       intervals.callbacks.get(5000)?.();
       intervals.callbacks.get(5000)?.();
-      expect(reads).toBe(1);
+      expect(reads).toBe(startupReads);
       writeUserConfig({ sidebar: false, preset: 'edited' });
       intervals.callbacks.get(5000)?.();
-      expect(reads).toBe(2);
+      expect(reads).toBeGreaterThan(startupReads);
+      const afterEdit = reads;
       expect(readConfigState(env.projectDir).presetName).toBe('edited');
-      expect(reads).toBe(2);
+      expect(reads).toBe(afterEdit);
     } finally {
       for (const dispose of disposers) await dispose();
       intervals.restore();

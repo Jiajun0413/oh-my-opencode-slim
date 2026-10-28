@@ -28,7 +28,6 @@ import { fileURLToPath } from 'node:url';
 import { log } from '../utils/logger';
 import { findOwnedPackageJson } from '../utils/package-root';
 import { compareNumericVersions, type NumericVersion } from '../utils/version';
-import { updateFactsRpc } from './update-facts-rpc';
 
 /** The package this notice is about; also the npm name on the registry. */
 export const PACKAGE_NAME = 'oh-my-opencode-slim';
@@ -321,102 +320,13 @@ export async function fetchLatestVersion(
   }
 }
 
-/** A defensive object check for the untrusted RPC response boundary. */
-function isObjectRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-/**
- * Validate the facts shape before reading it. The native host normally applies
- * the RPC output schema, but reduced/test hosts can return arbitrary values;
- * malformed facts are unavailable, never a second HTTP request or a throw.
- */
-function latestFromRpcResult(result: unknown): string | undefined {
-  if (!isObjectRecord(result) || result.available !== true) return undefined;
-  const facts = result.facts;
-  if (!isObjectRecord(facts)) return undefined;
-  if (
-    Object.keys(facts).some((key) => key !== 'distTags' && key !== 'versions')
-  )
-    return undefined;
-
-  const distTags = facts.distTags;
-  const versions = facts.versions;
-  if (!isObjectRecord(distTags) || !Array.isArray(versions)) return undefined;
-  if (!versions.every((version) => typeof version === 'string')) {
-    return undefined;
-  }
-  if (
-    !Object.values(distTags).every((version) => typeof version === 'string')
-  ) {
-    return undefined;
-  }
-  const latest = distTags.latest;
-  return typeof latest === 'string' ? latest : undefined;
-}
-
-/**
- * Latest version from the server's shared npm facts (native RPC). Returns
- * `{ supported: false }` when the host has no RPC capability, which is the
- * only case that falls back to the direct registry request; a present RPC
- * that fails is unknown and stays silent, so one host never fetches twice.
- */
-async function fetchLatestVersionFromRpc(
-  context: unknown,
-  options: UpdateNoticeOptions,
-): Promise<{ supported: boolean; latest?: string }> {
-  const ctx = (context ?? {}) as UpdateNoticeContext;
-  const client = ctx.client as
-    | {
-        rpc?: (contract: typeof updateFactsRpc) => {
-          get: (
-            input: Record<string, never>,
-            call: { location: { directory: string }; signal: AbortSignal },
-          ) => Promise<unknown>;
-        };
-      }
-    | undefined;
-  if (typeof client?.rpc !== 'function') return { supported: false };
-
-  const timeoutMs = options.timeoutMs ?? UPDATE_FETCH_TIMEOUT_MS;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timedOut = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(
-      () => reject(new Error(`update facts timed out after ${timeoutMs}ms`)),
-      timeoutMs,
-    );
-  });
-  try {
-    const calls = client.rpc(updateFactsRpc);
-    const directory = ctx.location?.directory ?? process.cwd();
-    const result = await Promise.race([
-      calls.get(
-        {},
-        {
-          location: { ...ctx.location, directory },
-          signal: AbortSignal.timeout(timeoutMs),
-        },
-      ),
-      timedOut,
-    ]);
-    return { supported: true, latest: latestFromRpcResult(result) };
-  } catch {
-    return { supported: true };
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-  }
-}
-
 /** Resolve both sides and decide. Total: every failure yields no `notify`. */
 export async function checkForUpdate(
   context: unknown,
   options: UpdateNoticeOptions = {},
 ): Promise<UpdateCheck> {
   const installed = await resolveInstalledVersion(context, options);
-  const viaRpc = await fetchLatestVersionFromRpc(context, options);
-  const latest = viaRpc.supported
-    ? viaRpc.latest
-    : await fetchLatestVersion(options);
+  const latest = await fetchLatestVersion(options);
   return { installed, latest, notify: decideUpdate(installed, latest) };
 }
 

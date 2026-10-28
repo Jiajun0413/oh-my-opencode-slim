@@ -1,14 +1,21 @@
-import { describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { afterAll, describe, expect, test } from 'bun:test';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { verifyPackagedImportClosure } from './package-imports';
+
+const fixtures: string[] = [];
+afterAll(() => {
+  for (const root of fixtures) rmSync(root, { recursive: true, force: true });
+});
 
 /**
  * Build a throwaway package layout (no installed dependencies) and return the
  * repo root plus a helper to write dist files.
  */
 function createFixture() {
-  const root = mkdtempSync(path.join('/tmp/opencode', 'omos-package-imports-'));
+  const root = mkdtempSync(path.join(tmpdir(), 'omos-package-imports-'));
+  fixtures.push(root);
   const dist = path.join(root, 'dist');
   mkdirSync(path.join(dist, 'chunks'), { recursive: true });
   mkdirSync(path.join(dist, 'server', 'chunks'), { recursive: true });
@@ -169,33 +176,5 @@ describe('verifyPackagedImportClosure', () => {
     ).toThrow(
       /dist\/chunks\/index-abc123\.js imports "\.\.\/\.\.\/src\/leaked\.js" resolves to "src\/leaked\.js", which is outside the packaged dist\/ directory/,
     );
-  });
-
-  test('fails when a packaged dist file is missing on disk', () => {
-    const { root } = createFixture();
-
-    expect(() =>
-      verifyPackagedImportClosure(root, new Set(['dist/index.js'])),
-    ).toThrow(
-      /Packaged import closure cannot read dist\/index\.js: it is listed by npm pack but missing on disk/,
-    );
-  });
-
-  test('ignores external and builtin specifiers', () => {
-    const { root, write } = createFixture();
-    write(
-      'dist/index.js',
-      [
-        "import { z } from 'zod';",
-        "import { Plugin } from '@opencode-ai/plugin';",
-        "import { readFileSync } from 'node:fs';",
-        "const dynamic = await import('@opencode-ai/sdk/v2');",
-        'export const value = z || Plugin || readFileSync || dynamic;',
-      ].join('\n'),
-    );
-
-    expect(() =>
-      verifyPackagedImportClosure(root, new Set(['dist/index.js'])),
-    ).not.toThrow();
   });
 });

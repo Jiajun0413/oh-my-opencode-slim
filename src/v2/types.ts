@@ -1,6 +1,5 @@
 import type { z } from 'zod';
 import type { sessionPresetRpc } from './preset-rpc';
-import type { updateFactsRpc } from './update-facts-rpc';
 
 /**
  * v2 plugin context surface.
@@ -224,23 +223,12 @@ export interface V2EventSubscribeOptions {
   readonly types?: ReadonlyArray<string>;
 }
 
-export type V2UpdateFactsRpcHandlers = {
-  get: (
-    input: z.output<(typeof updateFactsRpc.methods)['get']['input']>,
-    context: { readonly signal: AbortSignal },
-  ) => Promise<z.input<(typeof updateFactsRpc.methods)['get']['output']>>;
-};
-
 export interface V2Context {
   readonly rpc?: {
-    register(
+    readonly register: (
       definition: typeof sessionPresetRpc,
       handlers: V2SessionPresetRpcHandlers,
-    ): Promise<V2Registration>;
-    register(
-      definition: typeof updateFactsRpc,
-      handlers: V2UpdateFactsRpcHandlers,
-    ): Promise<V2Registration>;
+    ) => Promise<V2Registration>;
   };
   readonly app: { readonly name: string; readonly version: string };
   readonly options: Record<string, unknown>;

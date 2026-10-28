@@ -133,7 +133,6 @@ import type {
   V2ToolAfterEvent,
   V2ToolBeforeEvent,
 } from './types';
-import { updateFactsRpc } from './update-facts-rpc';
 
 /** v1 `command.execute.before` hook shape (see src/index.ts wiring). */
 export type V1CommandBeforeHook = (
@@ -2676,23 +2675,6 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
           read: ({ sessionID }) => sessionPresets.readState(sessionID),
           apply: ({ sessionID, presetName }, { signal }) =>
             sessionPresets.apply(sessionID, presetName, signal),
-        });
-        disposers.push(() => registration.dispose());
-      }
-      if (updateCheckerEnabled && ctx.rpc?.register) {
-        const registration = await ctx.rpc.register(updateFactsRpc, {
-          get: async () => {
-            const readFacts = v1Hooks['v2.readUpdateFacts'] as
-              | (() => Promise<{
-                  distTags: Record<string, string>;
-                  versions: string[];
-                } | null>)
-              | undefined;
-            const facts = await readFacts?.();
-            return facts
-              ? { available: true as const, facts }
-              : { available: false as const };
-          },
         });
         disposers.push(() => registration.dispose());
       }

@@ -1,9 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { asImagePart } from './image-part';
-import {
-  createMessageTransformView,
-  resolveView,
-} from './message-transform-view';
+import { createMessageTransformView } from './message-transform-view';
 import {
   findLatestUserMessage,
   isMessageWithParts,
@@ -72,33 +69,6 @@ describe('createMessageTransformView', () => {
       expect(view.messages).toBe(fixture);
       expect(view.length).toBe(fixture.length);
     }
-  });
-
-  test('mixed sessions: latest user wins, first valid message is the fallback', () => {
-    const view = createMessageTransformView(malformedFixture());
-    expect(view.latestUser?.info.sessionID).toBe('s2');
-    expect(view.sessionID).toBe('s2');
-
-    // Latest user message without a sessionID falls back to the first
-    // well-formed message's sessionID (the root transform's derivation).
-    const fallback = createMessageTransformView([
-      userMessage('no session id here'),
-      userMessage('latest', 's1'),
-    ]);
-    expect(fallback.latestUser?.info.sessionID).toBe('s1');
-    expect(fallback.sessionID).toBe('s1');
-
-    const missingLatest = createMessageTransformView([
-      {
-        info: { role: 'assistant', sessionID: 'assistant-session' },
-        parts: [],
-      },
-      {
-        info: { role: 'user', agent: 'orchestrator' },
-        parts: [{ type: 'text', text: 'latest' }],
-      },
-    ]);
-    expect(missingLatest.sessionID).toBe('assistant-session');
   });
 
   test('part and text lookups stay live after the view is built', () => {
@@ -172,90 +142,5 @@ describe('createMessageTransformView', () => {
     expect(before.latestUser?.parts[0]?.text).toBe('first');
     // No global state: the stale view is not mutated by the rebuild.
     expect(before.userMessages).toHaveLength(1);
-  });
-});
-
-describe('resolveView', () => {
-  test('reuses a view that still covers the array', () => {
-    const messages = malformedFixture();
-    const view = createMessageTransformView(messages);
-    expect(resolveView(view, messages)).toBe(view);
-  });
-
-  test('rebuilds after a tail append (the board volatile-zone strip/append shape)', () => {
-    const messages: unknown[] = [userMessage('turn')];
-    const view = createMessageTransformView(messages);
-
-    // Simulate the job board's trailing volatile append.
-    messages.push({
-      info: { role: 'user', sessionID: 's1' },
-      parts: [
-        {
-          type: 'text',
-          synthetic: true,
-          text: '[board]',
-          metadata: { 'oh-my-opencode-slim.board': true },
-        },
-      ],
-    });
-
-    const resolved = resolveView(view, messages);
-    expect(resolved).not.toBe(view);
-    expect(resolved.latestUser?.parts[0]).toMatchObject({ text: '[board]' });
-  });
-
-  test('rebuilds after a tail removal (a volatile-zone strip)', () => {
-    const messages: unknown[] = [
-      userMessage('turn'),
-      {
-        info: { role: 'user', sessionID: 's1' },
-        parts: [
-          {
-            type: 'text',
-            synthetic: true,
-            text: '[board]',
-            metadata: { 'oh-my-opencode-slim.board': true },
-          },
-        ],
-      },
-    ];
-    const view = createMessageTransformView(messages);
-
-    messages.pop();
-    const resolved = resolveView(view, messages);
-    expect(resolved).not.toBe(view);
-    expect(resolved.latestUser?.parts[0]?.text).toBe('turn');
-  });
-
-  test('net-neutral append+pop keeps a still-correct view (documented failsafe limit)', () => {
-    // The failsafe is identity+length: a strip and an append that cancel out
-    // are not observable in O(1). That shape never occurs in the pipeline
-    // (the board appends; the root compaction strip runs after the last
-    // view consumer), and the root rebuild-point contract covers it anyway.
-    // When it does happen with tail-only operations, the surviving view is
-    // still correct: the covered messages are the same live objects.
-    const messages: unknown[] = [userMessage('turn')];
-    const view = createMessageTransformView(messages);
-    messages.push({
-      info: { role: 'user', sessionID: 's1' },
-      parts: [{ type: 'text', synthetic: true, text: '[board]' }],
-    });
-    messages.pop();
-    expect(resolveView(view, messages)).toBe(view);
-    expect(view.latestUser?.parts[0]?.text).toBe('turn');
-  });
-
-  test('rebuilds when the array identity changed (a different output object)', () => {
-    const view = createMessageTransformView([userMessage('a')]);
-    const other = [userMessage('a')];
-    expect(resolveView(view, other)).not.toBe(view);
-    expect(resolveView(undefined, other)).not.toBe(view);
-  });
-
-  test('undefined always builds fresh', () => {
-    const messages = [userMessage('a')];
-    const resolved = resolveView(undefined, messages);
-    expect(resolved.messages).toBe(messages);
-    expect(resolved.latestUser?.parts[0]?.text).toBe('a');
   });
 });

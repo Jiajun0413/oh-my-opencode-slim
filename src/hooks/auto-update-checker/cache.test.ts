@@ -38,6 +38,8 @@ mock.module('../../config/paths', () => ({
     '/mock/config/opencode.json',
     '/mock/config/opencode.jsonc',
   ],
+  getTuiConfig: () => '/mock/config/tui.json',
+  getTuiConfigJsonc: () => '/mock/config/tui.jsonc',
 }));
 
 // Cache buster for dynamic imports

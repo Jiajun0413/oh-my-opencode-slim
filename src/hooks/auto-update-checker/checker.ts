@@ -457,7 +457,6 @@ export function findPluginEntry(directory: string): PluginEntryInfo | null {
   return selected;
 }
 
-const _cachedLocalVersion: string | null = null;
 let cachedPackageVersion: string | null = null;
 
 /**
@@ -605,131 +604,6 @@ async function fetchDistTags(): Promise<NpmDistTags | null> {
 }
 
 /**
- * Raw npm facts: the dist-tags and the published version list, reduced from
- * the registry document. Policy (which channel counts, same-major installs,
- * the notification threshold) is deliberately absent — every consumer derives
- * its own rules from these facts.
- */
-export interface UpdateFacts {
-  distTags: Record<string, string>;
-  versions: string[];
-}
-
-/**
- * Lazy facts provider. It is called, never awaited at construction time, so
- * a consumer that never asks for the facts never pays for the request.
- */
-export type UpdateFactsProvider = () => Promise<UpdateFacts | null>;
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-/**
- * Dist-tags of a registry document, or `null` when the document is malformed.
- * A missing tag map is the same as an empty one; a present-but-wrong map
- * (or a non-string tag value) is unknown, never silently coerced — the facts
- * travel over an RPC contract whose output schema must not throw.
- */
-function normalizeDistTags(value: unknown): Record<string, string> | null {
-  if (value === undefined || value === null) return { latest: '' };
-  if (!isPlainObject(value)) return null;
-  const distTags: Record<string, string> = {};
-  for (const [tag, version] of Object.entries(value)) {
-    if (typeof version !== 'string') return null;
-    distTags[tag] = version;
-  }
-  return distTags;
-}
-
-/**
- * The facts of a registry document, or `null` when the document cannot be
- * trusted. `null` means "unknown", never "no update": the caller decides
- * what to do with an unknown answer.
- */
-function normalizeUpdateFacts(document: unknown): UpdateFacts | null {
-  if (!isPlainObject(document)) return null;
-  const metadata = document as NpmPackageMetadata;
-  const distTags = normalizeDistTags(metadata['dist-tags']);
-  if (distTags === null) return null;
-  const versions = metadata.versions;
-  if (versions === undefined || versions === null) {
-    return { distTags, versions: [] };
-  }
-  if (!isPlainObject(versions)) return null;
-  return { distTags, versions: Object.keys(versions) };
-}
-
-/**
- * Reads the npm facts of this package. The request and the body read are
- * both bounded: the abort signal covers transports that honour it, the race
- * covers the ones that do not. Every failure is "unknown" (`null`), never a
- * throw.
- */
-export async function readUpdateFacts(): Promise<UpdateFacts | null> {
-  const controller = new AbortController();
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timedOut = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => {
-      controller.abort();
-      reject(new Error(`update facts timed out after ${NPM_FETCH_TIMEOUT}ms`));
-    }, NPM_FETCH_TIMEOUT);
-  });
-
-  try {
-    // The race covers the WHOLE operation: a body read can stall long after
-    // the headers arrived, and the caller was promised a bounded read.
-    const facts = await Promise.race([
-      (async (): Promise<UpdateFacts | null> => {
-        const response = await fetch(NPM_PACKAGE_URL, {
-          signal: controller.signal,
-          headers: { Accept: 'application/json' },
-        });
-        if (!response.ok) return null;
-        return normalizeUpdateFacts(await response.json());
-      })(),
-      timedOut,
-    ]);
-    return facts;
-  } catch {
-    return null;
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-  }
-}
-
-/**
- * One facts reader per checker activation — never a process-global store.
- * The first caller pays for the registry request, every later caller (the
- * background check and the update-facts RPC) joins the same in-flight read,
- * and a successful read is memoized for the lifetime of the owning hook.
- * An unknown answer is cleared, so the next caller retries instead of
- * caching "unknown" for the rest of the session.
- */
-export function createUpdateFactsReader(): UpdateFactsProvider {
-  let inflight: Promise<UpdateFacts | null> | undefined;
-  let memo: UpdateFacts | null = null;
-
-  return () => {
-    if (memo) return Promise.resolve(memo);
-    if (!inflight) {
-      inflight = readUpdateFacts().then(
-        (facts) => {
-          if (facts) memo = facts;
-          inflight = undefined;
-          return facts;
-        },
-        () => {
-          inflight = undefined;
-          return null;
-        },
-      );
-    }
-    return inflight;
-  };
-}
-
-/**
  * Resolves the newest version that is safe for the current install to use.
  * Auto-update never crosses major versions; newer majors are surfaced as a
  * manual migration notification instead.
@@ -737,7 +611,6 @@ export function createUpdateFactsReader(): UpdateFactsProvider {
 export async function getLatestCompatibleVersion(
   currentVersion: string,
   channel: string = 'latest',
-  readFacts?: UpdateFactsProvider,
 ): Promise<CompatibleVersionResult> {
   const current = parseVersion(currentVersion);
   if (!current) {
@@ -750,32 +623,43 @@ export async function getLatestCompatibleVersion(
     };
   }
 
-  // Lazy by design: the provider is called here, not before, so a current
-  // version that cannot be parsed never pays for the package document.
-  const data = readFacts ? await readFacts() : await readUpdateFacts();
-  if (!data) return await getCompatibleFromDistTags(current, channel);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), NPM_FETCH_TIMEOUT);
 
-  const distTags = data.distTags;
-  const taggedVersion = distTags[channel] ?? distTags.latest ?? null;
-  const latestMajorVersion = getBlockingMajorVersion(current, [
-    taggedVersion,
-    distTags.latest,
-  ]);
-  const blockedByMajor = latestMajorVersion !== null;
+  try {
+    const response = await fetch(NPM_PACKAGE_URL, {
+      signal: controller.signal,
+      headers: { Accept: 'application/json' },
+    });
 
-  // `filter` copies before `sort` mutates: the facts array is shared with the
-  // update-facts RPC getter and must never be reordered in place.
-  const versions = data.versions
-    .filter((version) => {
-      const parsed = parseVersion(version);
-      return (
-        parsed?.major === current.major && isVersionInChannel(version, channel)
-      );
-    })
-    .sort(compareVersions);
-  const latestVersion = versions.at(-1) ?? null;
+    if (!response.ok) return await getCompatibleFromDistTags(current, channel);
 
-  return { latestVersion, latestMajorVersion, blockedByMajor };
+    const data = (await response.json()) as NpmPackageMetadata;
+    const distTags = data['dist-tags'] ?? { latest: '' };
+    const taggedVersion = distTags[channel] ?? distTags.latest ?? null;
+    const latestMajorVersion = getBlockingMajorVersion(current, [
+      taggedVersion,
+      distTags.latest,
+    ]);
+    const blockedByMajor = latestMajorVersion !== null;
+
+    const versions = Object.keys(data.versions ?? {})
+      .filter((version) => {
+        const parsed = parseVersion(version);
+        return (
+          parsed?.major === current.major &&
+          isVersionInChannel(version, channel)
+        );
+      })
+      .sort(compareVersions);
+    const latestVersion = versions.at(-1) ?? null;
+
+    return { latestVersion, latestMajorVersion, blockedByMajor };
+  } catch {
+    return await getCompatibleFromDistTags(current, channel);
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 async function getCompatibleFromDistTags(

@@ -51,8 +51,6 @@ Interview receives `session.text.*` with `assistantMessageID`; its v2 bridge is
 the only Interview owner on this host. Event payload extraction is shared, but
 recovery/permission/profile owners remain distinct. One native-event batch
 coalesces its mapped TUI projections without changing raw-first synthesis.
-`update-facts-rpc.ts` carries raw npm facts from the per-checker reader to TUI;
-installation and notification decisions stay independent.
 
 ## Flow
 

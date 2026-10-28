@@ -54,9 +54,9 @@ called inside a running plugin generation. Standalone CLI status reports
 it cannot inspect the host's in-memory agent registry.
 
 Status and reload checks share their inspection inputs. Package verification
-still runs on every inspection; unchanged configuration, host, prompt and skill
-facts can reuse the last desired projection instead of rebuilding the whole
-agent registry. Failed or incomplete inspections never become a cached success.
+still runs on every inspection; a desired registry projection is rebuilt from
+the current config, host and package digest facts when status is requested.
+Failed or incomplete inspections never become a cached success.
 
 ## Orchestrator tools
 

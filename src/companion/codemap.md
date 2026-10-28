@@ -47,7 +47,7 @@ interface CompanionSession {
 `manager.ts` revalidates state-file identity before using its bounded parsed
 memo; mutators work on isolated values and only successful rename publication
 becomes the new memo. Native preset requests still poll every 250ms. The
-once-per-second config/catalog refresh reuses shared config snapshots and skips
+once-per-second config refresh reuses shared config snapshots and skips
 unchanged derivation. `status.ts` owns the dependency-free busy/idle normalization
 used by the root without eagerly loading Companion machinery.
 

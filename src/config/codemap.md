@@ -39,12 +39,12 @@ The config system follows a layered architecture:
 
 ## Shared Runtime Reads
 
-`snapshot.ts` owns a bounded source-text snapshot keyed by discovery candidates,
-file identity and referenced environment values. Setup and TUI readers reuse
-`{config,warnings,paths,fingerprint}`; `loadPresetCatalog` retains raw editable
-user syntax and validated/interpolated project policy from the same text. Public
-mutable preset helpers return isolated values. The loader's `readText` seam
-avoids reading captured sources again; uncached `loadPluginConfig` stays available.
+`snapshot.ts` owns a bounded merged-config cache keyed by the selected source
+paths, their device/inode/mtime/ctime/size fields and referenced `{env:NAME}`
+values. Setup and TUI readers reuse `{config,warnings,paths,fingerprint}`;
+`fresh` covers a known write that timestamp granularity cannot distinguish.
+Read failures are not cached. Preset editors keep their own raw/validated
+reads; uncached `loadPluginConfig` stays available.
 
 Shared JSONC parsing, locked atomic editing and path lookup live in `jsonc.ts`,
 `json-file.ts` and `paths.ts`, not the CLI. The full Marketplace manifest is not
