@@ -24,7 +24,6 @@
  * injected by the entry point, so every path here is testable without a
  * renderer.
  */
-import * as fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { log } from '../utils/logger';
 import { findOwnedPackageJson } from '../utils/package-root';

@@ -6,7 +6,6 @@ import type { InterviewSessionRuntime } from '../interview/runtime';
 import { createInterviewServer } from '../interview/server';
 import { createInterviewService } from '../interview/service';
 import type { InterviewMessage } from '../interview/types';
-import { isRecord } from '../utils/guards';
 import { log } from '../utils/logger';
 import { createSessionListShim, resolveV2Directory } from './client-shim';
 import { resolveV2EventPayload } from './runtime-profiles';

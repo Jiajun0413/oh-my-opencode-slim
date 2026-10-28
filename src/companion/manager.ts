@@ -11,12 +11,12 @@ import {
 } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { type ConfigLoadWarningKind } from '../config/loader';
-import type { CompanionConfig, PluginConfig } from '../config/schema';
+import type { ConfigLoadWarningKind } from '../config/loader';
+import type { CompanionConfig } from '../config/schema';
 import {
   cloneConfigValue,
-  readPluginConfigSnapshot,
   type PluginConfigSnapshot,
+  readPluginConfigSnapshot,
 } from '../config/snapshot';
 import {
   clearProjectPresetOnDisk,
@@ -237,7 +237,10 @@ function rememberStateFile(
   identity: StateFileIdentity,
   state: CompanionState,
 ): void {
-  if (stateFileMemos.size >= MAX_STATE_FILE_MEMOS && !stateFileMemos.has(file)) {
+  if (
+    stateFileMemos.size >= MAX_STATE_FILE_MEMOS &&
+    !stateFileMemos.has(file)
+  ) {
     const oldest = stateFileMemos.keys().next();
     if (!oldest.done) stateFileMemos.delete(oldest.value);
   }
@@ -693,7 +696,8 @@ export class CompanionManager {
         return {
           ok: false,
           presetName: '',
-          message: 'Project configuration cannot be read or validated. Nothing was changed.',
+          message:
+            'Project configuration cannot be read or validated. Nothing was changed.',
           summary: [],
         };
       }
@@ -733,9 +737,10 @@ export class CompanionManager {
           // the switch; the memoized known-project row is persisted JSON, so
           // clone the derived objects to keep the cache private.
           current: cloneConfigValue(next?.effective ?? known.preset?.current),
-          available:
-            next?.projectAvailable ?? known.preset?.available ?? [],
-          effective: cloneConfigValue(next?.effective ?? known.preset?.effective),
+          available: next?.projectAvailable ?? known.preset?.available ?? [],
+          effective: cloneConfigValue(
+            next?.effective ?? known.preset?.effective,
+          ),
           project: cloneConfigValue(next?.project ?? known.preset?.project),
           global: cloneConfigValue(next?.global ?? known.preset?.global),
           project_available:
