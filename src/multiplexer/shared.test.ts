@@ -158,6 +158,20 @@ describe('buildOpencodeAttachCommand', () => {
     expect(cmd).toStartWith("'/Users/King'\\''s Tools/opencode' attach");
   });
 
+  test('a PowerShell pane quotes the attach command with PowerShell rules', async () => {
+    const { buildOpencodeAttachCommand } = await importShared();
+    const cmd = buildOpencodeAttachCommand(
+      "ses'x",
+      "http://x/o'brien",
+      "/repo/O'Brien",
+      "/opt/King's/opencode",
+      'powershell',
+    );
+    expect(cmd).toBe(
+      "& '/opt/King''s/opencode' attach 'http://x/o''brien' --session 'ses''x' --dir '/repo/O''Brien'",
+    );
+  });
+
   test('resolves host executable with env, process, and bare fallbacks', async () => {
     const { resolveHostOpencodeBinary } = await importShared();
     expect(
@@ -330,6 +344,18 @@ describe('buildViewCommand', () => {
     });
     expect(cmd).toBe(
       "& 'D:/Tools/opencode/2.0.32/opencode.exe' mini --session 'ses_x'",
+    );
+  });
+
+  test('a PowerShell pane doubles apostrophes in the executable and its arguments', async () => {
+    const { buildViewCommand } = await importShared();
+    const cmd = buildViewCommand("ses'x", 'http://x', "C:/Users/O'Brien/repo", {
+      executable: "C:/Users/O'Brien/opencode.exe",
+      viewerFlavor: 'v2-shared',
+      shell: 'powershell',
+    });
+    expect(cmd).toBe(
+      "& 'C:/Users/O''Brien/opencode.exe' --session 'ses''x' 'C:/Users/O''Brien/repo'",
     );
   });
 

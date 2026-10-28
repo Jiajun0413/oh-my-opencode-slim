@@ -15,6 +15,18 @@ export function quoteShellArg(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+/**
+ * Quotes one argument for the shell that will interpret the command.
+ * PowerShell escapes an embedded apostrophe by doubling it inside a
+ * single-quoted string (`'O''Brien'`); the POSIX `'\''` form is not readable
+ * to it.
+ */
+function quoteForShell(value: string, shell?: PaneShell): string {
+  return shell === 'powershell'
+    ? `'${value.replace(/'/g, "''")}'`
+    : quoteShellArg(value);
+}
+
 /** Normalize Windows backslashes to / so sh -lc (MSYS2/Git Bash) doesn't treat them as escape chars. */
 export function normalizePathForShell(directory: string): string {
   return process.platform === 'win32'
@@ -32,9 +44,8 @@ function formatExecutableForShell(
 ): string {
   if (executable === 'opencode') return executable;
   const normalized = normalizePathForShell(executable);
-  return shell === 'powershell'
-    ? `& ${quoteShellArg(normalized)}`
-    : quoteShellArg(normalized);
+  const quoted = quoteForShell(normalized, shell);
+  return shell === 'powershell' ? `& ${quoted}` : quoted;
 }
 
 export function buildOpencodeAttachCommand(
@@ -51,11 +62,11 @@ export function buildOpencodeAttachCommand(
   return [
     formatExecutableForShell(executable, shell),
     'attach',
-    quoteShellArg(serverUrl),
+    quoteForShell(serverUrl, shell),
     '--session',
-    quoteShellArg(sessionId),
+    quoteForShell(sessionId, shell),
     '--dir',
-    quoteShellArg(attachDir),
+    quoteForShell(attachDir, shell),
   ].join(' ');
 }
 
@@ -118,10 +129,14 @@ export function buildViewCommand(
   return [
     formatExecutableForShell(executable, options.shell),
     ...(mini ? ['mini'] : []),
-    ...(flavor === 'v2-remote' ? ['--server', quoteShellArg(serverUrl)] : []),
+    ...(flavor === 'v2-remote'
+      ? ['--server', quoteForShell(serverUrl, options.shell)]
+      : []),
     '--session',
-    quoteShellArg(sessionId),
-    ...(viewerNeedsPaneCwd(options) ? [] : [quoteShellArg(viewDir)]),
+    quoteForShell(sessionId, options.shell),
+    ...(viewerNeedsPaneCwd(options)
+      ? []
+      : [quoteForShell(viewDir, options.shell)]),
   ].join(' ');
 }
 
