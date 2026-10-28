@@ -4,6 +4,7 @@ import {
   createSessionProfileBridge,
   reconcileRuntimeProfileOptionKeys,
   resolveV2EventPayload,
+  type SessionProfileBridgeOptions,
 } from './runtime-profiles';
 import {
   createSessionPresets,
@@ -31,6 +32,7 @@ interface BridgeOptions {
   knownAgent?: (sessionID: string) => string | undefined;
   /** Current profile table (mutable for freshness tests). */
   profiles?: () => typeof PROFILES;
+  profilesForSession?: SessionProfileBridgeOptions['profilesForSession'];
   registeredProfiles?: typeof PROFILES;
   /** Defaults to the fixture plugin agents. */
   pluginAgents?: string[];
@@ -62,6 +64,9 @@ function makeBridge(options?: BridgeOptions) {
   }
   const bridge = createSessionProfileBridge({
     profiles: options?.profiles ?? (() => PROFILES),
+    ...(options?.profilesForSession
+      ? { profilesForSession: options.profilesForSession }
+      : {}),
     registeredProfiles: options?.registeredProfiles,
     pluginAgents: new Set(options?.pluginAgents ?? ['explorer', 'oracle']),
     session: session as never,
@@ -860,6 +865,28 @@ describe('createSessionProfileBridge', () => {
     });
     await bridge.ensureSessionProfile('child');
     expect(switchCalls).toEqual([]);
+  });
+
+  test('refreshes a retired pin onto the current model when the saved team names it too (#1689)', async () => {
+    const retired = { providerID: 'cline-oauth', id: 'muse', variant: 'xhigh' };
+    const { bridge, switchCalls } = makeBridge({
+      registeredProfiles: PROFILES,
+      get: async () => ({
+        parentID: 'p',
+        agent: 'explorer',
+        model: retired,
+      }),
+      profilesForSession: async () => ({
+        explorer: { ...PROFILES.explorer, model: retired },
+      }),
+      isModelAvailable: (ref) => ref.id !== 'muse',
+    });
+    await bridge.ensureSessionProfile('child');
+    // The frozen team names the same retired model as the pin; the switch
+    // must land on the current profile model, not the retired one.
+    expect(switchCalls).toEqual([
+      { sessionID: 'child', model: PROFILES.explorer.model },
+    ]);
   });
 
   test('leaves a modeled child uncaptured without session.switchModel', async () => {

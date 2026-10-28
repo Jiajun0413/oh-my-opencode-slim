@@ -385,6 +385,14 @@ export function createSessionProfileBridge(
         });
         return;
       }
+      // A rejected stale pin must land on a live model: the stored team's
+      // frozen profile can name the same retired model as the pin (both
+      // froze at creation), so refresh onto the current profile model
+      // instead (issue #1689).
+      const targetModel =
+        perCallCandidate && !keepPerCallModel
+          ? (options.profiles()[resolved.agent]?.model ?? profile.model)
+          : profile.model;
       const switchModel = options.session?.switchModel;
       if (typeof switchModel !== 'function') {
         throw new Error('session.switchModel unavailable for runtime profile');
@@ -401,7 +409,7 @@ export function createSessionProfileBridge(
         await withProfileTimeout(
           switchModel.call(options.session, {
             sessionID,
-            model: profile.model,
+            model: targetModel,
           }),
           'session profile model switch timed out',
           options.switchTimeoutMs ?? PROFILE_SWITCH_TIMEOUT_MS,
