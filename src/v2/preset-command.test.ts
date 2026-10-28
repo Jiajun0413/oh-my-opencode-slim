@@ -6,8 +6,10 @@ import {
   createPresetCommand,
   PRESET_COMMAND_DESCRIPTION,
   PRESET_COMMAND_NAME,
-  presetCommandFeedback,
+  presetApplyFeedback,
+  presetListFeedback,
 } from './preset-command';
+import type { SessionPresetState } from './session-presets';
 
 let tempDir: string;
 let previousConfigDir: string | undefined;
@@ -25,6 +27,53 @@ function userConfigPath(): string {
 
 function writeUserConfig(config: Record<string, unknown>): void {
   fs.writeFileSync(userConfigPath(), JSON.stringify(config));
+}
+
+function readUserConfig(): Record<string, unknown> {
+  return JSON.parse(fs.readFileSync(userConfigPath(), 'utf-8')) as Record<
+    string,
+    unknown
+  >;
+}
+
+function boundState(sessionID: string, presetName: string): SessionPresetState {
+  return {
+    sessionID,
+    status: 'bound',
+    presetName,
+    affects: 'future-children-only',
+  };
+}
+
+function unboundState(sessionID: string): SessionPresetState {
+  return {
+    sessionID,
+    status: 'unbound',
+    presetName: null,
+    affects: 'future-children-only',
+  };
+}
+
+const readBound = (presetName: string) => (_sessionID: string) =>
+  Promise.resolve(boundState('ses', presetName));
+
+/** Records the calls and confirms the binding unless `respond` overrides it. */
+function recorder(
+  respond?: (
+    sessionID: string,
+    presetName: string,
+  ) => Promise<SessionPresetState>,
+) {
+  const calls: Array<{ sessionID: string; presetName: string }> = [];
+  return {
+    calls,
+    applyToSession: async (sessionID: string, presetName: string) => {
+      calls.push({ sessionID, presetName });
+      return respond
+        ? respond(sessionID, presetName)
+        : boundState(sessionID, presetName);
+    },
+  };
 }
 
 beforeEach(() => {
@@ -50,8 +99,8 @@ afterEach(() => {
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
-describe('presetCommandFeedback', () => {
-  test('no arguments lists user and project presets with the active one', () => {
+describe('presetListFeedback', () => {
+  test('lists visible presets with the session team and the global default', async () => {
     writeUserConfig({
       preset: 'fast',
       presets: { fast: { fixer: { model: 'test/fast' } } },
@@ -63,75 +112,188 @@ describe('presetCommandFeedback', () => {
       JSON.stringify({ presets: { deep: { fixer: { model: 'test/deep' } } } }),
     );
 
-    const message = presetCommandFeedback({
+    const message = await presetListFeedback({
       directory: project,
-      arguments: '  ',
+      sessionID: 'ses_caller',
+      readSessionPreset: readBound('deep'),
+      applyToSession: async () => boundState('ses_caller', 'deep'),
     });
 
-    expect(message).toContain('Available presets: deep, fast.');
-    expect(message).toContain('Active preset: fast.');
-    expect(message).toContain('Run /preset <name> to apply one.');
+    expect(message).toBe(
+      'Available presets: deep, fast. Session team: deep. Global default: fast. Run /preset <name> to apply one to this session.',
+    );
   });
 
-  test('no presets configured points at the config file', () => {
-    expect(presetCommandFeedback({ directory: tempDir, arguments: '' })).toBe(
+  test('an unbound session says so instead of implying a team', async () => {
+    writeUserConfig({
+      preset: 'fast',
+      presets: { fast: { fixer: { model: 'test/fast' } } },
+    });
+
+    const message = await presetListFeedback({
+      directory: tempDir,
+      sessionID: 'ses_caller',
+      readSessionPreset: async (sessionID) => unboundState(sessionID),
+      applyToSession: async () => boundState('ses_caller', 'fast'),
+    });
+
+    expect(message).toContain('Session team: not bound yet.');
+    expect(message).toContain('Global default: fast.');
+  });
+
+  test('an unreadable binding reports the default only', async () => {
+    writeUserConfig({
+      preset: 'fast',
+      presets: { fast: { fixer: { model: 'test/fast' } } },
+    });
+
+    const message = await presetListFeedback({
+      directory: tempDir,
+      sessionID: 'ses_caller',
+      readSessionPreset: async () => {
+        throw new Error('storage unavailable');
+      },
+      applyToSession: async () => boundState('ses_caller', 'fast'),
+    });
+
+    expect(message).not.toContain('Session team');
+    expect(message).toContain('Global default: fast.');
+  });
+
+  test('no presets configured points at the config file', async () => {
+    expect(
+      await presetListFeedback({
+        directory: tempDir,
+        sessionID: 'ses_caller',
+        readSessionPreset: async (sessionID) => unboundState(sessionID),
+        applyToSession: async () => boundState('ses_caller', 'fast'),
+      }),
+    ).toBe(
       'No presets configured. Define presets in oh-my-opencode-slim.jsonc.',
     );
   });
+});
 
-  test('a valid name persists it and reports the next conversation/reload', () => {
+describe('presetApplyFeedback', () => {
+  test('binds the invoking session instead of writing the default', async () => {
     writeUserConfig({
       presets: { fast: { fixer: { model: 'test/fast' } } },
     });
+    const { calls, applyToSession } = recorder();
 
-    const message = presetCommandFeedback({
+    const message = await presetApplyFeedback({
       directory: tempDir,
-      arguments: ' fast ',
+      presetName: 'fast',
+      sessionID: 'ses_caller',
+      applyToSession,
     });
 
-    expect(message).toContain(
-      'Applied preset "fast". It takes effect on the next conversation or reload.',
+    expect(calls).toEqual([{ sessionID: 'ses_caller', presetName: 'fast' }]);
+    expect(message).toBe(
+      'Applied preset "fast" to this session\'s team. Future subagents use it on their next dispatch; the root model, already-created children and the global default stay unchanged.',
     );
-    expect(message).toContain('fixer');
-    expect(JSON.parse(fs.readFileSync(userConfigPath(), 'utf-8')).preset).toBe(
-      'fast',
-    );
+    expect(readUserConfig().preset).toBeUndefined();
   });
 
-  test('an unknown name reports the error with the valid options', () => {
+  test('an unknown name reports the valid options and binds nothing', async () => {
     writeUserConfig({
       presets: { fast: { fixer: { model: 'test/fast' } } },
     });
+    const { calls, applyToSession } = recorder();
 
-    const message = presetCommandFeedback({
+    const message = await presetApplyFeedback({
       directory: tempDir,
-      arguments: 'missing',
+      presetName: 'missing',
+      sessionID: 'ses_caller',
+      applyToSession,
     });
 
     expect(message).toContain('Preset "missing" not found.');
     expect(message).toContain('Available presets: fast');
+    expect(calls).toEqual([]);
+  });
+
+  test('a refused binding surfaces the server reason', async () => {
+    writeUserConfig({
+      presets: { fast: { fixer: { model: 'test/fast' } } },
+    });
+    const { applyToSession } = recorder(async () => {
+      throw new Error('Cannot apply to an unbound child');
+    });
+
+    const message = await presetApplyFeedback({
+      directory: tempDir,
+      presetName: 'fast',
+      sessionID: 'ses_child',
+      applyToSession,
+    });
+
+    expect(message).toBe(
+      'Preset "fast" was not applied: Cannot apply to an unbound child',
+    );
+  });
+
+  test('an unconfirmed binding is reported instead of a success', async () => {
+    writeUserConfig({
+      presets: { fast: { fixer: { model: 'test/fast' } } },
+    });
+    const { applyToSession } = recorder(async (sessionID) =>
+      unboundState(sessionID),
+    );
+
+    const message = await presetApplyFeedback({
+      directory: tempDir,
+      presetName: 'fast',
+      sessionID: 'ses_caller',
+      applyToSession,
+    });
+
+    expect(message).toContain('did not confirm the session binding');
   });
 });
 
 describe('createPresetCommand', () => {
+  const options = () => ({
+    directory: tempDir,
+    applyToSession: async (sessionID: string, presetName: string) =>
+      boundState(sessionID, presetName),
+    readSessionPreset: async (sessionID: string) => unboundState(sessionID),
+  });
+
   test('exposes the server command identity', () => {
-    const command = createPresetCommand(tempDir);
+    const command = createPresetCommand(options());
     expect(command.name).toBe(PRESET_COMMAND_NAME);
     expect(command.description).toBe(PRESET_COMMAND_DESCRIPTION);
   });
 
-  test('rejects with the feedback instead of starting a turn', async () => {
+  test('no argument rejects with the preset list', async () => {
     writeUserConfig({
       presets: { fast: { fixer: { model: 'test/fast' } } },
     });
 
     await expect(
-      createPresetCommand(tempDir).execute({
+      createPresetCommand(options()).execute({
+        sessionID: 'ses_preset',
+        prompt: { text: '  ' },
+      }),
+    ).rejects.toThrow(
+      'Available presets: fast. Session team: not bound yet. Run /preset <name> to apply one to this session.',
+    );
+  });
+
+  test('rejects with the feedback instead of starting a turn, binding the invoking session', async () => {
+    writeUserConfig({
+      presets: { fast: { fixer: { model: 'test/fast' } } },
+    });
+    const { calls, applyToSession } = recorder();
+
+    await expect(
+      createPresetCommand({ ...options(), applyToSession }).execute({
         sessionID: 'ses_preset',
         prompt: { text: 'fast' },
       }),
-    ).rejects.toThrow(
-      'Applied preset "fast". It takes effect on the next conversation or reload.',
-    );
+    ).rejects.toThrow('Applied preset "fast" to this session\'s team.');
+    expect(calls).toEqual([{ sessionID: 'ses_preset', presetName: 'fast' }]);
+    expect(readUserConfig().preset).toBeUndefined();
   });
 });

@@ -2810,7 +2810,15 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
               });
               return;
             }
-            draft.add(createPresetCommand(directory));
+            draft.add(
+              createPresetCommand({
+                directory,
+                applyToSession: (sessionID: string, presetName: string) =>
+                  sessionPresets.apply(sessionID, presetName),
+                readSessionPreset: (sessionID: string) =>
+                  sessionPresets.readState(sessionID),
+              }),
+            );
           });
           disposers.push(() => reg.dispose());
         }

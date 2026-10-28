@@ -72,8 +72,9 @@ The root `agents.*` configuration (defined at the top level of user or project c
 
 On v2, `/preset` → **Current session** resolves the selected preset through the
 same merge — root `agents.*` entries still take precedence — and saves those
-resolved settings for future delegations in that session. **Global default**, or
-`/preset <name>`, changes the default for future session bindings instead.
+resolved settings for future delegations in that session. `/preset <name>` does
+the same for the session on screen; **Global default** (or editing `preset` in
+configuration) changes the default for future session bindings instead.
 
 ---
 
