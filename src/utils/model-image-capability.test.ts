@@ -122,7 +122,7 @@ describe('modelExistsInCatalog', () => {
     },
   });
 
-  test('reports present models and retired/unknown providers', async () => {
+  test('reports present models and models retired from a listed provider', async () => {
     const deps = catalogDeps();
     await expect(
       modelExistsInCatalog({ providerID: 'p', id: 'live' }, deps),
@@ -130,9 +130,17 @@ describe('modelExistsInCatalog', () => {
     await expect(
       modelExistsInCatalog({ providerID: 'p', id: 'gone' }, deps),
     ).resolves.toBe(false);
+  });
+
+  test('treats an absent provider as unknown, not retired', async () => {
+    // v2 model.list omits disabled/unauthenticated providers, so a missing
+    // provider does not prove its models are gone.
+    const deps = catalogDeps();
     await expect(
       modelExistsInCatalog({ providerID: 'missing', id: 'live' }, deps),
-    ).resolves.toBe(false);
+    ).resolves.toBe(undefined);
+    // The catalog stays memoized: absence is a definite read, not a failure.
+    expect(deps.cache.promise).toBeDefined();
   });
 
   test('resolves undefined without any catalog source', async () => {

@@ -889,6 +889,33 @@ describe('createSessionProfileBridge', () => {
     ]);
   });
 
+  test('captures the current profile options when refreshing a retired pin (#1689)', async () => {
+    const retired = { providerID: 'cline-oauth', id: 'muse', variant: 'xhigh' };
+    const frozen = {
+      ...PROFILES.explorer,
+      model: retired,
+      temperature: 0.9,
+      providerOptions: { retiredOnly: true },
+    };
+    const { bridge, switchCalls } = makeBridge({
+      registeredProfiles: PROFILES,
+      get: async () => ({
+        parentID: 'p',
+        agent: 'explorer',
+        model: retired,
+      }),
+      profilesForSession: async () => ({ explorer: frozen }),
+      isModelAvailable: (ref) => ref.id !== 'muse',
+    });
+    await bridge.ensureSessionProfile('child');
+    expect(switchCalls).toEqual([
+      { sessionID: 'child', model: PROFILES.explorer.model },
+    ]);
+    // The session must carry the live model's inference profile, not the
+    // retired model's temperature/provider options.
+    expect(bridge.profileForSession('child')).toBe(PROFILES.explorer);
+  });
+
   test('leaves a modeled child uncaptured without session.switchModel', async () => {
     const { bridge } = makeBridge({ withSwitchModel: false });
 

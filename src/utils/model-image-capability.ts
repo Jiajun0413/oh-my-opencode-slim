@@ -142,9 +142,11 @@ export async function modelAcceptsImageInput(
 /**
  * Whether a model reference still resolves in the host catalog: `true`
  * present, `false` only when a successfully loaded catalog positively
- * shows it is gone (provider listed without the model, or provider
- * absent), `undefined` unknown (no catalog source, empty/unparseable
- * payload, failed fetch, timeout) — callers keep their default. Unknown
+ * shows it is gone (provider listed without the model), `undefined`
+ * unknown (no catalog source, empty/unparseable payload, provider absent,
+ * failed fetch, timeout) — callers keep their default. A missing provider
+ * is not proof: v2 `model.list` omits disabled/unauthenticated providers,
+ * so a temporarily unavailable provider must not retire a pin. Unknown
  * outcomes drop the cache memo so the next call retries (issue #1689).
  */
 export async function modelExistsInCatalog(
@@ -166,7 +168,7 @@ export async function modelExistsInCatalog(
       return undefined;
     }
     const models = catalog.get(ref.providerID);
-    if (!models) return false;
+    if (!models) return undefined;
     return models.has(ref.id);
   } catch {
     // Failed or timed out: unknown; drop the memo so the next call retries.

@@ -388,11 +388,15 @@ export function createSessionProfileBridge(
       // A rejected stale pin must land on a live model: the stored team's
       // frozen profile can name the same retired model as the pin (both
       // froze at creation), so refresh onto the current profile model
-      // instead (issue #1689).
-      const targetModel =
+      // instead (issue #1689). Capture that whole current profile so the
+      // session's temperature/provider options follow the live model rather
+      // than the retired one's.
+      const currentProfile =
         perCallCandidate && !keepPerCallModel
-          ? (options.profiles()[resolved.agent]?.model ?? profile.model)
-          : profile.model;
+          ? options.profiles()[resolved.agent]
+          : undefined;
+      const appliedProfile = currentProfile?.model ? currentProfile : profile;
+      const targetModel = currentProfile?.model ?? profile.model;
       const switchModel = options.session?.switchModel;
       if (typeof switchModel !== 'function') {
         throw new Error('session.switchModel unavailable for runtime profile');
@@ -421,12 +425,12 @@ export function createSessionProfileBridge(
         options.onSessionCaptureFailed?.(sessionID);
         throw err;
       }
-      captured.set(sessionID, profile);
+      captured.set(sessionID, appliedProfile);
       prune();
       emitLog('[v2][profile] applied model to child session', {
         sessionID,
         agent: resolved.agent,
-        model: profile.model,
+        model: appliedProfile.model,
       });
     })();
     pending.set(sessionID, task);
