@@ -635,6 +635,7 @@ function buildCustomAgentDefinition(
   return {
     name,
     description,
+    ...(isPrimary ? { primary: true } : {}),
     config: {
       model: primaryModel ?? fallbackModel ?? DEFAULT_MODELS.oracle,
       prompt: resolvePrompt(
@@ -1307,13 +1308,13 @@ export function getAgentConfigsFromDefinitions(
   agents: readonly AgentDefinition[],
 ): Record<string, SDKAgentConfig> {
   // Primary agents: the canonical orchestrator plus any custom agent the
-  // user explicitly marked with `primary: true`. See issue #1591.
+  // user explicitly marked with `primary: true`. Classified from the
+  // definition flag (set only by custom-agent construction), never from
+  // config keys: a marketplace agent replacing a same-named owner override
+  // must stay a subagent. See issue #1591.
   const primaryNames = new Set<string>(['orchestrator']);
-  const mergedAgentsForPrimary = runtime.agents();
-  for (const name of runtime.customAgentNames) {
-    if (mergedAgentsForPrimary[name]?.primary === true) {
-      primaryNames.add(name);
-    }
+  for (const definition of agents) {
+    if (definition.primary === true) primaryNames.add(definition.name);
   }
 
   const applyClassification = (
