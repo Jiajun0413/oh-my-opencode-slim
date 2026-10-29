@@ -1298,6 +1298,15 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "BoysGameStudio",
+      "name": "Alan Liu",
+      "avatar_url": "https://avatars.githubusercontent.com/u/15364305?v=4",
+      "profile": "https://github.com/BoysGameStudio",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "commitConvention": "angular"
