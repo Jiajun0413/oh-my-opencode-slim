@@ -5,6 +5,7 @@ import {
   createSessionProfileBridge,
   reconcileRuntimeProfileOptionKeys,
   resolveV2EventPayload,
+  type SessionProfileBridgeOptions,
 } from './runtime-profiles';
 import {
   createSessionPresets,
@@ -32,6 +33,7 @@ interface BridgeOptions {
   knownAgent?: (sessionID: string) => string | undefined;
   /** Current profile table (mutable for freshness tests). */
   profiles?: () => typeof PROFILES;
+  profilesForSession?: SessionProfileBridgeOptions['profilesForSession'];
   registeredProfiles?: typeof PROFILES;
   /** Defaults to the fixture plugin agents. */
   pluginAgents?: string[];
@@ -39,6 +41,9 @@ interface BridgeOptions {
   switchTimeoutMs?: number;
   onSessionCaptured?: (sessionID: string) => void;
   onSessionCaptureFailed?: (sessionID: string) => void;
+  isModelAvailable?: (
+    ref: ModelRef,
+  ) => boolean | undefined | Promise<boolean | undefined>;
 }
 
 function makeBridge(options?: BridgeOptions) {
@@ -60,6 +65,9 @@ function makeBridge(options?: BridgeOptions) {
   }
   const bridge = createSessionProfileBridge({
     profiles: options?.profiles ?? (() => PROFILES),
+    ...(options?.profilesForSession
+      ? { profilesForSession: options.profilesForSession }
+      : {}),
     registeredProfiles: options?.registeredProfiles,
     pluginAgents: new Set(options?.pluginAgents ?? ['explorer', 'oracle']),
     session: session as never,
@@ -72,6 +80,9 @@ function makeBridge(options?: BridgeOptions) {
       : {}),
     ...(options?.onSessionCaptureFailed
       ? { onSessionCaptureFailed: options.onSessionCaptureFailed }
+      : {}),
+    ...(options?.isModelAvailable
+      ? { isModelAvailable: options.isModelAvailable }
       : {}),
     log: () => {},
   });
@@ -857,6 +868,120 @@ describe('createSessionProfileBridge', () => {
     expect(switchCalls).toEqual([
       { sessionID: 'default', model: PROFILES.explorer.model },
     ]);
+  });
+
+  test('switches a stale retired model to the current profile (#1689)', async () => {
+    const retired = { providerID: 'cline-oauth', id: 'muse', variant: 'xhigh' };
+    const { bridge, switchCalls } = makeBridge({
+      registeredProfiles: PROFILES,
+      get: async () => ({
+        parentID: 'p',
+        agent: 'explorer',
+        model: retired,
+      }),
+      isModelAvailable: (ref) => ref.id !== 'muse',
+    });
+    await bridge.ensureSessionProfile('child');
+    // The retired pin is gone from the catalog: it must not be replayed —
+    // the child is refreshed onto the current explorer model.
+    expect(switchCalls).toEqual([
+      { sessionID: 'child', model: PROFILES.explorer.model },
+    ]);
+  });
+
+  test('keeps a valid per-call model that still resolves in the catalog (#1689)', async () => {
+    const override = { providerID: 'openai', id: 'per-call', variant: 'low' };
+    const { bridge, switchCalls } = makeBridge({
+      registeredProfiles: PROFILES,
+      get: async () => ({
+        parentID: 'p',
+        agent: 'explorer',
+        model: override,
+      }),
+      isModelAvailable: () => true,
+    });
+    await bridge.ensureSessionProfile('child');
+    expect(switchCalls).toEqual([]);
+    expect(bridge.profileForSession('child')).toBe(PROFILES.explorer);
+  });
+
+  test('keeps a differing model when catalog availability is unknown (#1689)', async () => {
+    const unknown = { providerID: 'other', id: 'maybe' };
+    const { bridge, switchCalls } = makeBridge({
+      registeredProfiles: PROFILES,
+      get: async () => ({
+        parentID: 'p',
+        agent: 'explorer',
+        model: unknown,
+      }),
+      isModelAvailable: () => undefined,
+    });
+    await bridge.ensureSessionProfile('child');
+    expect(switchCalls).toEqual([]);
+  });
+
+  test('keeps the child model when the catalog lookup fails (#1689)', async () => {
+    const override = { providerID: 'openai', id: 'per-call' };
+    const { bridge, switchCalls } = makeBridge({
+      registeredProfiles: PROFILES,
+      get: async () => ({
+        parentID: 'p',
+        agent: 'explorer',
+        model: override,
+      }),
+      isModelAvailable: () => Promise.reject(new Error('registry down')),
+    });
+    await bridge.ensureSessionProfile('child');
+    expect(switchCalls).toEqual([]);
+  });
+
+  test('refreshes a retired pin onto the current model when the saved team names it too (#1689)', async () => {
+    const retired = { providerID: 'cline-oauth', id: 'muse', variant: 'xhigh' };
+    const { bridge, switchCalls } = makeBridge({
+      registeredProfiles: PROFILES,
+      get: async () => ({
+        parentID: 'p',
+        agent: 'explorer',
+        model: retired,
+      }),
+      profilesForSession: async () => ({
+        explorer: { ...PROFILES.explorer, model: retired },
+      }),
+      isModelAvailable: (ref) => ref.id !== 'muse',
+    });
+    await bridge.ensureSessionProfile('child');
+    // The frozen team names the same retired model as the pin; the switch
+    // must land on the current profile model, not the retired one.
+    expect(switchCalls).toEqual([
+      { sessionID: 'child', model: PROFILES.explorer.model },
+    ]);
+  });
+
+  test('captures the current profile options when refreshing a retired pin (#1689)', async () => {
+    const retired = { providerID: 'cline-oauth', id: 'muse', variant: 'xhigh' };
+    const frozen = {
+      ...PROFILES.explorer,
+      model: retired,
+      temperature: 0.9,
+      providerOptions: { retiredOnly: true },
+    };
+    const { bridge, switchCalls } = makeBridge({
+      registeredProfiles: PROFILES,
+      get: async () => ({
+        parentID: 'p',
+        agent: 'explorer',
+        model: retired,
+      }),
+      profilesForSession: async () => ({ explorer: frozen }),
+      isModelAvailable: (ref) => ref.id !== 'muse',
+    });
+    await bridge.ensureSessionProfile('child');
+    expect(switchCalls).toEqual([
+      { sessionID: 'child', model: PROFILES.explorer.model },
+    ]);
+    // The session must carry the live model's inference profile, not the
+    // retired model's temperature/provider options.
+    expect(bridge.profileForSession('child')).toBe(PROFILES.explorer);
   });
 
   test('leaves a modeled child uncaptured without session.switchModel', async () => {
