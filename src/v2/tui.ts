@@ -6,24 +6,18 @@
  * registration, while the v2 `setup` is extended with the `/preset` keymap
  * flow — v2 hosts get the sidebar plus the same three-level preset manager
  * the v1 TUI has (see `./preset-manager`), reached from `/preset` or the
- * sidebar's preset row; `/preset <name>` stays the direct fast path
- * (on-disk persist → refresh REQUESTED: sidebar re-read + file-write-driven
- * server watcher). The server watcher's outcome is not observable from the
- * TUI process, so success toasts say "Live refresh requested" and failures
- * show the reload fallback.
+ * sidebar's preset row; `/preset <name>` is the direct fast path that binds
+ * the preset to the session on screen through the session-preset RPC (the
+ * same result as the manager's Current session action). The global default is
+ * configuration, not a command effect.
  *
  * Hosts discover this entry through the package.json `./tui` export
  * (exports-map probe in the host's `kind: "tui"` loader pass); the
  * server-side default export (src/index.ts) plays no role in that — in
  * fact it must stay free of any `tui` key (see the note there).
  */
-import type { PluginConfig } from '../config';
 import { loadPluginConfig } from '../config/loader';
 import { isCommandEnabled } from '../hooks/command-hook-utils';
-import {
-  type PresetSwitchResult,
-  switchPresetOnDisk,
-} from '../tools/preset-switch';
 import type { TuiRouteView } from '../tui';
 import omoTui, {
   readTuiGates,
@@ -41,12 +35,12 @@ import { isPluginDisabledByEnv } from '../utils/env';
 import { log } from '../utils/logger';
 import { notifyConfigChanged } from './config-change-coordinator';
 import {
-  liveRefreshFailureMessage,
-  liveRefreshSuccessMessage,
   openPresetManagerV2,
+  sessionPresetClient,
   type V2PresetManagerContext,
   type V2PresetUiSurface,
 } from './preset-manager';
+import { bindSessionPreset } from './session-preset-apply';
 import { registerUpdateNotice } from './update-notice';
 
 /** A keymap command as accepted by the host's `keymap.layer` reducer. */
@@ -108,35 +102,18 @@ const PRESET_COMMAND_TITLE = 'OMO: switch preset';
 const OPEN_SUBAGENT_COMMAND_ID = 'omo.open_subagent';
 const PRESET_APP_SLOT = 'app';
 
-/**
- * Apply a preset by name through the shared on-disk switcher
- * (`switchPresetOnDisk`): the preset name is persisted to the user config so
- * the next reload/restart picks it up; the running session is untouched.
- * `runPresetFlow` follows a successful switch with the config refresh.
- * Returns the switch result whose `message` is user-facing (toast-ready).
- */
-export function applyPresetByName(
-  directory: string,
-  config: PluginConfig,
-  presetName: string,
-): PresetSwitchResult {
-  return switchPresetOnDisk(directory, presetName, config, {
-    hostFlavor: 'v2',
-  });
+/** The session the current route shows; undefined on the home screen. */
+function currentSessionID(ctx: V2PresetTuiContext): string | undefined {
+  const route = ctx.ui?.router?.current?.() as TuiRouteView | undefined;
+  return route ? resolveRouteSessionId(route) : undefined;
 }
 
 /**
- * `/preset` flow: bare `/preset` opens the three-level preset manager
- * (applying a preset persists the name on disk, reports the toast, and
- * requests the config refresh for new dispatches/sidebar); `/preset <name>`
- * keeps the direct fast path that works even when the host exposes no
- * dialogs. Never throws — failures are surfaced as a toast and logged.
- *
- * Feedback is honest about the process boundary: the TUI can persist and
- * REQUEST the live refresh (local sidebar re-read + the server-side watcher
- * reacting to the file write), but it cannot observe the server watcher's
- * outcome, so a successful switch never claims the refresh was applied and a
- * failed/missing request path shows the actionable reload fallback.
+ * `/preset` flow: bare `/preset` opens the three-level preset manager;
+ * `/preset <name>` binds the named preset to the session on screen through the
+ * session-preset RPC — the same result as the manager's Current session
+ * action, and no restart. Neither path writes the global default. Never
+ * throws — failures are surfaced as a toast and logged.
  */
 export async function runPresetFlow(
   ctx: V2PresetTuiContext,
@@ -150,46 +127,32 @@ export async function runPresetFlow(
     }
   };
   try {
-    const config = loadPluginConfig(directory, {
-      silent: true,
-      hostFlavor: 'v2',
-    });
-
     const requested = presetArg?.trim();
     if (requested) {
-      const result = applyPresetByName(directory, config, requested);
-      if (!result.ok) {
-        toast(result.message);
+      const sessionID = currentSessionID(ctx);
+      if (sessionID === undefined) {
+        toast(
+          'No session is displayed. Open a conversation first. Nothing was applied.',
+        );
         return;
       }
-      // Persistence succeeded; request the live refresh and report honestly.
-      // Success text says "Live refresh requested" (the server watcher owns
-      // the outcome); a failed request falls back to the reload action.
-      const outcome = await notifyConfigChanged(directory, '/preset');
-      if (outcome.ok) {
-        toast(liveRefreshSuccessMessage(requested, result.summary));
-      } else {
-        log(
-          '[v2][tui] preset applied but the live refresh request failed',
-          outcome.reason,
-        );
-        toast(
-          liveRefreshFailureMessage(
-            requested,
-            outcome.reason ?? 'live refresh request failed',
+      const outcome = await bindSessionPreset({
+        directory,
+        presetName: requested,
+        bind: (presetName) =>
+          sessionPresetClient(ctx).apply(
+            { sessionID, presetName },
+            { location: { ...ctx.location, directory } },
           ),
-        );
-      }
+      });
+      toast(outcome.message);
       return;
     }
 
     // Bare `/preset`: open the three-level manager with the shared
     // config-change coordinator so Apply/Save refresh the sidebar state.
     const managerCtx = Object.create(ctx as object) as V2PresetTuiContext;
-    managerCtx.getSessionID = () => {
-      const route = ctx.ui?.router?.current?.() as TuiRouteView | undefined;
-      return route ? resolveRouteSessionId(route) : undefined;
-    };
+    managerCtx.getSessionID = () => currentSessionID(ctx);
     managerCtx.onConfigChanged = () =>
       notifyConfigChanged(directory, '/preset-manager');
     await openPresetManagerV2(managerCtx, directory);

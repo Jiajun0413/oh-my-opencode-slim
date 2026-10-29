@@ -188,7 +188,7 @@ not an optional-degradation path.
    ordinary context reads and parent-alias recovery remain unchanged.
    Hosts without persisted-message reads retain incomplete context and do
    not bypass missing-baseline checks. `session.prompt` (default `delivery: "steer"`;
-   `noReply: true` maps to `delivery: "queue", resume: false` — or `delivery: "steer", resume: false` when the v1-shaped body carries an explicit `delivery: 'steer'` from `task_message`),
+   `noReply: true` maps to `delivery: "queue", resume: false` — queue-only, never steering),
    `session.update`→
    `session.update` (`{sessionID, title}`), `session.delete`→`remove` (same
    `DELETE /api/session/:id`), and `session.list` (v2 `Session.Info` page → the v1
@@ -378,23 +378,25 @@ child bridge degrades with a one-time warning.
 
 ### Task-control prompt and idle-wait contracts
 
+Run-identity anchoring: the plugin records each session's FIRST
+host-confirmed input admission (`chat.message` on v1; on v2 the awaited
+`session.prompt` hook feeds the id directly, ahead of every deferred
+chat.message delivery) and stamps it on the generation's board row when that
+run opens; a resumed run binds only its own pending call's admission, never
+the session map. Amendment fencing and the diagnostic excerpt rules are
+described once in [Tools](tools.md#diagnostic-attribution).
+
 The v1-facing `session.prompt` shim preserves text and file attachments. A
-`noReply: true` task message is a real, non-synthetic prompt with `queue` +
-`resume: false`; `task_message` exposes no delivery/steer parameter.
+`noReply: true` body is a real, non-synthetic prompt with `queue` +
+`resume: false`; no caller exposes a delivery/steer parameter.
 Queue alone would not preserve the no-resume intent. Unsupported per-call
 model/variant overrides and agent changes are rejected before writing, never
 silently dropped or implemented by non-atomic `switchAgent`/`switchModel` calls.
 A named owning agent is an identity assertion: the shim verifies it matches
 `session.get().agent` before admitting the prompt. Missing, mismatched, or
-unreadable identity fails closed without a write or selection switch. `task_message`
-explicitly inherits persisted selection on v2; other noReply callers, including
-interview notifications, retain the same no-resume semantics.
-
-After the asynchronous identity read, `task_message` revalidates its existing
-disposal, message lease, running generation, and owning-agent conditions at the
-shim's synchronous pre-admission boundary. The local `beforeSend` guard is not
-forwarded to the host and cannot switch selection; invalidation during the read
-therefore rejects without queuing a message.
+unreadable identity fails closed without a write or selection switch. The
+v2 prompt path inherits the session's persisted selection; noReply callers,
+including interview notifications, retain the same no-resume semantics.
 
 `experimental_v2.waitForSessionIdle(sessionID)` exists only when the host provides
 `session.wait({sessionID})`. It delegates that method; it fabricates neither a
@@ -470,7 +472,7 @@ side cannot be observed.
 | `routingBlock` (drop `<Agents>` from the built orchestrator prompt) | ✅ removes the block | ✅ removes the block | The host's native delegation-tool roster keeps agent identity; the block's Delegate/Don't routing criteria have no roster equivalent — see [Upstream behaviors to know](#upstream-behaviors-to-know) |
 | Orchestrator + specialist agents, prompts & permission mapping | ✅ | ✅ `ctx.agent.transform` | — |
 | Delegation + background job board + `task_*` tools | ✅ `task` tool | ✅ host `subagent` (auto-bridged: name/args normalization in `src/v2/delegation.ts`, output parsing in the execute bridges) | On v2 the model-visible identifier parameter is `sessionID` for both the host `subagent` resume arg and the plugin's `task_*` tools; `task_id` is accepted only as a deprecated alias (never emitted). Prompt text must use the host's vocabulary directly — no v1→v2 delegation-vocabulary rewriting is applied (display-name substitution separately rewrites `@<internalName>` mentions to the agent's `displayName` throughout the final orchestrator prompt — inline, file, and append orchestrator prompts — and in `orchestratorPrompt`/ACP routing snippets) — so an instructed resume continues the child instead of forking a new one. `backgroundJobs.enabled: false` removes the managed board and every `task_*` tool on both hosts while leaving native `subagent` delegation, completion delivery, and `sessionID` continuation untouched; council seat assembly switches to the native resolver |
-| Tools (ast-grep, webfetch, task_status/task_message/task_cancel/task_reply, acp_run; `task_revive` and `wait_for_user` are v1-only — v2 continues retained sessions through native `subagent(sessionID, prompt)` and uses the native `question` tool as the blocking boundary) | ✅ | ✅ `ctx.tool.transform` | v2 requires `options: {codemode: false}` on each registration (CodeMode split): without it a tool registers cleanly but is confined to the `execute` tool's JS runtime and session catalogs yield `Unknown tool: <name>`. The plugin stamps it on every adapted tool (`adaptTool` in `src/v2/adapters.ts`; additive field, older hosts ignore it). ast-grep needs its CLI binary (package, system, or lazy download); webfetch needs `jsdom` resolvable |
+| Tools (ast-grep, webfetch, task_status/task_cancel/task_reply, acp_run; `task_revive`, `task_message` and `wait_for_user` are v1-only — v2 continues retained sessions through native `subagent(sessionID, prompt)` and uses the native `question` tool as the blocking boundary) | ✅ | ✅ `ctx.tool.transform` | v2 requires `options: {codemode: false}` on each registration (CodeMode split): without it a tool registers cleanly but is confined to the `execute` tool's JS runtime and session catalogs yield `Unknown tool: <name>`. The plugin stamps it on every adapted tool (`adaptTool` in `src/v2/adapters.ts`; additive field, older hosts ignore it). ast-grep needs its CLI binary (package, system, or lazy download); webfetch needs `jsdom` resolvable |
 | Slash commands `/deepwork` `/reflect` `/loop` | ✅ | ✅ marker round-trip | — |
 | `/interview` | ✅ | ✅ marker command + trailing-message context bridge | `interview.enabled: false` removes the command, the v1 manager, and the v2 bridge entirely |
 | Message transforms (phase reminder, skills filter, image routing, display-name rewrite) | ✅ | ✅ via the single context hook | — |
@@ -479,7 +481,7 @@ side cannot be observed.
 | Built-in MCPs (context7, gh_grep) auto-registered | ✅ | ✅ `ctx.mcp.transform` | `ctx.mcp.transform` is present in all v2.0.x stable hosts; the runtime capability probe is belt-and-suspenders |
 | Background-job state persistence (tombstones, deletion epochs) | ➖ process-local | ✅ via `ctx.storage` | optional domain; absent → pure in-memory fallback, zero behavior change (see [Background job state](#background-job-state-rehydrate-probe-and-persistence)) |
 | Foreground model fallback (rate-limit failover) | ✅ | ⚠️ replay disabled; retry-hook steering active | v2's non-atomic `session.switchModel` + steer replay could alter/replay a newer turn, so only the in-place switch runs |
-| `/preset` (preset manager) | ✅ configuration writes; reload to apply | ✅ TUI entry (`./tui` → `dist/tui2.js`), with **Current session** / **Global default** selection; `/preset <name>` writes the global default | The command layer registers from an `append: "app"` slot render because `keymap.layer` is provider-scoped; commands carry an `id` and `slash.arguments`. The manager needs `ui.dialog.select` + `prompt` + `confirm`; feedback uses `ui.toast.show`. Session scope additionally requires server `ctx.storage`, session identity lookup and `ctx.rpc.register`, plus TUI `client.rpc`. It changes future subagent inference for the selected session, not its main model or existing children. User/project `.json` and `.jsonc` edits are watched (~300 ms debounce), including newly created candidates; they refresh defaults for future bindings, not saved snapshots. Global-write feedback acknowledges the refresh request, while session-apply feedback requires RPC confirmation. With persistence available, native subagent `progress` saves the child binding before the first prompt; `session.created` is not used to capture its profile. Reduced hosts retain legacy execution behavior. Non-TUI clients also get a server-side `/preset <name>` command (apply-only): the result is reported through the command error channel so the switch costs no model turn and adds no context. See [Preset switching](presets/preset-switching.md) for inheritance, reapplication and compatibility limits |
+| `/preset` (preset manager) | ✅ configuration writes; reload to apply | ✅ TUI entry (`./tui` → `dist/tui2.js`), with **Current session** / **Global default** selection; `/preset <name>` binds the current session | The command layer registers from an `append: "app"` slot render because `keymap.layer` is provider-scoped; commands carry an `id` and `slash.arguments`. The manager needs `ui.dialog.select` + `prompt` + `confirm`; feedback uses `ui.toast.show`. Session scope is a server-registered RPC domain — `ctx.rpc.register` on the plugin side, `client.rpc` on the TUI side — whose snapshots live in `ctx.storage`; all three are required members of the v2 plugin contract, so no host-version gate is involved. It changes future subagent inference for the selected session, not its main model or existing children. User/project `.json` and `.jsonc` edits are watched (~300 ms debounce), including newly created candidates; they refresh defaults for future bindings, not saved snapshots. Global-write feedback acknowledges the refresh request, while session-apply feedback requires RPC confirmation. With persistence available, native subagent `progress` saves the child binding before the first prompt; `session.created` is not used to capture its profile. Non-TUI clients also get a server-side `/preset <name>` command (apply-only): a name binds the invoking session, and the result is reported through the command error channel so the switch costs no model turn and adds no context. See [Preset switching](presets/preset-switching.md) for inheritance, reapplication and compatibility limits |
 | Default primary agent | ✅ finalized visible orchestrator identity | ✅ `draft.default(<visible orchestrator identity>)`; the canonical `orchestrator` entry remains a hidden alias when `displayName` is configured | v1 `default_agent` and v2 draft default target the same visible entry |
 | TUI default agent | ✅ orchestrator | ✅ host follows the default primary agent and hoists it to the head of the agent list | — |
 | Multiplexer (tmux/zellij/herdr/cmux-tui/kitty/wezterm panes) | ✅ | ✅ TUI plugin entry wires the client-owned pane lifecycle through a v2 host adapter: shared background service and `--server` hosts are supported, `--standalone` is fail-closed (one diagnostic per process, `/subagent` fallback — opens a tab without moving focus) | Defaults are host-specific: `"tui"` on v1 (`opencode attach <url> --session <id> --dir <dir>`); `"mini"` on v2 shared (`opencode mini --session <id>`) and remote (`opencode mini --server <url> --session <id>`), with the pane cwd pinned by the adapter. Explicit `viewer: "tui"` retains the v2 full-TUI commands with a positional directory; v1 `viewer: "mini"` appends `--mini` to attach (OpenCode >= 1.17.10), without extra cwd pinning. The `OPENCODE_PASSWORD` secret is injected through the multiplexer's spawn-time environment (or a Linux + POSIX-shell `/proc` bridge on zellij/cmux-tui), never through the viewer's command line — see [Secret handling](multiplexer-integration.md#known-limitations). Events are projected from `session.created` / `session.execution.*` / `session.idle` / `session.deleted`; directory attribution is recorded at `session.created` because execution events carry none |

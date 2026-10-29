@@ -1853,12 +1853,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         resolveCanonicalTaskRef: aliasAuthority.resolveCanonical,
         isDisposed: () => instanceDisposed,
       });
-      const taskMessageTools = createTaskMessageTool({
-        input: ctx,
-        backgroundJobBoard: backgroundJobBoard!,
-        resolveCanonicalTaskRef: aliasAuthority.resolveCanonical,
-        isDisposed: () => instanceDisposed,
-      });
       const taskReplyTools = createTaskReplyTool({
         input: ctx,
         backgroundJobBoard: backgroundJobBoard!,
@@ -1907,6 +1901,15 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           runtime.backgroundJobs.orchestratorWake.enabled &&
           (backgroundJobBoard?.hasRunning(sessionID) ?? false),
       });
+      const taskMessageTools =
+        hostFlavor !== 'v2' && !runtime.disabledTools.includes('task_message')
+          ? createTaskMessageTool({
+              input: ctx,
+              backgroundJobBoard: backgroundJobBoard!,
+              resolveCanonicalTaskRef: aliasAuthority.resolveCanonical,
+              isDisposed: () => instanceDisposed,
+            })
+          : {};
       lifecycleTaskTools = {
         ...taskCancelTools,
         ...taskMessageTools,
@@ -2749,6 +2752,19 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       taskSessionManagerHook?.['v2.registerDelegatedLaunchFromStructured'](
         input,
       ),
+    // v2-only extension handle (consumed by src/v2/setup.ts's prompt
+    // bridge): feed the prompt identity the host prepared for a session
+    // into the shared pending-call tracker. The awaited `session.prompt`
+    // hook carries the eventual inbox messageID and precedes every delayed
+    // chat.message / context forward, but it runs BEFORE the admission
+    // commits — so this is earliest capture, not proof of admission. Only
+    // the native outcome lane may stamp from it. No-op when the managed
+    // lifecycle is disabled (no lease).
+    'v2.notePromptAdmission': (sessionID: string, messageID: string) =>
+      admissionRuntimeLease?.pendingCallTracker.noteAdmission(
+        sessionID,
+        messageID,
+      ),
 
     agent: agents,
 
@@ -3450,6 +3466,15 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // v2 admission tracker — agent-discovery forwards agent/model
       // without parts.
       const messageID = input.messageID ?? output?.message?.id;
+      // V1-only: v1 has no prompt hook, so chat.message is the admission
+      // gate; on v2 the awaited `session.prompt` hook feeds the tracker
+      // earlier, and this delayed forward would only re-bind a live pending.
+      if (hostFlavor !== 'v2' && typeof messageID === 'string') {
+        admissionRuntimeLease?.pendingCallTracker.noteAdmission(
+          input.sessionID,
+          messageID,
+        );
+      }
       const inputParts = Array.isArray(input.parts) ? input.parts : [];
       const outputParts = Array.isArray(output?.parts) ? output.parts : [];
       const partsInternal = [...inputParts, ...outputParts].some(
@@ -3795,9 +3820,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
                   wakeScheduler:
                     runtime.backgroundJobsEnabled &&
                     runtime.backgroundJobs.orchestratorWake.enabled,
-                  taskMessage:
-                    runtime.backgroundJobsEnabled &&
-                    !runtime.disabledTools.includes('task_message'),
                   hostFlavor,
                   routingBlock: runtime.routingBlock,
                 });
@@ -4000,6 +4022,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         typeof taskSessionManagerHook
       >['v2.registerDelegatedLaunchFromStructured']
     >;
+    'v2.notePromptAdmission': (sessionID: string, messageID: string) => void;
   };
 
   return hooks;

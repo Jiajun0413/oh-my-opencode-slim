@@ -10,7 +10,6 @@ import {
 import type { PluginInput } from '@opencode-ai/plugin';
 import { createRevivedRunTracker } from '../hooks/task-session-manager/revived-run-tracker';
 import { createV1InterviewSessionRuntime } from '../interview/runtime';
-import { createTaskMessageTool } from '../tools/task-message';
 import { createTaskReviveTool } from '../tools/task-revive';
 import { createTaskStatusTool } from '../tools/task-status';
 import { BackgroundJobBoard } from '../utils/background-job-board';
@@ -23,7 +22,6 @@ import type { V2Context } from './types';
 const dispose: Array<() => void> = [];
 const context = { sessionID: 'parent', agent: 'orchestrator' } as never;
 const reviveArgs = { task_id: 'ses_child', prompt: 'Continue' };
-const messageArgs = { task_id: 'ses_child', message: 'Update' };
 
 beforeEach(() => {
   // Other tool suites mock this module globally. Keep this suite on its real shim.
@@ -42,8 +40,6 @@ function harness(
     retainedState?: 'completed' | 'cancelled';
     session?: Partial<V2Context['session']>;
     waitForIdleTimeoutMs?: number;
-    messageTimeoutMs?: number;
-    isDisposed?: () => boolean;
   } = {},
 ) {
   const host = {
@@ -121,17 +117,10 @@ function harness(
     abortRetryIntervalMs: 0,
     waitForIdleTimeoutMs: options.waitForIdleTimeoutMs,
   }).task_revive;
-  const message = createTaskMessageTool({
-    input,
-    backgroundJobBoard: board,
-    messageTimeoutMs: options.messageTimeoutMs,
-    isDisposed: options.isDisposed,
-  }).task_message;
   return {
     input,
     host,
     board,
-    message,
     revive,
     baseline,
     register,
@@ -571,124 +560,6 @@ describe('task controls through the real v2 client shim', () => {
       }
     },
   );
-  test.each([
-    'disposed',
-    'lease released',
-    'agent changed',
-    'current',
-  ] as const)(
-    'revalidates task authorization after the deferred agent lookup: %s',
-    async (change) => {
-      const entered = Promise.withResolvers<void>();
-      const lookup = Promise.withResolvers<{ agent: string }>();
-      let disposed = false;
-      const get = mock(() => {
-        entered.resolve();
-        return lookup.promise;
-      });
-      const h = harness({
-        running: true,
-        session: { get },
-        isDisposed: () => disposed,
-      });
-      const acquire = spyOn(h.board, 'acquireLease');
-      const pending = h.message.execute(messageArgs, context);
-      const settled = pending.then(
-        (value) => ({ value, error: undefined }),
-        (error: unknown) => ({ value: undefined, error }),
-      );
-      await entered.promise;
-      expect(h.host.prompt).not.toHaveBeenCalled();
-      const lease = acquire.mock.results
-        .map((result) => result?.value)
-        .find((value) => value?.kind === 'message');
-      if (!lease) throw new Error('Expected a held message lease');
-
-      if (change === 'disposed') disposed = true;
-      if (change === 'lease released') h.board.releaseLease(lease);
-      if (change === 'agent changed') {
-        const job = h.board.get('ses_child');
-        if (!job) throw new Error('Expected a tracked task');
-        job.agent = 'fixer';
-      }
-      const failure = {
-        disposed: /disposed/,
-        'lease released': /message lease is no longer valid/,
-        'agent changed': /agent changed while preparing/,
-      };
-      lookup.resolve({ agent: 'explorer' });
-      const result = await settled;
-      if (change === 'current') {
-        expect(result.error).toBeUndefined();
-        expect(String(result.value)).toContain('queued');
-        expect(h.host.prompt).toHaveBeenCalledTimes(1);
-        expect(h.host.prompt).toHaveBeenCalledWith({
-          sessionID: 'ses_child',
-          text: 'Update',
-          delivery: 'queue',
-          resume: false,
-        });
-      } else {
-        expect(result.error).toBeInstanceOf(Error);
-        expect((result.error as Error).message).toMatch(failure[change]);
-        expect(h.host.prompt).not.toHaveBeenCalled();
-      }
-      expect(get).toHaveBeenCalledTimes(1);
-      expect(h.host.switchAgent).not.toHaveBeenCalled();
-      expect(h.host.switchModel).not.toHaveBeenCalled();
-      expect(h.host.interrupt).not.toHaveBeenCalled();
-      const nextLease = h.board.acquireLease('ses_child', 1, 'message');
-      expect(nextLease).toBeDefined();
-      if (nextLease) h.board.releaseLease(nextLease);
-    },
-  );
-
-  test.each([
-    { agent: 'other-agent' },
-    {},
-    { error: 'lookup failed' },
-    undefined,
-  ])(
-    'refuses an unverified owning agent before writing: %j',
-    async (record) => {
-      const h = harness({
-        session: { get: mock(async () => record) as never },
-      });
-      await expect(
-        h.input.client.session.prompt({
-          path: { id: 'ses_child' },
-          body: {
-            agent: 'explorer',
-            noReply: true,
-            parts: [{ type: 'text', text: 'Update' }],
-          },
-        }),
-      ).rejects.toThrow('agent must match');
-      expect(h.host.prompt).not.toHaveBeenCalled();
-      expect(h.host.switchAgent).not.toHaveBeenCalled();
-      expect(h.host.switchModel).not.toHaveBeenCalled();
-    },
-  );
-
-  test('does not write if owning-agent lookup rejects or is unavailable', async () => {
-    for (const get of [
-      undefined,
-      mock(async () => {
-        throw new Error('lookup failed');
-      }),
-    ]) {
-      const h = harness({ session: { get } });
-      await expect(
-        h.input.client.session.prompt({
-          path: { id: 'ses_child' },
-          body: { agent: 'explorer', noReply: true, parts: [] },
-        }),
-      ).rejects.toThrow();
-      expect(h.host.prompt).not.toHaveBeenCalled();
-      expect(h.host.switchAgent).not.toHaveBeenCalled();
-    }
-  });
-
   test.each(
     ['v2', 'v1-idle', 'v1-absent'].flatMap((route) =>
       [
@@ -833,72 +704,6 @@ describe('task controls through the real v2 client shim', () => {
     expect(h.tracker.attemptStartedAtFor('ses_child', 2)).toBe(200);
     expect(h.onTerminal).toHaveBeenCalledTimes(1);
   });
-  test.each(['v1', 'v2'])(
-    'message selection policy preserves the %s contract',
-    async (flavor) => {
-      const h = harness({ running: true });
-      const prompt = mock(async () => ({}));
-      const messages = mock(async () => ({
-        data: [
-          {
-            info: {
-              role: 'assistant',
-              providerID: 'provider',
-              modelID: 'model',
-              variant: 'high',
-            },
-          },
-        ],
-      }));
-      const input =
-        flavor === 'v2'
-          ? h.input
-          : ({
-              client: { session: { messages, prompt } },
-              directory: '/test',
-            } as unknown as PluginInput);
-      const shimPrompt = spyOn(h.input.client.session, 'prompt');
-      const tool = createTaskMessageTool({
-        input,
-        backgroundJobBoard: h.board,
-      }).task_message;
-      expect(String(await tool.execute(messageArgs, context))).toContain(
-        'queued',
-      );
-      if (flavor === 'v1') {
-        expect(messages).toHaveBeenCalledTimes(1);
-        expect(prompt).toHaveBeenCalledWith(
-          expect.objectContaining({
-            body: {
-              agent: 'explorer',
-              model: { providerID: 'provider', modelID: 'model' },
-              variant: 'high',
-              noReply: true,
-              parts: [{ type: 'text', text: 'Update' }],
-            },
-          }),
-        );
-      } else {
-        expect(h.host.get).toHaveBeenCalledWith({ sessionID: 'ses_child' });
-        expect(h.host.context).not.toHaveBeenCalled();
-        expect(shimPrompt.mock.calls[0]?.[0].body).toEqual({
-          agent: 'explorer',
-          noReply: true,
-          parts: [{ type: 'text', text: 'Update' }],
-        });
-        expect(h.host.prompt).toHaveBeenCalledWith({
-          sessionID: 'ses_child',
-          text: 'Update',
-          delivery: 'queue',
-          resume: false,
-        });
-      }
-      expect(h.host.switchAgent).not.toHaveBeenCalled();
-      expect(h.host.switchModel).not.toHaveBeenCalled();
-      expect(h.host.synthetic).not.toHaveBeenCalled();
-    },
-  );
-
   test.each(['shim with files', 'interview notify'])(
     'preserves noReply intent from %s',
     async (caller) => {
@@ -957,63 +762,6 @@ describe('task controls through the real v2 client shim', () => {
       expect(h.host.prompt).not.toHaveBeenCalled();
       expect(h.host.switchAgent).not.toHaveBeenCalled();
       expect(h.host.switchModel).not.toHaveBeenCalled();
-    },
-  );
-
-  test.each(['reject', 'error response'] as const)(
-    'does not report queued or retry when the host returns %j',
-    async (failure) => {
-      const prompt = mock(async () => {
-        if (failure === 'reject') throw new Error('host refused');
-        return { error: 'host refused' };
-      });
-      const h = harness({ running: true, session: { prompt } });
-      await expect(h.message.execute(messageArgs, context)).rejects.toThrow(
-        'host refused',
-      );
-      expect(prompt).toHaveBeenCalledTimes(1);
-      expect(prompt).toHaveBeenCalledWith({
-        sessionID: 'ses_child',
-        text: 'Update',
-        delivery: 'queue',
-        resume: false,
-      });
-    },
-  );
-
-  test.each(['resolve', 'reject'] as const)(
-    'quarantines an admitted write until late %j without a second send',
-    async (settlement) => {
-      const send = Promise.withResolvers<unknown>();
-      const prompt = mock(() => send.promise);
-      const h = harness({
-        running: true,
-        session: { prompt },
-        messageTimeoutMs: 5,
-      });
-      const release = spyOn(h.board, 'releaseLease');
-      await expect(h.message.execute(messageArgs, context)).rejects.toThrow(
-        'transport timed out',
-      );
-      expect(release).not.toHaveBeenCalled();
-      expect(
-        h.board.acquireLease('ses_child', 1, 'cancellation'),
-      ).toBeUndefined();
-      expect(h.board.acquireLease('ses_child', 1, 'relaunch')).toBeUndefined();
-      if (settlement === 'resolve') send.resolve({});
-      else send.reject(new Error('late rejection'));
-      await Bun.sleep(0);
-      expect(release).toHaveBeenCalledTimes(1);
-      expect(prompt).toHaveBeenCalledTimes(1);
-      expect(prompt).toHaveBeenCalledWith({
-        sessionID: 'ses_child',
-        text: 'Update',
-        delivery: 'queue',
-        resume: false,
-      });
-      const lease = h.board.acquireLease('ses_child', 1, 'message');
-      expect(lease).toBeDefined();
-      if (lease) h.board.releaseLease(lease);
     },
   );
 
@@ -1204,47 +952,4 @@ describe('task controls through the real v2 client shim', () => {
       expect(h.register).not.toHaveBeenCalled();
     },
   );
-
-  test('v2 messaging is queue-only: no steer parameter reaches the host', async () => {
-    const h = harness({ running: true });
-    const shimPrompt = spyOn(h.input.client.session, 'prompt');
-    expect(Object.keys(h.message.args)).not.toContain('delivery');
-    const output = String(
-      await h.message.execute(
-        { task_id: 'ses_child', message: 'Update' },
-        context,
-      ),
-    );
-    expect(h.host.prompt).toHaveBeenCalledWith({
-      sessionID: 'ses_child',
-      text: 'Update',
-      delivery: 'queue',
-      resume: false,
-    });
-    expect(h.host.interrupt).not.toHaveBeenCalled();
-    expect(h.host.switchAgent).not.toHaveBeenCalled();
-    expect(h.host.switchModel).not.toHaveBeenCalled();
-    expect(h.host.synthetic).not.toHaveBeenCalled();
-    expect(h.host.wait).not.toHaveBeenCalled();
-    expect(h.host.get).toHaveBeenCalledWith({ sessionID: 'ses_child' });
-    expect(h.host.context).not.toHaveBeenCalled();
-    expect(output).not.toMatch(/read|applied|acknowledged/i);
-    expect(shimPrompt.mock.calls[0]?.[0].body.agent).toBe('explorer');
-    expect(shimPrompt.mock.calls[0]?.[0].body).not.toHaveProperty('delivery');
-    expect(output).toMatch(/queued/i);
-  });
-
-  test('queue mirror omits the removed delivery argument', async () => {
-    const h = harness({ running: true });
-    await h.message.execute(
-      { task_id: 'ses_child', message: 'Update' },
-      context,
-    );
-    expect(h.host.prompt).toHaveBeenCalledWith({
-      sessionID: 'ses_child',
-      text: 'Update',
-      delivery: 'queue',
-      resume: false,
-    });
-  });
 });

@@ -74,6 +74,26 @@ describe('v1 interview session runtime', () => {
     });
   });
 
+  test('continue preserves the agent the session is already running under', async () => {
+    const session = {
+      get: mock(async () => ({ data: { id: 'ses_1', agent: 'coworker' } })),
+      messages: mock(async () => ({ data: [] })),
+      promptAsync: mock(async () => ({})),
+    };
+    const runtime = createV1InterviewSessionRuntime({
+      client: { session },
+    } as never);
+
+    await runtime.continue('ses_1', 'next');
+
+    expect(session.promptAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: { id: 'ses_1' },
+        body: expect.objectContaining({ agent: 'coworker' }),
+      }),
+    );
+  });
+
   test('notify derives the agent from the newest user message, not a compaction turn', async () => {
     const session = {
       get: mock(async () => ({ data: { id: 'ses_1' } })),

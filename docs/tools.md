@@ -79,7 +79,7 @@ conservatively passes the path through. Disable with
 | Tool | Description |
 |------|-------------|
 | `task_status` | Check task status; `result: true` retrieves a completed result; `diagnostic: true` reads an unsuccessful child's partial excerpt |
-| `task_message` | Send a non-interrupting message and return `queued` (queue-only: no wake, no steer channel) |
+| `task_message` | Queue a bounded instruction into a running child's context without starting a new run (v1 only; on v2 steer with `subagent(sessionID, prompt)`) |
 | `task_reply` | Answer a child's pending question or permission request by task ID/alias and request ID. On v2, question replies require `session.form.reply`; otherwise answer questions in the host UI |
 | `task_cancel` | Stop a generation while retaining its session |
 | `task_revive` | Resume a retained session with a new instruction (v1 only; on v2 continue with `subagent(sessionID, prompt)`) |
@@ -88,7 +88,7 @@ conservatively passes the path through. Disable with
 The task controls use the task ID or its parent-scoped alias for the task being
 managed. `task_status` with an unknown or placeholder ID enumerates the
 session's recent task handles, including recently finished sessions, so a
-handle lost to compaction is recoverable from the error itself. `task_message` does not interrupt the current generation. `task_cancel`
+handle lost to compaction is recoverable from the error itself. `task_cancel`
 stops the generation but retains its session; it does not roll back partial edits.
 After cancelling a write-capable task, inspect and reconcile file changes before
 launching replacement work.
@@ -111,9 +111,10 @@ After abort settles, verification has its own time budget. The v2 session-info
 read uses only the remaining budget: timeout leaves the task uncertain and
 releases the lease without confirming cancellation or consuming late evidence.
 
-`task_message` retains its per-task message lease when the local timeout expires
-but the write transport is still pending. `noReply: true` prevents starting a
-turn, not mutating the transcript: a delayed update, including its captured
+`task_message` (v1 only) does not interrupt the current generation. It retains
+its per-task message lease when the local timeout expires but the write
+transport is still pending. `noReply: true` prevents starting a turn, not
+mutating the transcript: a delayed update, including its captured
 agent/model/variant, could otherwise alter the context of a reused generation.
 A timeout does not prove that the message was not delivered.
 
@@ -133,24 +134,21 @@ recovery of the taskID's exclusion. The model-identity lookup is a separate read
 its timeout signals cancellation of the lookup and releases the lease even if that read never
 settles, because no message write has started.
 
-On v2, `task_message` inherits the session's persisted agent/model/variant instead
-of reading and pinning selection per call. On v1 it pins the newest valid user or
-assistant model/variant in the bounded transcript, skipping compaction summaries;
-the session's saved selection can predate a hook rewrite. No valid identity means
-no message is sent.
-The write sends a real, non-synthetic `noReply` prompt with `resume: false` and
-`delivery: "queue"` in the same child session: no wake, no new run, no interrupt,
-and no agent/model/variant switch. There is no model-facing steering channel —
-the native delegation tool already steers a running child on v2, and v1 messages
-are queued. Queue consumption waits for an idle boundary and is not confirmed:
+`task_message` pins the newest valid user or assistant model/variant in the
+bounded transcript, skipping compaction summaries; the session's saved
+selection can predate a hook rewrite. No valid identity means no message is
+sent. The write sends a real, non-synthetic `noReply` prompt in the same child
+session: no wake, no new run, no interrupt, and no agent/model/variant switch.
+The host assigns the message id; the plugin records the id the host returns
+as the generation's amendment boundary (a response without one records no
+boundary). Queue consumption is not confirmed:
 `Message queued for … without launching or resuming it.`
 
 A success response confirms only transport acceptance, not consumption: the host
 admitted the input, with no proof the child read it. Consumption timing is
 host-dependent; a single step's multiple
 tool calls are not individually interleavable. Host errors are not retried
-with weaker semantics. A pending write still retains
-its message lease after timeout; this change does not alter that quarantine.
+with weaker semantics.
 
 `task_revive` resumes a retained session with a new instruction. A cancelled,
 errored, or stopped retained session may be revived immediately once its
@@ -269,26 +267,47 @@ is reported as uncertain or unavailable, not guessed. Truncation and unavailable
 evidence are explicit.
 Running children are refused; completed
 children point to `result: true`. The two modes are mutually exclusive.
-Most runs lack recorded message identities, so attribution is timestamp-based.
-Excerpts start after the latest real input in the window and exclude assistant
-messages created before the recorded run start. Input may predate registration;
-late registration can omit genuine early output. A missing input boundary,
-missing assistant creation times, or only pre-start evidence makes the excerpt
-unavailable.
-A delivered same-run queued `task_message` also moves the excerpt start:
-earlier output is omitted and labelled, without changing the recorded generation.
-Without an attributable assistant after that input, the excerpt is unavailable.
+
+### Diagnostic attribution
+
+Attribution is identity-fenced where the host surfaces admitted input ids:
+a tracked run records the admission id of its opening input (native launch,
+resumed call, or queued revive). The excerpt must sit behind an input
+recorded for this generation — the opening input, or a same-generation
+amendment the plugin itself delivered (a v1 `task_message` deposit, or a v2
+steer whose host execution provably admitted it). Both amendment channels
+capture the run's publication identity (generation + terminal revision) and
+commit only while that exact run still owns the row: still running at the
+captured revision, or its single terminal publication (`captured + 1`,
+which may land before the deposit's response or the steer's outcome commits).
+A deposit the host accepts only after the caller's deadline still records its
+boundary; the tool's own return stays a timeout rejection. A reopened or
+replaced run refuses. Any other later input — including the
+host-finish-to-publication gap — refuses with a stated reason instead of
+misattributing; an anchor outside the bounded window also refuses.
+An anchored excerpt keeps every assistant message after that recorded input
+in transcript order, even when it predates the generation's registration: a
+resumed foreground child can finish before the plugin registers its run.
+
+Runs without a recorded input id (older rows, hosts that surface no
+admission id) keep the timestamp fence: the excerpt starts after the latest
+real input in the window and excludes assistant messages created before the
+recorded run start. Those reads are labelled by the `evidence` line, never
+claimed as identity-attributed. Input may predate registration; late
+registration can omit genuine early output. A missing input boundary,
+missing assistant creation times, or only pre-start evidence makes an
+unanchored excerpt unavailable.
 
 Real input or assistant activity created after the recorded completion time
 returns `evidence: unavailable`. So do records without a completion time and
 legacy records whose recorded time predates their final assistant message.
-Compaction and system maintenance do not count as new run activity.
-A timing-dependent publication gap remains: a new run whose input reaches the
-child after the host finishes but before the plugin publishes the old outcome
-can still appear under the old generation. This can occur if the parent or
-another actor re-prompts the child during that gap.
-Run-identity fencing would require launch-time recording of run anchors and
-queued-input identities; that is a possible follow-up.
+Compaction and system maintenance do not count as new run activity. For
+anchored runs the publication gap is closed by the identity fence: a new
+input that reaches the child before the old outcome is published makes the
+recorded anchor no longer the latest input, so the read refuses — unless the
+input is the recorded amendment, which is exactly what keeps an
+amended-but-failed generation readable. Unanchored runs retain the
+documented timing gap.
 
 An owned untracked handle returns the ordinary read-only status plus a short
 notice that diagnostics require a tracked task record, not an excerpt or an

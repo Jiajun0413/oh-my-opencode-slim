@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import type { PluginConfig } from '../config';
 import {
   AgentOverrideConfigSchema,
@@ -21,6 +21,7 @@ import {
   mergeHostAgentConfigs,
   projectAgentRuntimeState,
 } from './index';
+import { TASK_NO_NESTED_DISPATCH } from './permissions';
 import { TASK_REJECTION_INSTRUCTION } from './task-rejection';
 
 const TEST_DIRECTORY = 'runtime-test-agents-index';
@@ -735,12 +736,7 @@ describe('orchestrator agent', () => {
       orchestrator as { config: { permission: Record<string, unknown> } }
     ).config.permission;
 
-    for (const toolName of [
-      'task_cancel',
-      'task_message',
-      'task_revive',
-      'task_status',
-    ]) {
+    for (const toolName of ['task_cancel', 'task_revive', 'task_status']) {
       expect(permission[toolName]).toBe('allow');
     }
   });
@@ -1176,12 +1172,7 @@ describe('tool permissions', () => {
       oracle as { config: { permission: Record<string, unknown> } }
     ).config.permission;
 
-    for (const toolName of [
-      'task_cancel',
-      'task_message',
-      'task_revive',
-      'task_status',
-    ]) {
+    for (const toolName of ['task_cancel', 'task_revive', 'task_status']) {
       expect(permission[toolName]).toBe('deny');
     }
   });
@@ -1458,6 +1449,21 @@ describe('agent classification', () => {
       }
     }
   });
+
+  test('declared primary custom agents project with mode primary', () => {
+    const configs = getAgentConfigs(
+      runtimeFor({
+        agents: {
+          coworker: { primary: true, model: 'test/coworker-model' },
+          reviewer: { model: 'test/reviewer-model' },
+        },
+      }),
+    );
+
+    expect(configs.coworker.mode).toBe('primary');
+    expect(configs.orchestrator.mode).toBe('primary');
+    expect(configs.reviewer.mode).toBe('subagent');
+  });
 });
 
 describe('createAgents', () => {
@@ -1527,6 +1533,75 @@ describe('createAgents', () => {
     expect(names).toContain('designer');
     expect(names).toContain('oracle');
     expect(names).toContain('fixer');
+  });
+
+  test('declared primaries get orchestration defaults, not subagent defaults', () => {
+    const runtime = runtimeFor({
+      // Observer must be enabled for the v2 nested-dispatch stance.
+      disabled_agents: [],
+      agents: {
+        coworker: {
+          primary: true,
+          model: 'test/coworker-model',
+          permission: { question: 'deny' },
+        },
+        reviewer: { model: 'test/reviewer-model' },
+      },
+    });
+    const agents = createAgents(runtime, { hostFlavor: 'v2' });
+    const coworker = agents.find((a) => a.name === 'coworker');
+    const reviewer = agents.find((a) => a.name === 'reviewer');
+
+    expect(coworker?.description).toBe("Primary orchestrator 'coworker'");
+    expect(reviewer?.description).toBe("Custom subagent 'reviewer'");
+    expect(coworker?.config.prompt).toContain('primary orchestrator');
+
+    const coworkerPermission = (
+      coworker as { config: { permission: Record<string, unknown> } }
+    ).config.permission;
+    // Primary can delegate and manage tasks (like the orchestrator), but
+    // explicit override config wins over the 'allow' default.
+    expect(coworkerPermission.question).toBe('deny');
+    expect(coworkerPermission.task_status).toBe('allow');
+    expect(coworkerPermission.task).toBeUndefined();
+    // Runtime guards accept only orchestrator-owned sessions, so declared
+    // primaries stay denied on the guarded five.
+    expect(coworkerPermission.task_cancel).toBe('deny');
+    expect(coworkerPermission.wait_for_user).toBe('deny');
+    expect(coworkerPermission.marketplace_manage).toBe('deny');
+
+    const reviewerPermission = (
+      reviewer as { config: { permission: Record<string, unknown> } }
+    ).config.permission;
+    expect(reviewerPermission.question).toBe('deny');
+    expect(reviewerPermission.task_status).toBe('deny');
+    // A plain custom agent keeps the nested-dispatch stance.
+    expect(reviewerPermission.task).toEqual({ ...TASK_NO_NESTED_DISPATCH });
+
+    const configs = getAgentConfigsFromDefinitions(runtime, agents);
+    expect(configs.coworker.mode).toBe('primary');
+    expect(configs.reviewer.mode).toBe('subagent');
+  });
+
+  test('primary warns only when set on a non-custom agent name', () => {
+    const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
+    createAgents(
+      runtimeFor({
+        disabled_agents: ['coworker'],
+        agents: {
+          // Disabled custom: valid flag, must not warn.
+          coworker: { primary: true, model: 'test/coworker-model' },
+          reviewer: { primary: true, model: 'test/reviewer-model' },
+          fixer: { primary: true, model: 'test/fixer-model' },
+        },
+      }),
+    );
+    const primaryWarns = warnSpy.mock.calls.filter((call) =>
+      String(call[0]).includes('.primary is ignored'),
+    );
+    expect(primaryWarns).toHaveLength(1);
+    expect(String(primaryWarns[0]?.[0])).toContain('agents.fixer.primary');
+    warnSpy.mockRestore();
   });
 
   test('creates exactly 5 agents by default (observer and council disabled)', () => {

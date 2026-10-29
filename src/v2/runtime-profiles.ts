@@ -9,7 +9,8 @@
  * session, and applies it before that child's first request:
  *
  * - `model`/`variant`: `session.switchModel` for host defaults; per-call models
- *   stay untouched (v2 prompts carry no model).
+ *   stay untouched (v2 prompts carry no model) unless the catalog proves one
+ *   retired (issue #1689) — then the current profile model is switched in.
  * - `temperature`/provider `options`: mutated onto the context hook's
  *   `options` record for that captured session only (never system/messages/
  *   tools — prompt bytes and tool catalogs stay untouched).
@@ -17,7 +18,7 @@
  * Existing/resumed child sessions keep the profile captured when they were
  * first seen; parents and foreign-agent sessions are never touched.
  */
-import type { V2Context, V2SessionContextEvent } from './types';
+import type { ModelRef, V2Context, V2SessionContextEvent } from './types';
 
 /** One agent's hot-applicable inference fields + sidebar projection. */
 export interface V2AgentRuntimeProfile {
@@ -57,6 +58,19 @@ function sameModel(a: unknown, b: V2AgentRuntimeProfile['model']): boolean {
     a.id === b.id &&
     (a.variant ?? 'default') === (b.variant ?? 'default')
   );
+}
+
+/** Extract the `ModelRef` the catalog lookup expects from a session's
+ *  model value (v2 spells it `{ providerID, id, variant? }`). */
+function modelRefOf(value: unknown): ModelRef | undefined {
+  if (!isRecord(value)) return undefined;
+  const providerID =
+    typeof value.providerID === 'string' && value.providerID.length > 0
+      ? value.providerID
+      : undefined;
+  const id =
+    typeof value.id === 'string' && value.id.length > 0 ? value.id : undefined;
+  return providerID && id ? { providerID, id } : undefined;
 }
 
 async function withProfileTimeout<T>(
@@ -99,6 +113,12 @@ export interface SessionProfileBridgeOptions {
    * when the session preset service is installed. */
   profilesForSession?: (sessionID: string) => Promise<V2AgentRuntimeProfiles>;
   preserveSessionModel?: (sessionID: string) => boolean;
+  /** Catalog check for a differing child model: `false` = provably retired
+   *  (switch to the current profile); `true`/`undefined` = keep the child's
+   *  model. Implementations must bound their own I/O (issue #1689). */
+  isModelAvailable?: (
+    ref: ModelRef,
+  ) => boolean | undefined | Promise<boolean | undefined>;
   /** Startup profiles, matching the host-registered agent defaults. */
   registeredProfiles?: V2AgentRuntimeProfiles;
   /** Plugin-defined agent ids; foreign children are never profiled. */
@@ -362,12 +382,36 @@ export function createSessionProfileBridge(
         return;
       }
       const registered = options.registeredProfiles?.[resolved.agent]?.model;
+      // A differing child model is a per-call override and kept — unless the
+      // catalog proves it retired (issue #1689); unknown keeps it, so this
+      // only ever switches away from a provably retired model. The cheap
+      // guards fold in first so a discarded decision never pays the lookup.
+      const perCallCandidate = Boolean(
+        profile.model &&
+          !options.preserveSessionModel?.(sessionID) &&
+          options.registeredProfiles &&
+          resolved.model &&
+          !sameModel(resolved.model, registered),
+      );
+      let keepPerCallModel = false;
+      if (perCallCandidate) {
+        const ref = modelRefOf(resolved.model);
+        let live: boolean | undefined;
+        try {
+          live = ref ? await options.isModelAvailable?.(ref) : undefined;
+        } catch (err) {
+          emitLog('[v2][profile] model catalog lookup failed', {
+            sessionID,
+            error: String(err),
+          });
+          live = undefined;
+        }
+        keepPerCallModel = live !== false;
+      }
       if (
         !profile.model ||
         options.preserveSessionModel?.(sessionID) ||
-        (options.registeredProfiles &&
-          resolved.model &&
-          !sameModel(resolved.model, registered))
+        keepPerCallModel
       ) {
         // Nothing to switch, or the host already runs a per-call model.
         captured.set(sessionID, profile);
@@ -379,6 +423,18 @@ export function createSessionProfileBridge(
         });
         return;
       }
+      // A rejected stale pin must land on a live model: the stored team's
+      // frozen profile can name the same retired model as the pin (both
+      // froze at creation), so refresh onto the current profile model
+      // instead (issue #1689). Capture that whole current profile so the
+      // session's temperature/provider options follow the live model rather
+      // than the retired one's.
+      const currentProfile =
+        perCallCandidate && !keepPerCallModel
+          ? options.profiles()[resolved.agent]
+          : undefined;
+      const appliedProfile = currentProfile?.model ? currentProfile : profile;
+      const targetModel = currentProfile?.model ?? profile.model;
       const switchModel = options.session?.switchModel;
       if (typeof switchModel !== 'function') {
         throw new Error('session.switchModel unavailable for runtime profile');
@@ -395,7 +451,7 @@ export function createSessionProfileBridge(
         await withProfileTimeout(
           switchModel.call(options.session, {
             sessionID,
-            model: profile.model,
+            model: targetModel,
           }),
           'session profile model switch timed out',
           options.switchTimeoutMs ?? PROFILE_SWITCH_TIMEOUT_MS,
@@ -407,12 +463,12 @@ export function createSessionProfileBridge(
         options.onSessionCaptureFailed?.(sessionID);
         throw err;
       }
-      captured.set(sessionID, profile);
+      captured.set(sessionID, appliedProfile);
       prune();
       emitLog('[v2][profile] applied model to child session', {
         sessionID,
         agent: resolved.agent,
-        model: profile.model,
+        model: appliedProfile.model,
       });
     })();
     pending.set(sessionID, task);

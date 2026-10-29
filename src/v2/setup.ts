@@ -62,6 +62,10 @@ import { createEventDirectoryScope } from '../utils/event-directory-scope';
 import { isRecord } from '../utils/guards';
 import { INTERNAL_INITIATOR_METADATA_KEY } from '../utils/internal-initiator';
 import { initLogger, log } from '../utils/logger';
+import {
+  type ModelImageCapabilityCache,
+  modelExistsInCatalog,
+} from '../utils/model-image-capability';
 import { OperationTimeoutError, withTimeout } from '../utils/session';
 import {
   adaptTool,
@@ -640,7 +644,9 @@ export interface V2SessionPromptBridge {
   /** `ctx.session.hook("prompt")` handler — one v1 chat.message delivery
    * per admitted input (dedupe by messageID). The FIRST admission per
    * session is deferred until the agent is learned (see
-   * `observeContext`) so it is delivered with parts + agent together. */
+   * `observeContext`) so it is delivered with parts + agent together.
+   * The raw admission feed (when wired) still fires immediately, before
+   * that deferral. */
   handlePrompt(event: V2SessionPromptEvent): Promise<void>;
   /** Record per-session agent/model from context events; forward NEWLY
    * learned state to the v1 chat.message hook, flushing any deferred
@@ -1679,6 +1685,7 @@ export function createPermissionRulesBridge(
  */
 export function createSessionPromptBridge(
   chatMessage: (input: V1ChatMessageInput, output: unknown) => Promise<void>,
+  notePromptAdmission?: (sessionID: string, messageID: string) => void,
 ): V2SessionPromptBridge {
   /** Last admitted messageID per session (once-per-admission dedupe). */
   const seenAdmissions = new Map<string, string>();
@@ -1715,6 +1722,17 @@ export function createSessionPromptBridge(
       if (seenAdmissions.get(sessionID) === messageID) return;
       seenAdmissions.set(sessionID, messageID);
       pruneSessionMap(seenAdmissions);
+      // Raw admission feed: earliest CAPTURE of the host-prepared id, taken
+      // before the state lookup, the parts rebuild, and any deferral — but
+      // the host fires this hook BEFORE the admission commits, so a captured
+      // id is never admission proof; only a native outcome may stamp. Never
+      // let it refuse the admission: `seenAdmissions` already holds the id,
+      // so a throw would lose the anchor for good instead of retrying.
+      try {
+        notePromptAdmission?.(sessionID, messageID);
+      } catch (err) {
+        log('[v2] raw admission feed failed', String(err));
+      }
 
       const state = sessionState.get(sessionID);
       const prompt: Record<string, unknown> = isRecord(event.prompt)
@@ -2592,6 +2610,9 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       // tui-state writer. Failure is honest: no swap, one logged cause.
       let currentProfiles: V2AgentRuntimeProfiles = {};
       let registeredProfiles: V2AgentRuntimeProfiles = {};
+      // Host model catalog cache for stale-pin invalidation (issue #1689).
+      // Dropped on every profile refresh so a retired/added model is re-read.
+      const modelCatalogCache: ModelImageCapabilityCache = {};
       let currentBundle: SessionTeamBundle | undefined;
       let profilesRegistry: typeof finalizedRegistry;
       const factoryRefreshProfiles = v1Hooks['v2.refreshProfiles'] as
@@ -2618,6 +2639,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
           return { ok: false as const, reason: 'Runtime profiles unavailable' };
         const result = await factoryRefreshProfiles(options);
         if (result.ok) {
+          modelCatalogCache.promise = undefined;
           const profiles = reconcileRuntimeProfileOptionKeys(
             currentProfiles,
             result.profiles,
@@ -2827,7 +2849,15 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
               });
               return;
             }
-            draft.add(createPresetCommand(directory));
+            draft.add(
+              createPresetCommand({
+                directory,
+                applyToSession: (sessionID: string, presetName: string) =>
+                  sessionPresets.apply(sessionID, presetName),
+                readSessionPreset: (sessionID: string) =>
+                  sessionPresets.readState(sessionID),
+              }),
+            );
           });
           disposers.push(() => reg.dispose());
         }
@@ -3016,6 +3046,11 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
           ),
         preserveSessionModel: (sessionID) =>
           sessionPresets.peek(sessionID)?.preserveModel === true,
+        isModelAvailable: (ref) =>
+          modelExistsInCatalog(ref, {
+            ...(ctx.model?.list ? { modelDomain: ctx.model } : {}),
+            cache: modelCatalogCache,
+          }),
         registeredProfiles,
         pluginAgents,
         session: ctx.session,
@@ -3041,7 +3076,18 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         // agent/model discovery (registration is unconditional on full
         // contexts — a registration failure fails setup).
         if (chatMessage) {
-          const bridge = createSessionPromptBridge(chatMessage);
+          // Raw admission feed: the v1 factory's synchronous extension,
+          // fed by the awaited prompt hook BEFORE the bridge's deferral
+          // so the shared pending-call tracker anchors on the
+          // host-admitted messageID, never on a delayed chat.message
+          // forward (which on v2 no longer feeds the tracker itself).
+          const notePromptAdmission = v1Hooks['v2.notePromptAdmission'] as
+            | ((sessionID: string, messageID: string) => void)
+            | undefined;
+          const bridge = createSessionPromptBridge(
+            chatMessage,
+            notePromptAdmission,
+          );
           promptBridge = bridge;
           const promptReg = await ctx.session.hook('prompt', async (event) => {
             if (!permissionSnapshotReady) {

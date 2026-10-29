@@ -85,6 +85,21 @@ export interface BackgroundJobRecord {
   taskGeneration: number;
   /** First launch observation for the current generation. */
   runStartedAt: number;
+  /**
+   * Host admission id (user message) of the input that opened this
+   * generation, when the host surfaced it. Identity anchor for run-scoped
+   * transcript attribution: never guessed, absent on unanchored rows.
+   */
+  runInputMessageID?: string;
+  /**
+   * Host admission id of the newest input the plugin itself delivered into
+   * the *same* generation (a v1 `task_message` deposit or a v2 native
+   * steer), when known. Extends the identity fence over in-generation
+   * amendments without accepting input from a later run: an excerpt may
+   * start at either this input or the opening anchor. Cleared with the
+   * anchor when a new generation starts.
+   */
+  amendmentInputMessageID?: string;
   lastLiveBusyAt?: number;
   completedAt?: number;
   resultSummary?: string;
@@ -201,6 +216,8 @@ export interface BackgroundJobLaunchInput {
   adopted?: true;
   /** Preserve the current run when this is a duplicate lifecycle observation. */
   preserveRun?: boolean;
+  /** Host admission id of this run's opening input, when known. */
+  runInputMessageID?: string;
   /**
    * This plugin's own tracked native task call launched a fresh background
    * child (not a resume). Ignored for adopted/provisional input and for
@@ -611,30 +628,55 @@ export class BackgroundJobBoard {
           // Attribution via the owning call promotes a placeholder even when
           // its run already reached a terminal state; state, generation, and
           // terminal evidence stay untouched.
-          if (!existing.provisional) return existing;
-          const promoted = { ...existing, provisional: false };
+          if (!existing.provisional) {
+            // Anchor backfill only under same-generation proof: a validated
+            // relaunch lease pins this observation to the existing run, so
+            // its absent anchor may be backfilled from the input. Without
+            // the lease the generation is unknown — no guessing, and no
+            // terminal-revision/state mutation.
+            if (
+              requestedLease &&
+              existing.runInputMessageID === undefined &&
+              input.runInputMessageID !== undefined
+            ) {
+              const anchored: BackgroundJobRecord = {
+                ...existing,
+                runInputMessageID: input.runInputMessageID,
+              };
+              this.setJob(anchored);
+              return anchored;
+            }
+            return existing;
+          }
+          const promoted = backfillRunAnchor(
+            { ...existing, provisional: false },
+            input,
+          );
           this.setJob(promoted);
           // The stop-time notification skipped this record while it was
           // still provisional; the attributed record owes the wake.
           this.notifyTerminalPublication(input.taskID);
           return promoted;
         }
-        const observed = {
-          ...existing,
-          provisional: false,
-          agent: input.agent || existing.agent,
-          description: input.description || existing.description,
-          objective: input.objective ?? existing.objective,
-          background: existing.background || input.background === true,
-          ...(existing.pluginLaunched ||
-          (input.pluginLaunched === true &&
-            input.adopted !== true &&
-            existing.provisional !== true &&
-            existing.externalOrigin !== true &&
-            (existing.background || input.background === true))
-            ? { pluginLaunched: true as const }
-            : {}),
-        } satisfies BackgroundJobRecord;
+        const observed = backfillRunAnchor(
+          {
+            ...existing,
+            provisional: false,
+            agent: input.agent || existing.agent,
+            description: input.description || existing.description,
+            objective: input.objective ?? existing.objective,
+            background: existing.background || input.background === true,
+            ...(existing.pluginLaunched ||
+            (input.pluginLaunched === true &&
+              input.adopted !== true &&
+              existing.provisional !== true &&
+              existing.externalOrigin !== true &&
+              (existing.background || input.background === true))
+              ? { pluginLaunched: true as const }
+              : {}),
+          },
+          input,
+        );
         this.setJob(observed);
         this.persistBackgroundChild(observed, { preserveDelivered: true });
         return observed;
@@ -665,6 +707,11 @@ export class BackgroundJobBoard {
         recoveredWithoutPrompt: undefined,
         lastLaunchedAt: now,
         runStartedAt: now,
+        // A new generation never inherits the previous run's input anchor;
+        // the caller re-stamps it when the host admission is known. The
+        // amendment id dies with the old generation for the same reason.
+        runInputMessageID: input.runInputMessageID,
+        amendmentInputMessageID: undefined,
         lastLiveBusyAt: now,
         lastUsedAt: now,
       } satisfies BackgroundJobRecord;
@@ -766,6 +813,9 @@ export class BackgroundJobBoard {
       taskID: input.taskID,
       // Keep the property absent for ordinary launches and legacy records.
       ...(input.provisional === true ? { provisional: true } : {}),
+      ...(input.runInputMessageID !== undefined
+        ? { runInputMessageID: input.runInputMessageID }
+        : {}),
       ...(input.adopted === true || input.provisional === true
         ? { externalOrigin: true as const }
         : input.pluginLaunched === true && input.background === true
@@ -943,6 +993,12 @@ export class BackgroundJobBoard {
       // execution: the per-run fence must move with it. Repeated busy
       // observations of an in-flight run keep the existing fence.
       runStartedAt: existing.state === 'running' ? existing.runStartedAt : now,
+      // Self-continued execution: the old input anchor would only cause
+      // refusals, so an unattributed restart falls back to timestamps. Its
+      // amendment id belongs to the previous generation for the same reason.
+      ...(existing.state === 'running'
+        ? {}
+        : { runInputMessageID: undefined, amendmentInputMessageID: undefined }),
       lastLiveBusyAt: now,
       activityRevision: existing.activityRevision + 1,
       timedOut: false,
@@ -1150,7 +1206,9 @@ export class BackgroundJobBoard {
    * plugin-initiated lifecycle operations. The kind label stays in the
    * lease and in refusal wording; only the acquisition machinery is
    * collapsed. Per-kind record-state preconditions:
-   * - cancellation/message: the run must be live;
+   * - cancellation/message: the run must be live (message leases own a
+   *   message-scope control operation, e.g. the v1-only task_message
+   *   queueing against a running child);
    * - relaunch: any state (it authorizes a same-ID relaunch observation);
    * - terminal-notification: a completed/error publication, optionally
    *   pinned to an exact terminalRevision; the lease then carries it so a
@@ -1391,6 +1449,40 @@ export class BackgroundJobBoard {
     return false;
   }
 
+  /** Stamp a plugin-delivered input (v1 `task_message` deposit, v2 native
+   *  steer) onto the run its captured `terminalRevision` still owns; only the
+   *  amendment ID changes — nothing reopens. */
+  noteRunAmendment(
+    taskID: string,
+    generation: number,
+    messageID: string,
+    terminalRevision: number,
+  ) {
+    if (!taskID || !messageID) return false;
+    const job = this.jobs.get(taskID);
+    if (!job || job.generation !== generation) return false;
+    if (job.terminalRevision === terminalRevision) {
+      // The captured run, still unpublished: running only. A terminal row
+      // sitting at the captured revision was stopped outside the publication
+      // ladder and never was this caller's run to amend.
+      if (job.state !== 'running') return false;
+    } else if (job.terminalRevision === terminalRevision + 1) {
+      // The captured run's single terminal transition: any of that run's
+      // terminal forms (completed/error/cancelled/stopped/reconciled) may
+      // retain the amendment. A running row here belongs to a later run that
+      // reused a publication slot.
+      if (job.state === 'running') return false;
+    } else {
+      // Any other revision is a reopened or replaced run: a reopen spends
+      // two transitions (terminal, then live busy) before it can publish
+      // again, so it can never sit at capture or capture + 1.
+      return false;
+    }
+    if (job.amendmentInputMessageID === messageID) return true;
+    this.setJob({ ...job, amendmentInputMessageID: messageID });
+    return true;
+  }
+
   hasRunning(parentSessionID: string): boolean {
     // A placeholder is not delegated work: it must neither gate a human
     // wait nor justify a recovery wake on its own. Direct iteration: the
@@ -1432,6 +1524,9 @@ export class BackgroundJobBoard {
       description?: string;
       objective?: string;
       background?: boolean;
+      /** Caller-evidenced input anchor; backfills an absent anchor only
+       *  (existing-first) and never overwrites a known one. */
+      runInputMessageID?: string;
     },
   ): BackgroundJobRecord | undefined {
     const record = this.jobs.get(taskID);
@@ -1443,14 +1538,17 @@ export class BackgroundJobBoard {
       return record;
     }
     const promoted = metadata
-      ? {
-          ...record,
-          provisional: false,
-          agent: metadata.agent || record.agent,
-          description: metadata.description || record.description,
-          objective: metadata.objective ?? record.objective,
-          background: record.background || metadata.background === true,
-        }
+      ? backfillRunAnchor(
+          {
+            ...record,
+            provisional: false,
+            agent: metadata.agent || record.agent,
+            description: metadata.description || record.description,
+            objective: metadata.objective ?? record.objective,
+            background: record.background || metadata.background === true,
+          },
+          metadata,
+        )
       : { ...record, provisional: false };
     this.setJob(promoted);
     if (promoted.state !== 'running') {
@@ -1828,6 +1926,20 @@ export function deriveFullObjective(input: {
     .map((line) => normalizeWhitespace(line))
     .find(Boolean);
   return firstPromptLine ?? undefined;
+}
+
+/** Backfill-only anchor merge for preserveRun/promotion paths: a known
+ *  anchor is never overwritten; an absent one takes the caller's supplied
+ *  anchor. The key stays absent on legacy records when nothing is
+ *  supplied, so record shape is unchanged. */
+function backfillRunAnchor(
+  record: BackgroundJobRecord,
+  input: { runInputMessageID?: string },
+): BackgroundJobRecord {
+  return record.runInputMessageID !== undefined ||
+    input.runInputMessageID === undefined
+    ? record
+    : { ...record, runInputMessageID: input.runInputMessageID };
 }
 
 function isReusable(job: BackgroundJobRecord): boolean {

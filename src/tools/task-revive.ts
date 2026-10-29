@@ -298,6 +298,9 @@ export function createTaskReviveTool(
             background: true,
             relaunchLease,
             now: admissionStartedAt,
+            // Identity anchor: the client-chosen input id this revive sends
+            // is the exact transcript message the new generation runs on.
+            runInputMessageID: promptMessageID,
           });
           revivedRunTracker.register({
             taskID: launched.taskID,

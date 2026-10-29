@@ -201,6 +201,7 @@ This allows consumers to import directly from `src/config` rather than individua
 - `options`: Provider-specific model options
 - `displayName`: Custom display name for the agent
 - `color`: Agent display color as a six-digit hex value or OpenCode theme color
+- `primary`: Declare a custom agent as a peer primary orchestrator (SDK mode `primary`; ignored on built-in names)
 
 ### CouncilConfig
 - `presets`: Named council presets (map of councillor name → CouncillorConfig)

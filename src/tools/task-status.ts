@@ -726,6 +726,17 @@ function diagnosticField(value: string, maxBytes = 512): string {
     : tail;
 }
 
+/** Attribution label for a successful excerpt: identity-fenced only when the
+ * run recorded its opening input id; otherwise explicitly timestamp-based. */
+function diagnosticEvidenceLabel(runInputMessageID: string | undefined) {
+  return runInputMessageID === undefined
+    ? 'transcript (timestamp)'
+    : 'transcript (identity)';
+}
+
+/** Longest possible attribution label, for byte budgeting. */
+const LONGEST_EVIDENCE = diagnosticEvidenceLabel(undefined);
+
 function diagnosticRefusal(taskID: string, state: string): string {
   return [
     `Task ${diagnosticField(taskID)}`,
@@ -746,6 +757,11 @@ function renderDiagnostic(
     reason?: string;
     runStartedAt: number;
     completedAt?: number;
+    /** Recorded admission id of this run's opening input, when known. */
+    runInputMessageID?: string;
+    /** Recorded admission id of a same-generation amendment the plugin
+     *  delivered, when known. */
+    amendmentInputMessageID?: string;
   },
   transcript: unknown,
   unavailable?: string,
@@ -758,13 +774,18 @@ function renderDiagnostic(
       `terminal_reason: ${diagnosticField(reason)}`,
       'partial_output: true (non-final excerpt; not the task result; read-only)',
     ].join('\n');
-  // Reserve the entire envelope, including the longest truncation label. The
-  // remaining byte budget belongs to the excerpt, not the whole 6 KiB.
-  const footer = `\nexcerpt_end\ntruncated: messages,chars\nevidence: transcript\n${DIAGNOSTIC_NEXT}`;
+  // Reserve the entire envelope, including the longest truncation label and
+  // the longer attribution label. The remaining byte budget belongs to the
+  // excerpt, not the whole 6 KiB.
+  const evidence = diagnosticEvidenceLabel(info.runInputMessageID);
+  const footerFor = (label: string) =>
+    `\nexcerpt_end\ntruncated: messages,chars\nevidence: ${label}\n${DIAGNOSTIC_NEXT}`;
   const budget =
     DIAGNOSTIC_MAX_BYTES -
     new TextEncoder().encode(
-      `${headerFor(info.reason ?? 'x'.repeat(512))}\nexcerpt_begin\n${footer}`,
+      `${headerFor(info.reason ?? 'x'.repeat(512))}\nexcerpt_begin\n${footerFor(
+        LONGEST_EVIDENCE,
+      )}`,
     ).byteLength;
   const excerpt = unavailable
     ? { unavailable }
@@ -772,6 +793,12 @@ function renderDiagnostic(
         maxBytes: budget,
         runStartedAt: info.runStartedAt,
         completedAt: info.completedAt,
+        ...(info.runInputMessageID !== undefined
+          ? { inputMessageID: info.runInputMessageID }
+          : {}),
+        ...(info.amendmentInputMessageID !== undefined
+          ? { amendmentMessageID: info.amendmentInputMessageID }
+          : {}),
       });
   const header = headerFor(
     info.reason ??
@@ -780,7 +807,7 @@ function renderDiagnostic(
   );
   if ('unavailable' in excerpt)
     return `${header}\nexcerpt: none (evidence unavailable)\nevidence: unavailable (${diagnosticField(excerpt.unavailable)})\n${DIAGNOSTIC_NEXT}`;
-  return `${header}\nexcerpt_begin\n${excerpt.text}\nexcerpt_end\ntruncated: ${excerpt.truncated}\nevidence: transcript\n${DIAGNOSTIC_NEXT}`;
+  return `${header}\nexcerpt_begin\n${excerpt.text}\nexcerpt_end\ntruncated: ${excerpt.truncated}\nevidence: ${evidence}\n${DIAGNOSTIC_NEXT}`;
 }
 
 /** Diagnostic reads deliberately bypass snapshots, the gate, and consumption. */
@@ -814,10 +841,7 @@ async function readTaskDiagnostic(
       );
     const state = terminalStateOf(job);
     if (!DIAGNOSTIC_TERMINALS.has(state))
-      return diagnosticRefusal(
-        job.taskID,
-        state === 'completed' ? state : 'running',
-      );
+      return diagnosticRefusal(job.taskID, state);
     const generation = job.generation;
     const revision = job.terminalRevision;
     const runStartedAt = job.runStartedAt;
@@ -872,6 +896,12 @@ async function readTaskDiagnostic(
         reason,
         runStartedAt,
         completedAt,
+        ...(job.runInputMessageID !== undefined
+          ? { runInputMessageID: job.runInputMessageID }
+          : {}),
+        ...(job.amendmentInputMessageID !== undefined
+          ? { amendmentInputMessageID: job.amendmentInputMessageID }
+          : {}),
       },
       transcript,
       unavailable,

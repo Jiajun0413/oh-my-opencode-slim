@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { OhMyOpenCodeLite } from '../../index';
 import { createCancelTaskTool } from '../../tools/cancel-task';
-import { createTaskMessageTool } from '../../tools/task-message';
 import { createTaskReplyTool } from '../../tools/task-reply';
 import { createTaskReviveTool } from '../../tools/task-revive';
 import { createTaskStatusTool } from '../../tools/task-status';
@@ -593,7 +592,6 @@ describe('canonical alias reference', () => {
     };
     const tools = {
       ...createCancelTaskTool(shared),
-      ...createTaskMessageTool(shared),
       ...createTaskReplyTool(shared),
       ...createTaskStatusTool(shared),
       ...createTaskReviveTool({
@@ -608,12 +606,6 @@ describe('canonical alias reference', () => {
     );
     expect(String(cancel)).toContain('No action was sent');
     expect(String(cancel)).not.toContain('SECRET-B');
-    await expect(
-      tools.task_message.execute(
-        { task_id: 'fix-1', message: 'hello' },
-        context as never,
-      ),
-    ).rejects.toThrow(/No action was sent/);
     await expect(
       tools.task_reply.execute(
         { task_id: 'fix-1', request_id: 'req_1', reply: 'once' },

@@ -14,7 +14,6 @@ import { createBackgroundJobTerminalGate } from '../utils/background-job-termina
 import * as opencodeClient from '../utils/opencode-client';
 import { buildPluginInput } from '../v2/client-shim';
 import type { V2Context } from '../v2/types';
-import { createTaskMessageTool } from './task-message';
 import { createTaskReviveTool } from './task-revive';
 
 const disposals: Array<() => void> = [];
@@ -153,13 +152,6 @@ function harness(
     recover,
     probe,
     run,
-    message: () =>
-      createTaskMessageTool({
-        input,
-        backgroundJobBoard: board,
-      }).task_message.execute({ sessionID: childID, message: 'Correction' }, {
-        sessionID: parentID,
-      } as never),
     append: (...messages: unknown[]) => transcript.push(...messages),
     deliver: () => {
       if (!queued) throw new Error('Expected a queued prompt');
@@ -170,16 +162,6 @@ function harness(
     },
   };
 }
-
-test('queue remains available while a revived continuation is pending', async () => {
-  const h = harness({ busy: true });
-  await h.revive();
-  await expect(h.message()).resolves.toContain('queued');
-  expect(h.prompt.mock.calls[1]?.[0]).toMatchObject({
-    delivery: 'queue',
-    resume: false,
-  });
-});
 
 test('v2 adapter wakes an idle untracked owned session once and delivers its new answer', async () => {
   const h = harness();

@@ -522,6 +522,17 @@ export async function handleToolExecuteBefore(
           );
         }
         deps.backgroundJobBoard.releaseLease(fence);
+        // The steer amends THIS run: fence the pending on the board's own
+        // run identity (generation + terminalRevision). The amendment is
+        // stamped only once the host proves the call actually ran (the
+        // structured launch lane) and only while that exact run still owns
+        // the record — a rejected call leaves nothing behind, and a
+        // reopened run can never inherit the boundary.
+        pendingCall.steerAmendment = {
+          taskID: remembered.taskID,
+          generation: remembered.generation,
+          terminalRevision: remembered.terminalRevision,
+        };
       }
       if (!steered) {
         const relaunchLease = deps.backgroundJobBoard.acquireLease(
@@ -715,6 +726,8 @@ export async function handleToolExecuteAfter(
       ): PendingTaskCall | undefined;
       release?(call: PendingTaskCall): void;
     };
+    /** Session's first host-confirmed input admission, when surfaced. */
+    firstAdmission?(sessionID: string): string | undefined;
     taskContextTracker: {
       pendingManagedTaskIds: Set<string>;
       addContext(taskId: string, files: ContextFile[]): void;
@@ -1011,6 +1024,11 @@ export async function handleToolExecuteAfter(
     // (identity-unresolved pendings paint nothing, per the identity rule),
     // and once promoted the child is supervised and context-tracked like
     // any parsed launch.
+    const runAnchor = resolveRunInputMessageID(
+      taskId,
+      pending,
+      deps.firstAdmission,
+    );
     const promoted = deps.backgroundJobBoard.promoteProvisional(
       taskId,
       pending.parentSessionId,
@@ -1021,6 +1039,9 @@ export async function handleToolExecuteAfter(
             description: pending.label,
             objective: pending.fullObjective,
             background: pending.background,
+            ...(runAnchor !== undefined
+              ? { runInputMessageID: runAnchor }
+              : {}),
           },
     );
     if (promoted && !promoted.provisional) {
@@ -1087,6 +1108,26 @@ function adoptHostConfirmedBackground(
   void pending.concurrencyTicket.ready.catch(() => {});
 }
 
+type FirstAdmissionLookup = (sessionID: string) => string | undefined;
+
+/** Run-identity anchor for a launch registration. A resumed run binds ONLY
+ *  its own pending's confirmed admission (`inputMessageID`): the session's
+ *  first-admission map may predate this generation and would re-anchor the
+ *  old run. */
+function resolveRunInputMessageID(
+  taskID: string,
+  pending: PendingTaskCall,
+  firstAdmission?: FirstAdmissionLookup,
+): string | undefined {
+  if (pending.identityUnresolved) return undefined;
+  if (pending.resumedTaskId !== undefined) {
+    return typeof pending.inputMessageID === 'string'
+      ? pending.inputMessageID
+      : undefined;
+  }
+  return firstAdmission?.(taskID);
+}
+
 function registerTaskOutputLaunch(
   taskID: string,
   pending: PendingTaskCall,
@@ -1099,6 +1140,9 @@ function registerTaskOutputLaunch(
       taskID: string,
       lifecycleEpoch: number,
     ) => boolean;
+    /** Session's first host-confirmed input admission for the child, when
+     *  surfaced. Anchors fresh runs only; resumed runs bind their pending. */
+    firstAdmission?: FirstAdmissionLookup;
   },
 ): ReturnType<BackgroundJobBoard['get']> {
   if (deps.isStaleDeletedTaskOutput?.(taskID, pending.lifecycleEpoch)) {
@@ -1193,6 +1237,17 @@ function registerTaskOutputLaunch(
       pending.resumedTaskId === undefined
         ? { pluginLaunched: true as const }
         : {}),
+      // Identity anchor: computed once by resolveRunInputMessageID (see its
+      // contract) and shared with the ID-only promotion path. Stale or
+      // missing evidence stays absent (timestamp fallback), never guessed.
+      ...(() => {
+        const anchor = resolveRunInputMessageID(
+          taskID,
+          pending,
+          deps.firstAdmission,
+        );
+        return anchor === undefined ? {} : { runInputMessageID: anchor };
+      })(),
       preserveRun:
         pending.earlyRegisteredTaskID === taskID ||
         pending.resumedTaskId === undefined,
@@ -1246,6 +1301,9 @@ export interface RegisterDelegatedLaunchDeps {
   ) => boolean;
   bindConcurrencyTicket?: (taskID: string, pending: PendingTaskCall) => void;
   clearRehydrateTombstone?: (taskID: string) => void;
+  /** Session's first host-confirmed input admission for the child, when
+   *  surfaced. Anchors fresh runs only; resumed runs bind their pending. */
+  firstAdmission?: FirstAdmissionLookup;
 }
 
 export interface DelegatedLaunchFromStructuredInput {
@@ -1272,11 +1330,40 @@ export interface DelegatedLaunchFromStructuredInput {
   handledByWrapper?: boolean;
 }
 
+/** Stamp a native steer's amendment boundary. The admitted id is read LATE
+ *  (here, not when observed), so an admission recorded during the call's
+ *  extent either becomes the evidence or turns it into a refusal. */
+function noteSteerAmendment(
+  pending: PendingTaskCall,
+  deps: Pick<RegisterDelegatedLaunchDeps, 'backgroundJobBoard'>,
+): void {
+  const fence = pending.steerAmendment;
+  if (!fence) return;
+  const admitted = pending.inputMessageID;
+  if (typeof admitted !== 'string') return;
+  deps.backgroundJobBoard.noteRunAmendment(
+    fence.taskID,
+    fence.generation,
+    admitted,
+    fence.terminalRevision,
+  );
+}
+
 export async function registerDelegatedLaunchFromStructured(
   input: DelegatedLaunchFromStructuredInput,
   deps: RegisterDelegatedLaunchDeps,
 ): Promise<BackgroundJobRecord | undefined> {
   try {
+    if (
+      input.handledByWrapper === true &&
+      input.exactCallConfirmed &&
+      !input.pending.identityUnresolved &&
+      input.pending.steerAmendment &&
+      input.pending.steerAmendment.taskID === input.childTaskID &&
+      input.pending.resumedTaskId === input.childTaskID
+    ) {
+      noteSteerAmendment(input.pending, deps);
+    }
     if (input.background && !input.pending.background) {
       adoptHostConfirmedBackground(input.pending, deps);
     }

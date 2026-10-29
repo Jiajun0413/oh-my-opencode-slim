@@ -812,6 +812,8 @@ export function createTaskSessionManagerHook(
           },
           bindConcurrencyTicket: (taskID, tracked) =>
             tracked.concurrencyTicket?.bind(taskID),
+          firstAdmission: (sessionID) =>
+            pendingCallTracker.firstAdmission(sessionID),
           clearRehydrateTombstone: (taskID) =>
             clearBackgroundJobSuppression(backgroundJobBoard, taskID),
         },
@@ -938,6 +940,8 @@ export function createTaskSessionManagerHook(
         recordLifecycleSuppression: (taskID) =>
           recordBackgroundJobSuppression(backgroundJobBoard, taskID),
         pendingCallTracker,
+        firstAdmission: (sessionID) =>
+          pendingCallTracker.firstAdmission(sessionID),
         taskContextTracker,
         clearRehydrateTombstone: (taskID) => {
           clearBackgroundJobSuppression(backgroundJobBoard, taskID);

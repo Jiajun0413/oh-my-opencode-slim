@@ -75,7 +75,7 @@ export const ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT =
  *   the phase-reminder first-anchor change, so the phaseReminder metadata veto
  *   below applies only to that anchored message; non-anchor historical user
  *   messages carry no tag and fall through to the remaining arms;
- * - `noReply` prompts (task_message child nudges, interview URL
+ * - `noReply` prompts (interview URL
  *   notifications) never expect an operator turn;
  * - v2 command-marker submits (`ctx.session.prompt` text-only submits) carry
  *   no chat.message messageID identity, so they fail the operator-identity
@@ -2819,7 +2819,7 @@ export function createOrchestratorWakeScheduler(
         outputMessage.role !== 'user') ||
       !Array.isArray(parts) ||
       parts.some(isInternalInitiatorPart) ||
-      // Non-operator nudges (task_message noReply injections, interview
+      // Non-operator nudges (interview
       // URL notifications, v2 command-marker submits, board/phase synthetic
       // tails) arrive as synthetic parts, internal-initiator parts, or
       // unmarked plain-text injections with no operator message identity.
