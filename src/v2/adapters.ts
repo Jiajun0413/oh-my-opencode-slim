@@ -110,7 +110,7 @@ export function adaptPermissions(
 }
 
 /** Model-visible identifier parameter for control tools (`task_status`,
- * `task_reply`, `task_revive`, `task_message`, `task_cancel`) —
+ * `task_reply`, `task_revive`, `task_cancel`) —
  * the same per-host vocabulary as the delegation resume param. v2 hosts use
  * `sessionID`; v1 hosts (and any unknown flavor) use `task_id`. */
 export function controlParamName(hostFlavor: string | undefined): string {

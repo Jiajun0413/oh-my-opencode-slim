@@ -257,11 +257,10 @@ or a hook-driven completion marks them terminal. Use `task_status` to inspect a
 task and `task_status` with `result: true` to collect its result; a result read
 is a read, not a required step before every continuation.
 
-- `task_message` sends a non-interrupting, queue-only message
-  (`noReply`, `resume: false`, `delivery: "queue"`). It never wakes, steers,
-  resumes, or interrupts the child, and acceptance does not mean the child read
-  it. To steer a running child, use the native delegation call
-  (`subagent(sessionID, prompt)` on v2).
+- `task_message` (v1 only) sends a non-interrupting, queue-only message
+  (`noReply`, `resume: false`). It never wakes, steers, resumes, or interrupts
+  the child, and acceptance does not mean the child read it. To steer a running
+  child on v2, use the native delegation call (`subagent(sessionID, prompt)`).
 - `task_cancel` stops a generation and retains its session. Inspect and
   reconcile partial file changes before launching replacement work.
 - `task_revive` (v1 only) resumes a retained session after its state is verified

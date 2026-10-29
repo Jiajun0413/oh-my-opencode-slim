@@ -556,7 +556,7 @@ export const BackgroundJobsConfigStrictSchema = z.object({
     .boolean()
     .default(true)
     .describe(
-      'Master switch for the OMOS managed background-task lifecycle (job board, retention, wake scheduler, wall-clock watchdog, terminal gate, and the task_cancel/task_message/task_status/task_reply tools). When false, none of that runs and the native OpenCode task/subagent machinery is left completely untouched; every other backgroundJobs key stays accepted but inert. Default true.',
+      'Master switch for the OMOS managed background-task lifecycle (job board, retention, wake scheduler, wall-clock watchdog, terminal gate, and the task_cancel/task_status/task_reply tools). When false, none of that runs and the native OpenCode task/subagent machinery is left completely untouched; every other backgroundJobs key stays accepted but inert. Default true.',
     ),
   maxSessionsPerAgent: z.number().int().min(1).max(10).default(2),
   maxContextLines: z

@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { z } from 'zod';
 import { BackgroundJobBoard } from '../utils/background-job-board';
-import { createTaskMessageTool } from './task-message';
 import { idParamFor, readTaskRef, taskRefArgs } from './task-ref';
 import { createTaskStatusTool } from './task-status';
 
@@ -23,12 +22,6 @@ function v2ControlTools() {
       def: createTaskStatusTool({ input, backgroundJobBoard: board })
         .task_status,
       base: {},
-    },
-    {
-      name: 'task_message',
-      def: createTaskMessageTool({ input, backgroundJobBoard: board })
-        .task_message,
-      base: { message: 'hi' },
     },
   ];
 }
@@ -117,20 +110,20 @@ describe('task-ref', () => {
     }
   });
 
-  test('task_message reports a missing id instead of an unknown task', async () => {
+  test('task_status reports a missing id instead of an unknown task', async () => {
     const board = new BackgroundJobBoard();
     const input = { directory: '/test', client: {}, hostFlavor: 'v2' } as never;
-    const { task_message } = createTaskMessageTool({
+    const { task_status } = createTaskStatusTool({
       input,
       backgroundJobBoard: board,
     });
     await expect(
-      task_message.execute(
-        { message: 'hi' } as never,
+      task_status.execute(
+        {} as never,
         {
           sessionID: 'parent-1',
         } as never,
       ),
-    ).rejects.toThrow('task_message requires sessionID');
+    ).rejects.toThrow('task_status requires sessionID');
   });
 });

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { BackgroundJobBoard as ProductionBoard } from '../utils/background-job-board';
 import { BackgroundJobBoard } from '../utils/background-job-fixture';
+import { diagnosticExcerptOf } from '../utils/child-transcript';
 import { createTaskMessageTool } from './task-message';
 
 let client: Record<string, any>;
@@ -10,18 +11,33 @@ function registerRunningChild(
   board: BackgroundJobBoard,
   taskID = 'ses_child1',
   parent = 'parent-1',
+  runInputMessageID?: string,
 ): void {
   board.registerLaunch({
     taskID,
     parentSessionID: parent,
     agent: 'fixer',
     description: 'implement',
+    ...(runInputMessageID !== undefined ? { runInputMessageID } : {}),
     now: 0,
   });
 }
 
+/** A real v1 id: `msg_` + ascending hex timestamp, assigned by the host. */
+const HOST_MESSAGE_ID = 'msg_019a2b3c4d5eAbCdEfGhIjKlMn';
+
+/** What the v1 host returns for a noReply prompt: the stored user message. */
+function hostAccepted() {
+  return { data: { info: { id: HOST_MESSAGE_ID, role: 'user' }, parts: [] } };
+}
+
 function makePrompt(): ReturnType<typeof mock> {
-  return mock(async () => ({}));
+  return mock(async () => hostAccepted());
+}
+
+/** Deterministic drain: late settlement runs only microtasks, never timers. */
+async function drainMicrotasks(): Promise<void> {
+  for (let tick = 0; tick < 8; tick += 1) await Promise.resolve();
 }
 
 function makeSession(prompt: ReturnType<typeof mock>) {
@@ -40,13 +56,9 @@ function makeSession(prompt: ReturnType<typeof mock>) {
   };
 }
 
-function createTool(board: BackgroundJobBoard, hostFlavor?: string) {
+function createTool(board: BackgroundJobBoard) {
   return createTaskMessageTool({
-    input: {
-      directory: '/test',
-      client,
-      ...(hostFlavor ? { hostFlavor } : {}),
-    } as any,
+    input: { directory: '/test', client } as any,
     backgroundJobBoard: board,
   }).task_message;
 }
@@ -59,12 +71,20 @@ function createToolWithTimeout(board: BackgroundJobBoard, timeoutMs: number) {
   }).task_message;
 }
 
+/** Execute the default tool's task_message for ses_child1 as parent-1. */
+function send(board: BackgroundJobBoard, message: string, timeoutMs?: number) {
+  const tool =
+    timeoutMs === undefined
+      ? createTool(board)
+      : createToolWithTimeout(board, timeoutMs);
+  return tool.execute({ task_id: 'ses_child1', message }, {
+    sessionID: 'parent-1',
+  } as any);
+}
+
 describe('task_message', () => {
   test('the schema-level message cap admits 2000 chars and rejects 2001', async () => {
-    // The bound lives in the zod schema the host enforces before execute()
-    // runs (the plugin cannot reword that rejection), so the pin targets
-    // the schema itself. Literal values: retuning the cap must explicitly
-    // touch this test.
+    // The cap lives in the host-enforced zod schema; retuning it touches this.
     const tool = createTool(new BackgroundJobBoard());
     expect(tool.args.message.safeParse('a'.repeat(2000)).success).toBe(true);
     expect(tool.args.message.safeParse('a'.repeat(2001)).success).toBe(false);
@@ -76,12 +96,7 @@ describe('task_message', () => {
     const prompt = makePrompt();
     client = { session: makeSession(prompt) };
 
-    await expect(
-      createTool(board).execute(
-        { task_id: 'ses_child1', message: 'Please continue.' },
-        { sessionID: 'parent-1' } as any,
-      ),
-    ).resolves.toContain('queued');
+    await expect(send(board, 'Please continue.')).resolves.toContain('queued');
 
     expect(prompt).toHaveBeenCalledWith({
       path: { id: 'ses_child1' },
@@ -94,6 +109,41 @@ describe('task_message', () => {
       },
       throwOnError: true,
     });
+    // The host-assigned id becomes the generation's excerpt boundary.
+    expect(board.get('ses_child1')?.amendmentInputMessageID).toBe(
+      HOST_MESSAGE_ID,
+    );
+  });
+
+  test('never chooses the v1 admission id; records the host-assigned one', async () => {
+    // v1 orders turns by id string (`msg_` + hex timestamp); a plugin-chosen
+    // id would sort after every host id and keep the child loop running.
+    const board = new BackgroundJobBoard();
+    registerRunningChild(board, 'ses_child1', 'parent-1', 'msg_open');
+    const hostID = 'msg_019a2b3c4d5fZyXwVuTsRqPoNm';
+    const prompt = mock(async () => ({
+      data: { info: { id: hostID, role: 'user' }, parts: [] },
+    }));
+    client = { session: makeSession(prompt) };
+
+    await expect(send(board, 'Amend.')).resolves.toContain('queued');
+
+    const body = prompt.mock.calls[0]?.[0].body as Record<string, unknown>;
+    expect(body).not.toHaveProperty('messageID');
+    expect(board.get('ses_child1')?.amendmentInputMessageID).toBe(hostID);
+  });
+
+  test('records no amendment boundary when the host returns no message id', async () => {
+    const board = new BackgroundJobBoard();
+    registerRunningChild(board);
+    const prompt = mock(async () => ({}));
+    client = { session: makeSession(prompt) };
+
+    await expect(send(board, 'Amend.')).resolves.toContain(
+      'no amendment boundary was recorded',
+    );
+    expect(prompt.mock.calls[0]?.[0].body).not.toHaveProperty('messageID');
+    expect(board.get('ses_child1')?.amendmentInputMessageID).toBeUndefined();
   });
 
   test('uses only the noReply transport and permits repeated updates', async () => {
@@ -138,10 +188,7 @@ describe('task_message', () => {
     }));
     client = { session: { get, messages, prompt } };
 
-    await createTool(board).execute(
-      { task_id: 'ses_child1', message: 'Continue with the fix.' },
-      { sessionID: 'parent-1' } as any,
-    );
+    await send(board, 'Continue with the fix.');
 
     expect(prompt.mock.calls[0]?.[0].body).toMatchObject({
       model: { providerID: 'anthropic', modelID: 'claude-sonnet' },
@@ -172,10 +219,7 @@ describe('task_message', () => {
     }));
     client = { session: { messages, prompt } };
 
-    await createTool(board).execute(
-      { task_id: 'ses_child1', message: 'Continue with the fix.' },
-      { sessionID: 'parent-1' } as any,
-    );
+    await send(board, 'Continue with the fix.');
 
     expect(prompt.mock.calls[0]?.[0].body).toEqual({
       agent: 'fixer',
@@ -218,10 +262,7 @@ describe('task_message', () => {
       },
     };
 
-    await createTool(board).execute(
-      { task_id: 'ses_child1', message: 'Continue with the fix.' },
-      { sessionID: 'parent-1' } as any,
-    );
+    await send(board, 'Continue with the fix.');
 
     expect(prompt.mock.calls[0]?.[0].body).toEqual({
       agent: 'fixer',
@@ -243,12 +284,9 @@ describe('task_message', () => {
       },
     };
 
-    await expect(
-      createTool(board).execute(
-        { task_id: 'ses_child1', message: 'Continue with the fix.' },
-        { sessionID: 'parent-1' } as any,
-      ),
-    ).rejects.toThrow('no authoritative model identity');
+    await expect(send(board, 'Continue with the fix.')).rejects.toThrow(
+      'no authoritative model identity',
+    );
     expect(prompt).not.toHaveBeenCalled();
 
     const job = board.get('ses_child1');
@@ -270,12 +308,9 @@ describe('task_message', () => {
     });
     client = { session: { messages, prompt } };
 
-    await expect(
-      createToolWithTimeout(board, 5).execute(
-        { task_id: 'ses_child1', message: 'Continue with the fix.' },
-        { sessionID: 'parent-1' } as any,
-      ),
-    ).rejects.toThrow('model lookup timed out');
+    await expect(send(board, 'Continue with the fix.', 5)).rejects.toThrow(
+      'model lookup timed out',
+    );
     expect(lookupSignal?.aborted).toBe(true);
     expect(prompt).not.toHaveBeenCalled();
 
@@ -311,12 +346,7 @@ describe('task_message', () => {
     });
     client = { session: { messages, prompt } };
 
-    await expect(
-      createTool(board).execute(
-        { task_id: 'ses_child1', message: 'Do not send.' },
-        { sessionID: 'parent-1' } as any,
-      ),
-    ).rejects.toThrow('task_revive');
+    await expect(send(board, 'Do not send.')).rejects.toThrow('task_revive');
     expect(prompt).not.toHaveBeenCalled();
 
     const job = board.get('ses_child1');
@@ -338,16 +368,13 @@ describe('task_message', () => {
     const prompt = mock(
       () =>
         new Promise<unknown>((resolve) => {
-          releasePrompt = () => resolve({});
+          releasePrompt = () => resolve(hostAccepted());
         }),
     );
     client = { session: makeSession(prompt) };
 
-    const pending = createTool(board).execute(
-      { task_id: 'ses_child1', message: 'Hold the lane.' },
-      { sessionID: 'parent-1' } as any,
-    );
-    await Bun.sleep(0);
+    const pending = send(board, 'Hold the lane.');
+    await drainMicrotasks();
 
     const job = board.get('ses_child1');
     expect(job?.state).toBe('running');
@@ -373,25 +400,40 @@ describe('task_message', () => {
     ).toBe('cancellation');
   });
 
-  test('rejects API failures and releases the message lease', async () => {
+  test('rejects API failures and releases the message lease without stamping', async () => {
     const board = new BackgroundJobBoard();
     registerRunningChild(board);
     const prompt = mock(async () => ({ error: { message: 'HTTP 409' } }));
     client = { session: makeSession(prompt) };
 
-    await expect(
-      createTool(board).execute(
-        { task_id: 'ses_child1', message: 'Please continue.' },
-        { sessionID: 'parent-1' } as any,
-      ),
-    ).rejects.toThrow('HTTP 409');
+    await expect(send(board, 'Please continue.')).rejects.toThrow('HTTP 409');
 
     const job = board.get('ses_child1');
     expect(job?.state).toBe('running');
+    // A rejected response proves no accepted deposit: nothing is stamped.
+    expect(job?.amendmentInputMessageID).toBeUndefined();
     if (!job) throw new Error('missing running job');
     expect(
       board.acquireLease(job.taskID, job.generation, 'cancellation')?.kind,
     ).toBe('cancellation');
+  });
+
+  test('a thrown transport rejects without stamping or repeating the prompt', async () => {
+    const board = new BackgroundJobBoard();
+    registerRunningChild(board);
+    const failure = new Error('connection reset before admission');
+    const prompt = mock(async () => {
+      throw failure;
+    });
+    client = { session: makeSession(prompt) };
+
+    await expect(send(board, 'Please continue.')).rejects.toThrow(
+      'connection reset before admission',
+    );
+
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(board.get('ses_child1')?.state).toBe('running');
+    expect(board.get('ses_child1')?.amendmentInputMessageID).toBeUndefined();
   });
 
   test.each(['resolve', 'reject', 'complete then resolve'])(
@@ -404,7 +446,7 @@ describe('task_message', () => {
       const prompt = mock((input: { path: { id: string } }) =>
         input.path.id === 'ses_child1'
           ? transport.promise
-          : Promise.resolve({}),
+          : Promise.resolve(hostAccepted()),
       );
       client = { session: makeSession(prompt) };
       const acquire = spyOn(ProductionBoard.prototype, 'acquireLease');
@@ -474,11 +516,23 @@ describe('task_message', () => {
       const beforeSettlement = { ...board.get(lease.taskID) };
       if (settlement === 'reject')
         transport.reject(new Error('late transport failure'));
-      else transport.resolve({});
-      await Bun.sleep(0);
+      else transport.resolve(hostAccepted());
+      await drainMicrotasks();
       expect(retirements()).toHaveLength(1);
       expect(board.validateLease(lease)).toBe(false);
-      expect(board.get(lease.taskID)).toEqual(beforeSettlement);
+      if (settlement === 'reject') {
+        // A late failure proves no acceptance: nothing is stamped.
+        expect(board.get(lease.taskID)).toEqual(beforeSettlement);
+      } else {
+        // A late SUCCESS is still this run's admitted deposit: the boundary
+        // must survive the timeout so diagnostics can attribute the tail.
+        expect(board.get(lease.taskID)).toEqual({
+          ...beforeSettlement,
+          amendmentInputMessageID: HOST_MESSAGE_ID,
+        });
+      }
+
+      const afterSettlement = { ...board.get(lease.taskID) };
 
       const replacement = completed
         ? board.acquireLease(
@@ -491,12 +545,11 @@ describe('task_message', () => {
         completed ? 'terminal-notification' : 'message',
       );
       if (!replacement) throw new Error('settled write retained exclusion');
-      // The settled write's lease is stale: releasing it is a rejected no-op
-      // and must not retire the replacement token. This call intentionally
-      // passes through the release spy, so retirements() above counts it.
+      // The settled write's lease is stale: releasing is a rejected no-op that
+      // must not retire the replacement token.
       expect(board.releaseLease(lease)).toBe(false);
       expect(board.validateLease(replacement)).toBe(true);
-      expect(board.get(lease.taskID)).toEqual(beforeSettlement);
+      expect(board.get(lease.taskID)).toEqual(afterSettlement);
       board.releaseLease(replacement);
     },
   );
@@ -514,13 +567,317 @@ describe('task_message', () => {
     };
     client = { session };
 
-    await expect(
-      createTool(board).execute(
-        { task_id: 'ses_child1', message: 'Please continue.' },
-        { sessionID: 'parent-1' } as any,
-      ),
-    ).rejects.toThrow('no longer tracked');
+    await expect(send(board, 'Please continue.')).rejects.toThrow(
+      'no longer tracked',
+    );
     expect(prompt).not.toHaveBeenCalled();
+  });
+
+  test('a same-run terminal published before the response still stamps captured + 1', async () => {
+    const board = new BackgroundJobBoard();
+    registerRunningChild(board, 'ses_child1', 'parent-1', 'msg_open');
+    const run = board.get('ses_child1');
+    if (!run) throw new Error('missing child');
+
+    // The host writes the message and only then returns; the run's single
+    // terminal outcome publishes BEFORE the response is delivered.
+    const prompt = mock(async () => {
+      const ended = board.updateStatus({
+        taskID: 'ses_child1',
+        state: 'error',
+        resultSummary: 'provider timeout',
+        now: 200,
+      });
+      if (ended?.state !== 'error') throw new Error('expected terminal');
+      return hostAccepted();
+    });
+    client = { session: makeSession(prompt) };
+
+    await expect(send(board, 'Continue.')).resolves.toContain('queued');
+
+    const stamped = board.get('ses_child1');
+    const messageID = HOST_MESSAGE_ID;
+    expect(stamped).toMatchObject({
+      state: 'error',
+      terminalRevision: run.terminalRevision + 1,
+      amendmentInputMessageID: messageID,
+      resultSummary: 'provider timeout',
+    });
+  });
+
+  test.each(['terminal + 1', 'reopened + 2'])(
+    'a deposit accepted only after the deadline keeps its boundary (%s)',
+    async (outcome) => {
+      const board = new BackgroundJobBoard();
+      registerRunningChild(board, 'ses_child1', 'parent-1', 'msg_open');
+      const run = board.get('ses_child1');
+      if (!run) throw new Error('missing child');
+      const transport = Promise.withResolvers<unknown>();
+      const prompt = mock(() => transport.promise);
+      client = { session: makeSession(prompt) };
+
+      // The transport is still pending when the tool's deadline expires.
+      await expect(
+        createToolWithTimeout(board, 5).execute(
+          { task_id: 'ses_child1', message: 'Continue.' },
+          { sessionID: 'parent-1' } as any,
+        ),
+      ).rejects.toThrow('timed out');
+
+      const ended = board.updateStatus({
+        taskID: 'ses_child1',
+        state: 'error',
+        resultSummary: 'provider timeout',
+        now: 200,
+      });
+      if (outcome === 'reopened + 2') {
+        const reopened = board.markRunningFromLiveSession(
+          'ses_child1',
+          (ended?.completedAt ?? 0) + 1000,
+        );
+        if (reopened?.state !== 'running') throw new Error('expected reopen');
+      }
+
+      // The host accepted the deposit; only now does the response resolve.
+      transport.resolve(hostAccepted());
+      await drainMicrotasks();
+
+      const stamped = board.get('ses_child1');
+      const messageID = HOST_MESSAGE_ID;
+      if (outcome === 'reopened + 2') {
+        // The reopened run is not the captured one: no stale boundary.
+        expect(stamped?.amendmentInputMessageID).toBeUndefined();
+        expect(stamped?.terminalRevision).toBe(run.terminalRevision + 2);
+        return;
+      }
+      expect(stamped).toMatchObject({
+        state: 'error',
+        terminalRevision: run.terminalRevision + 1,
+        amendmentInputMessageID: messageID,
+        runInputMessageID: 'msg_open',
+      });
+      // The single cross-module read-through proof: the late boundary keeps
+      // the late-accepted run readable.
+      const transcript = {
+        data: [
+          {
+            info: { id: 'msg_open', role: 'user', time: { created: 10 } },
+            parts: [],
+          },
+          {
+            info: { id: messageID, role: 'user', time: { created: 150 } },
+            parts: [],
+          },
+          {
+            info: {
+              role: 'assistant',
+              time: { created: 160, completed: 170 },
+            },
+            parts: [{ type: 'text', text: 'late deposit failed tail' }],
+          },
+        ],
+      };
+      const excerpt = diagnosticExcerptOf(transcript, {
+        inputMessageID: stamped?.runInputMessageID,
+        amendmentMessageID: stamped?.amendmentInputMessageID,
+        runStartedAt: stamped?.runStartedAt,
+        completedAt: stamped?.completedAt,
+      });
+      if (!('text' in excerpt)) throw new Error(excerpt.unavailable);
+      expect(excerpt.text).toContain('late deposit failed tail');
+      // Without the recorded amendment the same transcript refuses.
+      expect(
+        diagnosticExcerptOf(transcript, {
+          inputMessageID: stamped?.runInputMessageID,
+          runStartedAt: stamped?.runStartedAt,
+          completedAt: stamped?.completedAt,
+        }),
+      ).toHaveProperty('unavailable');
+    },
+  );
+
+  test('a same-run stop published before the response still stamps captured + 1', async () => {
+    const board = new BackgroundJobBoard();
+    registerRunningChild(board);
+    const run = board.get('ses_child1');
+    if (!run) throw new Error('missing child');
+
+    const prompt = mock(async () => {
+      // Stop-family publication: no terminal task result, same run.
+      board.updateStatus({
+        taskID: 'ses_child1',
+        state: 'stopped',
+        resultSummary: 'no terminal result',
+        now: 200,
+      });
+      return hostAccepted();
+    });
+    client = { session: makeSession(prompt) };
+
+    await expect(send(board, 'Continue.')).resolves.toContain('queued');
+
+    const messageID = HOST_MESSAGE_ID;
+    expect(board.get('ses_child1')).toMatchObject({
+      state: 'stopped',
+      terminalRevision: run.terminalRevision + 1,
+      amendmentInputMessageID: messageID,
+    });
+  });
+
+  test('a cancellation queued behind an accepted deposit keeps the recorded amendment', async () => {
+    const board = new BackgroundJobBoard();
+    registerRunningChild(board);
+    const run = board.get('ses_child1');
+    if (!run) throw new Error('missing child');
+    const prompt = makePrompt();
+    client = { session: makeSession(prompt) };
+
+    await send(board, 'Continue.');
+    const messageID = HOST_MESSAGE_ID;
+    expect(board.get('ses_child1')?.amendmentInputMessageID).toBe(messageID);
+
+    // A cancellation lands after the accepted deposit: the recorded same-run
+    // ID must survive that transition.
+    const cancellationLease = board.acquireLease(
+      'ses_child1',
+      run.generation,
+      'cancellation',
+    );
+    if (!cancellationLease) throw new Error('missing cancellation lease');
+    const cancelled = board.markCancelled('ses_child1', 'user requested', 200, {
+      cancellationLease,
+    });
+    board.releaseLease(cancellationLease);
+    expect(cancelled).toMatchObject({
+      state: 'cancelled',
+      terminalRevision: run.terminalRevision + 1,
+      amendmentInputMessageID: messageID,
+    });
+  });
+
+  test('a reopen between dispatch and the response refuses the stale stamp', async () => {
+    const board = new BackgroundJobBoard();
+    registerRunningChild(board);
+    const run = board.get('ses_child1');
+    if (!run) throw new Error('missing child');
+
+    const prompt = mock(async () => {
+      // Deterministic: the run publishes, then is observed live again in the
+      // SAME generation while the deposit is in flight.
+      const ended = board.updateStatus({
+        taskID: 'ses_child1',
+        state: 'error',
+        resultSummary: 'first failure',
+        now: 200,
+      });
+      if (ended?.state !== 'error') throw new Error('expected terminal');
+      const reopened = board.markRunningFromLiveSession('ses_child1', 300);
+      if (reopened?.state !== 'running') throw new Error('expected reopen');
+      return hostAccepted();
+    });
+    client = { session: makeSession(prompt) };
+
+    // A running-only recheck would accept the reopened row; only the board's
+    // revision fence can refuse.
+    await expect(send(board, 'Continue.')).resolves.toContain(
+      'no amendment boundary',
+    );
+
+    const reopened = board.get('ses_child1');
+    expect(reopened?.state).toBe('running');
+    expect(reopened?.terminalRevision).toBe(run.terminalRevision + 2);
+    expect(reopened?.amendmentInputMessageID).toBeUndefined();
+
+    // The reopened run's own terminal publication refuses the old fence too.
+    const secondEnd = board.updateStatus({
+      taskID: 'ses_child1',
+      state: 'error',
+      resultSummary: 'second failure',
+      now: 400,
+    });
+    expect(secondEnd?.terminalRevision).toBe(run.terminalRevision + 3);
+    expect(secondEnd?.amendmentInputMessageID).toBeUndefined();
+    expect(prompt).toHaveBeenCalledTimes(1);
+  });
+
+  test('a deposit whose row disappeared before the response refuses the stamp', async () => {
+    const board = new BackgroundJobBoard();
+    registerRunningChild(board);
+    const prompt = mock(async () => {
+      board.drop('ses_child1');
+      return hostAccepted();
+    });
+    client = { session: makeSession(prompt) };
+
+    await expect(send(board, 'Continue.')).resolves.toContain(
+      'no amendment boundary',
+    );
+    expect(board.get('ses_child1')).toBeUndefined();
+    expect(prompt).toHaveBeenCalledTimes(1);
+  });
+
+  test('a disposed plugin does not stamp an already-accepted deposit', async () => {
+    const board = new BackgroundJobBoard();
+    registerRunningChild(board);
+    let disposed = false;
+    const prompt = mock(async () => {
+      disposed = true;
+      return hostAccepted();
+    });
+    client = { session: makeSession(prompt) };
+    const tool = createTaskMessageTool({
+      input: { directory: '/test', client } as any,
+      backgroundJobBoard: board,
+      isDisposed: () => disposed,
+    }).task_message;
+
+    await expect(
+      tool.execute({ task_id: 'ses_child1', message: 'Continue.' }, {
+        sessionID: 'parent-1',
+      } as any),
+    ).resolves.toContain('no amendment boundary');
+    expect(board.get('ses_child1')?.amendmentInputMessageID).toBeUndefined();
+  });
+
+  test('a reopen during the model lookup dispatches into the live run and stamps it', async () => {
+    const board = new BackgroundJobBoard();
+    registerRunningChild(board);
+    const run = board.get('ses_child1');
+    if (!run) throw new Error('missing child');
+    const messages = mock(async () => {
+      // The deposit's run ends and is observed live again DURING the model
+      // lookup, before dispatch. The send-time validation then sees the
+      // reopened run, so the deposit belongs to it and must be stamped with
+      // ITS revision — never the pre-lookup capture.
+      const ended = board.updateStatus({
+        taskID: 'ses_child1',
+        state: 'error',
+        resultSummary: 'first failure',
+        now: 200,
+      });
+      if (ended?.state !== 'error') throw new Error('expected terminal');
+      const reopened = board.markRunningFromLiveSession('ses_child1', 300);
+      if (reopened?.state !== 'running') throw new Error('expected reopen');
+      return {
+        data: [
+          {
+            info: {
+              role: 'user',
+              model: { providerID: 'openai', id: 'gpt-6' },
+            },
+          },
+        ],
+      };
+    });
+    const prompt = makePrompt();
+    client = { session: { messages, prompt } };
+
+    await expect(send(board, 'Continue.')).resolves.toContain('queued');
+
+    const dispatched = board.get('ses_child1');
+    expect(dispatched?.state).toBe('running');
+    expect(dispatched?.terminalRevision).toBe(run.terminalRevision + 2);
+    expect(dispatched?.amendmentInputMessageID).toBe(HOST_MESSAGE_ID);
   });
 
   test('rejects terminal and cancelling tasks', async () => {
@@ -530,18 +887,25 @@ describe('task_message', () => {
     const terminalPrompt = makePrompt();
     client = { session: { prompt: terminalPrompt } };
 
-    await expect(
-      createTool(terminalBoard).execute(
-        { task_id: 'ses_child1', message: 'Too late' },
-        { sessionID: 'parent-1' } as any,
-      ),
-    ).rejects.toThrow('task_revive');
-    await expect(
-      createTool(terminalBoard).execute(
-        { task_id: 'ses_child1', message: 'Too late' },
-        { sessionID: 'parent-1' } as any,
-      ),
-    ).rejects.toThrow('task_revive and task_id: "ses_child1"');
+    await expect(send(terminalBoard, 'Too late')).rejects.toThrow(
+      'task_revive',
+    );
+    await expect(send(terminalBoard, 'Too late')).rejects.toThrow(
+      'task_revive and task_id: "ses_child1"',
+    );
+    let message = '';
+    try {
+      await send(terminalBoard, 'Too late');
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    // Terminal-resume guidance names task_revive with the task_id param.
+    expect(message).toContain(
+      'Continue that same session with task_revive and task_id: "ses_child1".',
+    );
+    expect(message).not.toContain('task_result');
+    expect(message).not.toContain('task(');
+    expect(message).not.toContain('sessionID');
     expect(terminalPrompt).not.toHaveBeenCalled();
 
     const cancellingBoard = new BackgroundJobBoard();
@@ -550,70 +914,27 @@ describe('task_message', () => {
     const cancellingPrompt = makePrompt();
     client = { session: { prompt: cancellingPrompt } };
 
-    await expect(
-      createTool(cancellingBoard).execute(
-        { task_id: 'ses_child1', message: 'Do not send' },
-        { sessionID: 'parent-1' } as any,
-      ),
-    ).rejects.toThrow('cancellation was requested');
+    await expect(send(cancellingBoard, 'Do not send')).rejects.toThrow(
+      'cancellation was requested',
+    );
     expect(cancellingPrompt).not.toHaveBeenCalled();
   });
 
-  test('terminal-resume guidance names the host delegation tool', async () => {
-    const v1Board = new BackgroundJobBoard();
-    registerRunningChild(v1Board);
-    v1Board.updateStatus({ taskID: 'ses_child1', state: 'completed' });
-    client = { session: { prompt: makePrompt() } };
-    await expect(
-      createTool(v1Board).execute(
-        { task_id: 'ses_child1', message: 'Too late' },
-        { sessionID: 'parent-1' } as any,
-      ),
-    ).rejects.toThrow('task_revive and task_id: "ses_child1"');
-
-    const v2Board = new BackgroundJobBoard();
-    registerRunningChild(v2Board);
-    v2Board.updateStatus({ taskID: 'ses_child1', state: 'completed' });
-    client = { session: { prompt: makePrompt() } };
-    let message = '';
-    try {
-      await createTool(v2Board, 'v2').execute(
-        { task_id: 'ses_child1', message: 'Too late' },
-        { sessionID: 'parent-1' } as any,
-      );
-    } catch (error) {
-      message = (error as Error).message;
-    }
-    expect(message).toContain(
-      'subagent(sessionID: "ses_child1", prompt: "...")',
-    );
-    expect(message).not.toContain('task_result');
-    expect(message).not.toContain('task(');
-    expect(message).not.toContain('task_id');
-    expect(message).not.toContain('task_revive');
-  });
-
-  test('v2 exposes sessionID and accepts the task_id alias', async () => {
+  test('v1 exposes the task_id schema and emits no delivery', async () => {
     const board = new BackgroundJobBoard();
     registerRunningChild(board);
     const prompt = makePrompt();
     client = { session: makeSession(prompt) };
-    const task_message = createTool(board, 'v2');
+    const v1 = createTool(board);
 
-    expect(Object.keys(task_message.args)).toContain('sessionID');
+    expect(Object.keys(v1.args)).not.toContain('delivery');
+    expect(Object.keys(v1.args).sort()).toEqual(['message', 'task_id']);
 
-    await expect(
-      task_message.execute(
-        { sessionID: 'ses_child1', message: 'Native update' },
-        { sessionID: 'parent-1' } as any,
-      ),
-    ).resolves.toContain('queued');
-    await expect(
-      task_message.execute({ task_id: 'ses_child1', message: 'Alias update' }, {
-        sessionID: 'parent-1',
-      } as any),
-    ).resolves.toContain('queued');
-    expect(prompt).toHaveBeenCalledTimes(2);
+    await v1.execute({ task_id: 'ses_child1', message: 'Status update' }, {
+      sessionID: 'parent-1',
+    } as any);
+    const body = prompt.mock.calls[0]?.[0].body;
+    expect(body).not.toHaveProperty('delivery');
   });
 
   test('rejects a child owned by another parent', async () => {
@@ -635,13 +956,9 @@ describe('task_message', () => {
     const board = new BackgroundJobBoard();
     const prompt = makePrompt();
     client = { session: { prompt } };
-    // No launch registered: the board lost the child (restart or retention
-    // trim) while the host session still exists and is owned.
-    const error = (await createTool(board)
-      .execute({ task_id: 'ses_child1', message: 'go' }, {
-        sessionID: 'parent-1',
-      } as any)
-      .catch((e: Error) => e)) as Error;
+    // No launch registered: the board lost the child while the host session
+    // still exists.
+    const error = (await send(board, 'go').catch((e: Error) => e)) as Error;
     expect(error.message).toContain('Unknown task ID or alias: ses_child1');
     expect(error.message).toContain('not tracked');
     // v1 routing names the host-flavor resume param and the target ID.
@@ -650,27 +967,11 @@ describe('task_message', () => {
     expect(prompt).not.toHaveBeenCalled();
   });
 
-  test('a board-missed settled child on v2 routes with the native resume call', async () => {
-    const board = new BackgroundJobBoard();
-    const prompt = makePrompt();
-    client = { session: { prompt } };
-    const error = (await createTool(board, 'v2')
-      .execute({ task_id: 'ses_child1', message: 'go' }, {
-        sessionID: 'parent-1',
-      } as any)
-      .catch((e: Error) => e)) as Error;
-    expect(error.message).toContain(
-      'subagent(sessionID: "ses_child1", prompt: "...")',
-    );
-    expect(error.message).not.toContain('task_revive');
-  });
-
   test('a board-missed alias keeps the bare unknown error', async () => {
     const board = new BackgroundJobBoard();
     const prompt = makePrompt();
     client = { session: { prompt } };
-    // An alias is board-scoped: without a board record it has no host
-    // existence, so the error stays bare — no settled-session guidance.
+    // An alias is board-scoped: without a record the error stays bare.
     const error = (await createTool(board)
       .execute({ task_id: 'exp-9', message: 'go' }, {
         sessionID: 'parent-1',
@@ -685,10 +986,8 @@ describe('task_message', () => {
     registerRunningChild(board);
     const prompt = makePrompt();
     client = { session: { prompt } };
-    // Canonical resolution maps the ref to the session ID and board.get is
-    // not parent-scoped, so a foreign parent's record is visible here. The
-    // settled-session advice must not fire: task_revive would reject the
-    // same ownership mismatch, so the error stays bare.
+    // A foreign parent's record is visible through canonical resolution; the
+    // settled-session advice must not fire, so the error stays bare.
     const task_message = createTaskMessageTool({
       input: { directory: '/test', client } as any,
       backgroundJobBoard: board,
@@ -728,15 +1027,13 @@ describe('task_message', () => {
     expect(error.message).toContain('recent:');
     expect(prompt).not.toHaveBeenCalled();
   });
-
   test('a disposal landing after the helper check still stops the send', async () => {
     const board = new BackgroundJobBoard();
     registerRunningChild(board);
     const prompt = makePrompt();
     client = { session: { prompt } };
-    // The helper's disposed check passes (call 1); the plugin is torn down
-    // while the resolution await is in flight; execute's post-await
-    // re-check (call 2) must refuse to send.
+    // The helper check passes (call 1); execute's post-await re-check
+    // (call 2) must refuse to send.
     let disposedCalls = 0;
     const task_message = createTaskMessageTool({
       input: { directory: '/test', client } as any,
@@ -768,12 +1065,7 @@ describe('task_message', () => {
     };
     client = { session };
 
-    await expect(
-      createTool(board).execute(
-        { task_id: 'ses_child1', message: 'Do not send' },
-        { sessionID: 'parent-1' } as any,
-      ),
-    ).rejects.toThrow('message lease');
+    await expect(send(board, 'Do not send')).rejects.toThrow('message lease');
     expect(prompt).not.toHaveBeenCalled();
   });
 
@@ -782,91 +1074,11 @@ describe('task_message', () => {
     registerRunningChild(board);
     client = { session: makeSession(makePrompt()) };
 
-    const result = await createTool(board).execute(
-      { task_id: 'ses_child1', message: 'Status update' },
-      { sessionID: 'parent-1' } as any,
-    );
+    const result = await send(board, 'Status update');
 
     expect(result).toContain('queued');
     expect(result).not.toContain('delivered');
     expect(result).not.toContain('admitted');
     expect(result).not.toContain('nudge');
-  });
-
-  test('v2 schema is queue-only: no delivery parameter', () => {
-    const board = new BackgroundJobBoard();
-    const v2 = createTool(board, 'v2');
-    // The native host model face cannot express a steer; the parameter is
-    // gone from the schema, not merely defaulted.
-    expect(Object.keys(v2.args)).not.toContain('delivery');
-    expect(Object.keys(v2.args).sort()).toEqual([
-      'message',
-      'sessionID',
-      'task_id',
-    ]);
-  });
-
-  test('v1 schema has no delivery key and emits no delivery', async () => {
-    const board = new BackgroundJobBoard();
-    registerRunningChild(board);
-    const prompt = makePrompt();
-    client = { session: makeSession(prompt) };
-    const v1 = createTool(board);
-
-    expect(Object.keys(v1.args)).not.toContain('delivery');
-
-    await v1.execute({ task_id: 'ses_child1', message: 'Status update' }, {
-      sessionID: 'parent-1',
-    } as any);
-    const body = prompt.mock.calls[0]?.[0].body;
-    expect(body).not.toHaveProperty('delivery');
-  });
-
-  test('v2 queues without a delivery hint and reports queue semantics', async () => {
-    const board = new BackgroundJobBoard();
-    registerRunningChild(board);
-    const prompt = makePrompt();
-    client = { session: makeSession(prompt) };
-
-    const result = await createTool(board, 'v2').execute(
-      { sessionID: 'ses_child1', message: 'Update' },
-      { sessionID: 'parent-1' } as any,
-    );
-
-    const body = prompt.mock.calls[0]?.[0].body;
-    expect(body.noReply).toBe(true);
-    expect(body.agent).toBe('fixer');
-    expect(body).not.toHaveProperty('delivery');
-    expect(result).toContain('queued');
-    expect(result).not.toMatch(/steer/i);
-  });
-
-  test('v2 refuses a terminal task with the native resume call', async () => {
-    const board = new BackgroundJobBoard();
-    registerRunningChild(board);
-    board.updateStatus({ taskID: 'ses_child1', state: 'completed' });
-    const prompt = makePrompt();
-    client = { session: makeSession(prompt) };
-
-    await expect(
-      createTool(board, 'v2').execute(
-        { sessionID: 'ses_child1', message: 'Too late' },
-        { sessionID: 'parent-1' } as any,
-      ),
-    ).rejects.toThrow('subagent(sessionID: "ses_child1", prompt: "...")');
-    expect(prompt).not.toHaveBeenCalled();
-
-    const job = board.get('ses_child1');
-    if (!job) throw new Error('missing completed job');
-    expect(
-      board.acquireLease(job.taskID, job.generation, 'message'),
-    ).toBeUndefined();
-    const terminalLease = board.acquireLease(
-      job.taskID,
-      job.generation,
-      'terminal-notification',
-    );
-    expect(terminalLease?.kind).toBe('terminal-notification');
-    if (terminalLease) board.releaseLease(terminalLease);
   });
 });

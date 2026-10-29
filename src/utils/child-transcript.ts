@@ -228,12 +228,27 @@ function isDiagnosticCompactionRound(message: TranscriptMessage): boolean {
   return sourceTypeOf(message) === 'compaction' || isCompactionRound(message);
 }
 
-function diagnosticInputIndex(entries: TranscriptMessage[]): number {
-  return entries.findLastIndex(
-    (entry) =>
-      !isDiagnosticCompactionRound(entry) &&
-      ['user', 'synthetic'].includes(sourceTypeOf(entry) ?? ''),
-  );
+/**
+ * Index of the latest delivered input entry, or -1 when none exists.
+ *
+ * One shared tail-first boundary scan for every transcript consumer. The
+ * default predicate matches a delivered user or synthetic source (falling
+ * back to `role`); `roleOnly` keeps the v1 delivered-round contract
+ * (`info.role === 'user'`) and `skipCompaction` ignores maintenance rounds.
+ * Byte-identical to the five scans it replaced.
+ */
+function latestInputIndexOf(
+  entries: TranscriptMessage[],
+  options: { roleOnly?: boolean; skipCompaction?: boolean } = {},
+): number {
+  return entries.findLastIndex((entry) => {
+    if (options.skipCompaction && isDiagnosticCompactionRound(entry)) {
+      return false;
+    }
+    if (options.roleOnly) return entry.info?.role === 'user';
+    const source = sourceTypeOf(entry);
+    return source === 'user' || source === 'synthetic';
+  });
 }
 
 /** Bounded, non-final assistant evidence. Never includes tool inputs or
@@ -244,6 +259,15 @@ export function diagnosticExcerptOf(
     maxBytes?: number;
     runStartedAt?: number;
     completedAt?: number;
+    /** Recorded host admission id of this run's opening input. When
+     *  present, attribution is identity-fenced: the excerpt must sit
+     *  behind exactly that input or it is refused — never a timestamp
+     *  guess. */
+    inputMessageID?: string;
+    /** Admission id of the newest input the plugin itself delivered into
+     *  this same generation (v1 `task_message`, v2 steer). It is a legal
+     *  excerpt boundary too: the run continued after it. */
+    amendmentMessageID?: string;
   } = {},
 ):
   | { unavailable: string }
@@ -281,12 +305,38 @@ export function diagnosticExcerptOf(
     )
       return { unavailable: 'activity after the recorded terminal outcome' };
   }
-  const boundary = diagnosticInputIndex(entries);
+  const boundary = latestInputIndexOf(entries, { skipCompaction: true });
   if (boundary < 0 && entries.length > 0)
     return {
       unavailable: 'latest input is outside the diagnostic message window',
     };
-  if (runStartedAt !== undefined) {
+  // Identity fence: an anchored run must excerpt behind an input the plugin
+  // recorded for THIS generation — its opening anchor, or a same-generation
+  // amendment it delivered itself. Any other latest input means a later run
+  // owns the tail; an unfound id means the window cannot prove attribution.
+  // Both refuse — anchored rows never fall back to the timestamp heuristics.
+  if (options.inputMessageID !== undefined) {
+    const boundaryID =
+      boundary < 0 || entries.length === 0
+        ? undefined
+        : entries[boundary]?.info?.id;
+    if (typeof boundaryID !== 'string') {
+      return {
+        unavailable:
+          'recorded run input is outside the diagnostic message window',
+      };
+    }
+    if (
+      boundaryID !== options.inputMessageID &&
+      boundaryID !== options.amendmentMessageID
+    ) {
+      return {
+        unavailable:
+          'latest input is not this run’s recorded input; a later run owns the tail',
+      };
+    }
+  }
+  if (runStartedAt !== undefined && options.inputMessageID === undefined) {
     // Native registration can follow the prompt, whereas revive captures its
     // start before admission. Do not require the input to postdate registration
     // or guess a launch-time tolerance. Only assistant creation in this run's
@@ -327,6 +377,7 @@ export function diagnosticExcerptOf(
   const chunks: string[] = [];
   let omittedMessages = window.omittedMessages + Math.max(0, boundary);
   const boundaryCounted =
+    options.inputMessageID === undefined &&
     runStartedAt !== undefined &&
     typeof entries[boundary]?.info?.time?.created === 'number' &&
     (entries[boundary].info?.time?.created as number) < runStartedAt;
@@ -341,7 +392,12 @@ export function diagnosticExcerptOf(
       continue;
     }
     if (entry.info?.role !== 'assistant') continue;
+    // An identity-anchored read already proved this generation's latest input,
+    // so transcript order after it is authoritative. A resumed foreground run
+    // can register after its own output, which would make runStartedAt later
+    // than the evidence this run must keep.
     if (
+      options.inputMessageID === undefined &&
       runStartedAt !== undefined &&
       (entry.info?.time?.created as number) < runStartedAt
     ) {
@@ -720,13 +776,7 @@ export function classifyCurrentDeliveredRound(
   }
   const messages = entries.filter((message) => !isCompactionRound(message));
 
-  let latestUser = -1;
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (messages[index]?.info?.role === 'user') {
-      latestUser = index;
-      break;
-    }
-  }
+  const latestUser = latestInputIndexOf(messages, { roleOnly: true });
   if (latestUser < 0) {
     return { verdict: 'unreadable', reason: 'no delivered user round' };
   }
@@ -850,29 +900,15 @@ export function attributeHostRoundToTranscript(
 export function latestInputAtOf(transcript: unknown): number | undefined {
   const entries = transcriptEntries(transcript);
   if (!Array.isArray(entries)) return undefined;
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
-    const entry = entries[index] as TranscriptMessage;
-    const source = sourceTypeOf(entry);
-    if (source === 'user' || source === 'synthetic') {
-      return transcriptOrderKey(entry);
-    }
-  }
-  return undefined;
+  const boundary = latestInputIndexOf(entries);
+  return boundary < 0 ? undefined : transcriptOrderKey(entries[boundary]);
 }
 
 /** Text of the latest assistant entry after the latest user/synthetic input. */
 export function terminalTextOf(transcript: unknown): string | undefined {
   const entries = transcriptEntries(transcript);
   if (!Array.isArray(entries)) return undefined;
-  let boundary = -1;
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
-    const entry = entries[index] as TranscriptMessage;
-    const source = sourceTypeOf(entry);
-    if (source === 'user' || source === 'synthetic') {
-      boundary = index;
-      break;
-    }
-  }
+  const boundary = latestInputIndexOf(entries);
   for (let index = entries.length - 1; index > boundary; index -= 1) {
     const entry = entries[index] as TranscriptMessage;
     if (sourceTypeOf(entry) === 'assistant') return textOf(entry);
@@ -893,14 +929,7 @@ export function classifyV2HistoricalRound(
   if (!Array.isArray(messages)) {
     return { verdict: 'unreadable', reason: messages.reason };
   }
-  let boundary = -1;
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const source = sourceTypeOf(messages[index] as TranscriptMessage);
-    if (source === 'user' || source === 'synthetic') {
-      boundary = index;
-      break;
-    }
-  }
+  const boundary = latestInputIndexOf(messages);
   if (boundary < 0) {
     return { verdict: 'unreadable', reason: 'no delivered user round' };
   }

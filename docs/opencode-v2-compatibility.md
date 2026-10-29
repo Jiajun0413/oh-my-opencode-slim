@@ -174,7 +174,7 @@ not an optional-degradation path.
    ordinary context reads and parent-alias recovery remain unchanged.
    Hosts without persisted-message reads retain incomplete context and do
    not bypass missing-baseline checks. `session.prompt` (default `delivery: "steer"`;
-   `noReply: true` maps to `delivery: "queue", resume: false` — or `delivery: "steer", resume: false` when the v1-shaped body carries an explicit `delivery: 'steer'` from `task_message`),
+   `noReply: true` maps to `delivery: "queue", resume: false` — queue-only, never steering),
    `session.update`→
    `session.update` (`{sessionID, title}`), `session.delete`→`remove` (same
    `DELETE /api/session/:id`), and `session.list` (v2 `Session.Info` page → the v1
@@ -364,23 +364,25 @@ child bridge degrades with a one-time warning.
 
 ### Task-control prompt and idle-wait contracts
 
+Run-identity anchoring: the plugin records each session's FIRST
+host-confirmed input admission (`chat.message` on v1; on v2 the awaited
+`session.prompt` hook feeds the id directly, ahead of every deferred
+chat.message delivery) and stamps it on the generation's board row when that
+run opens; a resumed run binds only its own pending call's admission, never
+the session map. Amendment fencing and the diagnostic excerpt rules are
+described once in [Tools](tools.md#diagnostic-attribution).
+
 The v1-facing `session.prompt` shim preserves text and file attachments. A
-`noReply: true` task message is a real, non-synthetic prompt with `queue` +
-`resume: false`; `task_message` exposes no delivery/steer parameter.
+`noReply: true` body is a real, non-synthetic prompt with `queue` +
+`resume: false`; no caller exposes a delivery/steer parameter.
 Queue alone would not preserve the no-resume intent. Unsupported per-call
 model/variant overrides and agent changes are rejected before writing, never
 silently dropped or implemented by non-atomic `switchAgent`/`switchModel` calls.
 A named owning agent is an identity assertion: the shim verifies it matches
 `session.get().agent` before admitting the prompt. Missing, mismatched, or
-unreadable identity fails closed without a write or selection switch. `task_message`
-explicitly inherits persisted selection on v2; other noReply callers, including
-interview notifications, retain the same no-resume semantics.
-
-After the asynchronous identity read, `task_message` revalidates its existing
-disposal, message lease, running generation, and owning-agent conditions at the
-shim's synchronous pre-admission boundary. The local `beforeSend` guard is not
-forwarded to the host and cannot switch selection; invalidation during the read
-therefore rejects without queuing a message.
+unreadable identity fails closed without a write or selection switch. The
+v2 prompt path inherits the session's persisted selection; noReply callers,
+including interview notifications, retain the same no-resume semantics.
 
 `experimental_v2.waitForSessionIdle(sessionID)` exists only when the host provides
 `session.wait({sessionID})`. It delegates that method; it fabricates neither a
@@ -456,7 +458,7 @@ side cannot be observed.
 | `routingBlock` (drop `<Agents>` from the built orchestrator prompt) | ✅ removes the block | ✅ removes the block | The host's native delegation-tool roster keeps agent identity; the block's Delegate/Don't routing criteria have no roster equivalent — see [Upstream behaviors to know](#upstream-behaviors-to-know) |
 | Orchestrator + specialist agents, prompts & permission mapping | ✅ | ✅ `ctx.agent.transform` | — |
 | Delegation + background job board + `task_*` tools | ✅ `task` tool | ✅ host `subagent` (auto-bridged: name/args normalization in `src/v2/delegation.ts`, output parsing in the execute bridges) | On v2 the model-visible identifier parameter is `sessionID` for both the host `subagent` resume arg and the plugin's `task_*` tools; `task_id` is accepted only as a deprecated alias (never emitted). Prompt text must use the host's vocabulary directly — no v1→v2 delegation-vocabulary rewriting is applied (display-name substitution separately rewrites `@<internalName>` mentions to the agent's `displayName` throughout the final orchestrator prompt — inline, file, and append orchestrator prompts — and in `orchestratorPrompt`/ACP routing snippets) — so an instructed resume continues the child instead of forking a new one. `backgroundJobs.enabled: false` removes the managed board and every `task_*` tool on both hosts while leaving native `subagent` delegation, completion delivery, and `sessionID` continuation untouched; council seat assembly switches to the native resolver |
-| Tools (ast-grep, webfetch, task_status/task_message/task_cancel/task_reply, acp_run; `task_revive` and `wait_for_user` are v1-only — v2 continues retained sessions through native `subagent(sessionID, prompt)` and uses the native `question` tool as the blocking boundary) | ✅ | ✅ `ctx.tool.transform` | v2 requires `options: {codemode: false}` on each registration (CodeMode split): without it a tool registers cleanly but is confined to the `execute` tool's JS runtime and session catalogs yield `Unknown tool: <name>`. The plugin stamps it on every adapted tool (`adaptTool` in `src/v2/adapters.ts`; additive field, older hosts ignore it). ast-grep needs its CLI binary (package, system, or lazy download); webfetch needs `jsdom` resolvable |
+| Tools (ast-grep, webfetch, task_status/task_cancel/task_reply, acp_run; `task_revive`, `task_message` and `wait_for_user` are v1-only — v2 continues retained sessions through native `subagent(sessionID, prompt)` and uses the native `question` tool as the blocking boundary) | ✅ | ✅ `ctx.tool.transform` | v2 requires `options: {codemode: false}` on each registration (CodeMode split): without it a tool registers cleanly but is confined to the `execute` tool's JS runtime and session catalogs yield `Unknown tool: <name>`. The plugin stamps it on every adapted tool (`adaptTool` in `src/v2/adapters.ts`; additive field, older hosts ignore it). ast-grep needs its CLI binary (package, system, or lazy download); webfetch needs `jsdom` resolvable |
 | Slash commands `/deepwork` `/reflect` `/loop` | ✅ | ✅ marker round-trip | — |
 | `/interview` | ✅ | ✅ marker command + trailing-message context bridge | `interview.enabled: false` removes the command, the v1 manager, and the v2 bridge entirely |
 | Message transforms (phase reminder, skills filter, image routing, display-name rewrite) | ✅ | ✅ via the single context hook | — |

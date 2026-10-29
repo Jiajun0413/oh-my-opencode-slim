@@ -51,9 +51,6 @@ export interface OrchestratorPromptOptions {
   waitForUser?: boolean;
   /** `backgroundJobs.orchestratorWake.enabled`. Ignored on v2: no scheduler exists there. */
   wakeScheduler?: boolean;
-  /** `task_message` is registered (managed lifecycle on). When false the
-   * prompt must not name a tool the session cannot call. */
-  taskMessage?: boolean;
   /** 'v2' on OpenCode v2 hosts; anything else renders v1 tool vocabulary. */
   hostFlavor?: string;
   /** false drops the whole <Agents> block. */
@@ -73,7 +70,6 @@ export function buildOrchestratorPrompt({
   excludeDescriptions,
   waitForUser = true,
   wakeScheduler = true,
-  taskMessage = true,
   hostFlavor,
   routingBlock = true,
 }: OrchestratorPromptOptions = {}): string {
@@ -96,12 +92,6 @@ ${renderRoutingLines(disabledAgents, excludeDescriptions)}
       : 'completion notifications resume you';
 
   const delegateTool = v2 ? 'subagent' : 'task';
-
-  // task_message is a managed-lifecycle tool: without it the correction
-  // channel is the same delegation tool used to continue the child.
-  const correctionChannel = taskMessage
-    ? '`task_message` while it\n  runs, continue it once finished.'
-    : `${delegateTool}(...) once it settles, continue it once finished.`;
 
   const modelLine = v2
     ? `- Set \`model\` only when the user asks; look up IDs with the models tool
@@ -167,7 +157,7 @@ ${modelLine}
 ## Verify
 - Subagent summaries are claims, not evidence: read the produced artifacts
   before relying on them. Missing scope and out-of-scope extras are both
-  defects. Send corrections to the same session: ${correctionChannel}
+  defects. Amend the same child, never respawn it.
 - Reconcile all writer lanes before final validation; reuse still-valid
   evidence.
 </Workflow>

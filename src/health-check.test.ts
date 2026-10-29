@@ -9,41 +9,47 @@ describe('plugin health thresholds', () => {
       8,
     );
     expect(minimumExpectedToolCount(['task_reply'])).toBe(8);
+    expect(minimumExpectedToolCount(['task_message'])).toBe(8);
     expect(minimumExpectedToolCount(['unknown_tool'])).toBe(9);
     expect(minimumExpectedToolCount([], false)).toBe(8);
     expect(minimumExpectedToolCount(['wait_for_user'], false)).toBe(7);
     expect(minimumExpectedToolCount(['webfetch'], false)).toBe(8);
-    expect(
-      minimumExpectedToolCount(['task_cancel', 'task_message', 'task_revive']),
-    ).toBe(6);
+    expect(minimumExpectedToolCount(['task_cancel', 'task_revive'])).toBe(7);
   });
 
-  test('drops the floor by two on v2 (no wait_for_user, no task_revive)', () => {
+  test('drops the floor by three on v2 (no wait_for_user, task_revive, task_message)', () => {
     // minTools 9 already excludes task_result (folded into task_status);
-    // v2 drops wait_for_user and task_revive → 7.
-    expect(minimumExpectedToolCount([], true, 'v2')).toBe(7);
+    // v2 drops wait_for_user, task_revive and task_message → 6.
+    expect(minimumExpectedToolCount([], true, 'v2')).toBe(6);
     // disabled_tools still wins when listed: no double-counting.
-    expect(minimumExpectedToolCount(['wait_for_user'], true, 'v2')).toBe(7);
-    expect(minimumExpectedToolCount(['task_reply'], true, 'v2')).toBe(6);
-    expect(minimumExpectedToolCount([], false, 'v2')).toBe(6);
+    expect(minimumExpectedToolCount(['wait_for_user'], true, 'v2')).toBe(6);
+    expect(minimumExpectedToolCount(['task_reply'], true, 'v2')).toBe(5);
+    expect(minimumExpectedToolCount([], false, 'v2')).toBe(5);
   });
 
   test('v2 never lowers the floor for the tools it does not register', () => {
-    // task_revive and wait_for_user are unregistered on v2, so listing them
-    // under disabled_tools must not mask a genuinely missing tool.
-    expect(minimumExpectedToolCount(['task_revive'], true, 'v2')).toBe(7);
+    // task_revive, task_message and wait_for_user are unregistered on v2, so
+    // listing them under disabled_tools must not mask a genuinely missing
+    // tool.
+    expect(minimumExpectedToolCount(['task_revive'], true, 'v2')).toBe(6);
+    expect(minimumExpectedToolCount(['task_message'], true, 'v2')).toBe(6);
     expect(
-      minimumExpectedToolCount(['task_revive', 'wait_for_user'], true, 'v2'),
-    ).toBe(7);
-    // v1 keeps both in the baseline.
+      minimumExpectedToolCount(
+        ['task_revive', 'task_message', 'wait_for_user'],
+        true,
+        'v2',
+      ),
+    ).toBe(6);
+    // v1 keeps them in the baseline.
     expect(minimumExpectedToolCount(['task_revive'], true, 'v1')).toBe(8);
+    expect(minimumExpectedToolCount(['task_message'], true, 'v1')).toBe(8);
   });
 
   test('keeps at least one tool of margin for the v2 registrations', () => {
-    // v2 registers: task_cancel, task_message, task_reply, task_status,
+    // v2 registers: task_cancel, task_reply, task_status,
     // interview_submit_state, acp_run, webfetch, ast_grep_search,
-    // ast_grep_replace (9) + marketplace_inspect + marketplace_manage (2).
-    const registered = 11;
+    // ast_grep_replace (8) + marketplace_inspect + marketplace_manage (2).
+    const registered = 10;
     const defaultFloor = minimumExpectedToolCount([], true, 'v2');
     expect(registered - defaultFloor).toBeGreaterThanOrEqual(1);
     // disabled_commands:["interview"] removes interview_submit_state.
@@ -67,12 +73,12 @@ describe('plugin health thresholds', () => {
     // Existing callers pass three arguments; the fourth must not change
     // the floor they already computed.
     expect(minimumExpectedToolCount([], true, 'v1')).toBe(9);
-    expect(minimumExpectedToolCount([], true, 'v2')).toBe(7);
+    expect(minimumExpectedToolCount([], true, 'v2')).toBe(6);
     expect(minimumExpectedToolCount(['task_reply'])).toBe(8);
   });
 
   test('drops the floor by six on v1 when the managed lifecycle is off', () => {
-    // task_cancel, task_message, task_status, task_reply, task_revive and
+    // task_cancel, task_status, task_reply, task_message, task_revive and
     // wait_for_user all disappear → 9 - 6 = 3.
     expect(minimumExpectedToolCount([], true, 'v1', false)).toBe(3);
     expect(minimumExpectedToolCount([], true, undefined, false)).toBe(3);
@@ -80,7 +86,7 @@ describe('plugin health thresholds', () => {
     // double-count them (v1 floor is already at 3).
     expect(
       minimumExpectedToolCount(
-        ['task_cancel', 'task_message', 'task_status', 'task_reply'],
+        ['task_cancel', 'task_status', 'task_reply'],
         true,
         'v1',
         false,
@@ -88,7 +94,7 @@ describe('plugin health thresholds', () => {
     ).toBe(3);
     expect(
       minimumExpectedToolCount(
-        ['task_revive', 'wait_for_user'],
+        ['task_revive', 'task_message', 'wait_for_user'],
         true,
         'v1',
         false,
@@ -98,13 +104,16 @@ describe('plugin health thresholds', () => {
     expect(minimumExpectedToolCount([], false, 'v1', false)).toBe(2);
   });
 
-  test('drops the floor by four on v2 when the managed lifecycle is off', () => {
-    // v2 already drops wait_for_user and task_revive; off removes the four
-    // remaining task tools → 9 - 2 - 4 = 3.
+  test('drops the floor by three on v2 when the managed lifecycle is off', () => {
+    // v2 already drops wait_for_user, task_revive and task_message; off
+    // removes the three remaining task tools → 9 - 3 - 3 = 3.
     expect(minimumExpectedToolCount([], true, 'v2', false)).toBe(3);
     expect(minimumExpectedToolCount(['task_reply'], true, 'v2', false)).toBe(3);
     // The v2-unregistered tools stay non-counting.
     expect(minimumExpectedToolCount(['task_revive'], true, 'v2', false)).toBe(
+      3,
+    );
+    expect(minimumExpectedToolCount(['task_message'], true, 'v2', false)).toBe(
       3,
     );
     expect(minimumExpectedToolCount([], false, 'v2', false)).toBe(2);

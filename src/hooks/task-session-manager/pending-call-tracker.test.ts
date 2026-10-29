@@ -89,8 +89,7 @@ describe('peekByParentAndAgent', () => {
     tracker.add(pending({ callId: 'a', agentType: 'fixer', label: 'L1' }));
     tracker.add(pending({ callId: 'b', agentType: 'oracle', label: 'L2' }));
 
-    // The title matches pending b, but the child's agent is fixer: the
-    // oracle pending must not be claimed across agents.
+    // The title matches b but the child's agent is fixer: no cross-agent claim.
     const hit = tracker.peekByParentAndAgent('parent-1', 'fixer', 'L2');
 
     expect(hit).toBeUndefined();
@@ -101,8 +100,7 @@ describe('peekByParentAndAgent', () => {
     tracker.add(pending({ callId: 'a' }));
     tracker.add(pending({ callId: 'b' }));
 
-    // call a's after-hook consumed its pending; a late no-title
-    // session.created may be a's stale child and must not claim b.
+    // call a's pending was consumed; a late no-title child may be its stale one.
     tracker.take('a', 'parent-1');
 
     expect(tracker.peekByParentAndAgent('parent-1', 'oracle')).toBeUndefined();
@@ -174,16 +172,14 @@ describe('take', () => {
     tracker.add(pending({ callId: 'a' }));
     tracker.add(pending({ callId: 'b' }));
 
-    // A before-hook admission error rolls its own pending back without
-    // recording consumption (tool.execute.before catch path).
+    // A before-hook admission error rolls back without recording consumption.
     const rolledBack = tracker.take('a', 'parent-1', undefined, {
       recordConsumed: false,
     });
     expect(rolledBack?.callId).toBe('a');
     expect(tracker.hasConsumedCall('parent-1')).toBe(false);
 
-    // A later no-title same-agent child is still claimable: the
-    // staleness guard was not poisoned by the rollback.
+    // A later no-title same-agent child is still claimable (not poisoned).
     const hit = tracker.peekByParentAndAgent('parent-1', 'oracle');
     expect(hit?.callId).toBe('b');
   });
@@ -208,9 +204,7 @@ describe('take', () => {
     // early-registered pending is skipped; 'b' is consumed).
     tracker.takeUnresolvedFirstMatch('parent-1', { identityTaskID: 'ses_y' });
 
-    // The sole survivor is fenced for another board generation: the
-    // no-callId take refuses WITHOUT consuming — the armed window must
-    // not stain the still-tracked pending.
+    // Another board generation refuses the no-callId take without consuming.
     expect(tracker.take(undefined, 'parent-1', otherBoard)).toBeUndefined();
 
     // The owning generation resolves it by claim, unflagged.
@@ -257,8 +251,7 @@ describe('takeByTaskID', () => {
       }),
     );
 
-    // A different board generation's after-hook must not steal the
-    // pending claimed under another generation.
+    // Another board generation's after-hook must not steal the pending.
     expect(
       tracker.takeByTaskID('parent-1', 'ses_x', ownerBoard),
     ).toBeUndefined();
@@ -280,8 +273,7 @@ describe('takeUnresolvedFirstMatch', () => {
     });
 
     expect(taken?.callId).toBe('a');
-    // Consumption is recorded like take(): a later no-title child of
-    // the same agent is treated as possibly stale.
+    // Consumption is recorded like take(): a later no-title child may be stale.
     expect(tracker.hasConsumedCall('parent-1', 'oracle')).toBe(true);
     expect(tracker.take('b', 'parent-1')?.callId).toBe('b');
   });
@@ -291,8 +283,7 @@ describe('takeUnresolvedFirstMatch', () => {
     tracker.add(pending({ callId: 'f1', agentType: 'fixer' }));
     tracker.add(pending({ callId: 'o1', agentType: 'oracle' }));
 
-    // The output belongs to an oracle child: the older fixer pending
-    // is not consumed.
+    // The output belongs to an oracle child: the older fixer pending survives.
     const taken = tracker.takeUnresolvedFirstMatch('parent-1', {
       identityTaskID: 'ses_x',
       agentType: 'oracle',
@@ -329,8 +320,7 @@ describe('takeUnresolvedFirstMatch', () => {
     tracker.add(pending({ callId: 'a', resumedTaskId: 'ses_old' }));
     tracker.add(pending({ callId: 'b' }));
 
-    // 'a' is a relaunch of ses_old; an output carrying ses_new cannot
-    // belong to it, so the drain skips to the next candidate.
+    // A relaunch of ses_old cannot match an output carrying ses_new.
     const taken = tracker.takeUnresolvedFirstMatch('parent-1', {
       identityTaskID: 'ses_new',
     });
@@ -366,9 +356,7 @@ describe('takeUnresolvedFirstMatch', () => {
     expect(taken?.callId).toBe('a');
     expect(taken?.identityUnresolved).toBe(true);
 
-    // Window-shift propagation: the later no-callId sole take for the
-    // same parent is flagged too — "sole survivor" no longer proves
-    // identity once an unresolved drain shifted the ordering argument.
+    // Window-shift propagation also flags the later no-callId sole take.
     const sole = tracker.take(undefined, 'parent-1');
     expect(sole?.callId).toBe('b');
     expect(sole?.identityUnresolved).toBe(true);
@@ -379,16 +367,14 @@ describe('takeUnresolvedFirstMatch', () => {
     tracker.add(pending({ callId: 'a', earlyRegisteredTaskID: 'ses_claimed' }));
     tracker.add(pending({ callId: 'b' }));
 
-    // Drain the unmarked pending (a is fenced by its early-registration
-    // claim), arming the parent's unresolved window.
+    // Drain 'b' (a is fenced by its early-registration claim), arming the window.
     expect(
       tracker.takeUnresolvedFirstMatch('parent-1', {
         identityTaskID: 'ses_x',
       })?.callId,
     ).toBe('b');
 
-    // A takeByTaskID take is identity-verified by the early
-    // registration's claim: no unresolved flag.
+    // The early-registration claim verifies identity: no unresolved flag.
     const claimed = tracker.takeByTaskID('parent-1', 'ses_claimed');
     expect(claimed?.callId).toBe('a');
     expect(claimed?.identityUnresolved).toBeUndefined();
@@ -454,8 +440,7 @@ describe('adoptEarlyRegistrations', () => {
 
     tracker.adoptEarlyRegistrations(newBoard);
 
-    // A flagged pending never paints its label: the adopted record
-    // falls back to the board's generic default description.
+    // A flagged pending never paints its label: the board default is used.
     expect(newBoard.get('ses_flagged')?.description).toBe(
       'background oracle task',
     );
@@ -497,9 +482,172 @@ describe('adoptEarlyRegistrations', () => {
 
     tracker.adoptEarlyRegistrations(newBoard);
 
-    // The destination record is attributed work from the source board, so
-    // the colliding placeholder is promoted without disturbing its state.
+    // The destination becomes attributed work; the placeholder promotes.
     expect(newBoard.get('ses_adopt')?.provisional).toBe(false);
     expect(newBoard.get('ses_adopt')?.state).toBe(placeholder.state);
+  });
+});
+
+describe('host admission anchors', () => {
+  test('first admission wins; later inputs never replace it', () => {
+    const tracker = createPendingCallTracker();
+    expect(tracker.firstAdmission('ses_child')).toBeUndefined();
+    tracker.noteAdmission('ses_child', 'msg_1');
+    tracker.noteAdmission('ses_child', 'msg_1');
+    expect(tracker.firstAdmission('ses_child')).toBe('msg_1');
+    tracker.noteAdmission('ses_child', 'msg_2');
+    expect(tracker.firstAdmission('ses_child')).toBe('msg_1');
+  });
+
+  test('a unique resumed pending binds the admission input', () => {
+    const tracker = createPendingCallTracker();
+    tracker.add(pending({ callId: 'a', resumedTaskId: 'ses_child' }));
+
+    tracker.noteAdmission('ses_child', 'msg_1');
+    expect(tracker.take('a', 'parent-1')?.inputMessageID).toBe('msg_1');
+  });
+
+  test('a repeated identical admission leaves the binding unchanged', () => {
+    const tracker = createPendingCallTracker();
+    tracker.add(pending({ callId: 'a', resumedTaskId: 'ses_child' }));
+
+    tracker.noteAdmission('ses_child', 'msg_1');
+    tracker.noteAdmission('ses_child', 'msg_1');
+    expect(tracker.take('a', 'parent-1')?.inputMessageID).toBe('msg_1');
+  });
+
+  test('a different subsequent admission makes the pending permanently ambiguous', () => {
+    const tracker = createPendingCallTracker();
+    tracker.add(pending({ callId: 'a', resumedTaskId: 'ses_child' }));
+
+    tracker.noteAdmission('ses_child', 'msg_1');
+    tracker.noteAdmission('ses_child', 'msg_2');
+    const taken = tracker.take('a', 'parent-1');
+    expect(taken?.inputMessageID).toBeNull();
+
+    // Permanent: a third id does not revive the binding either.
+    const later = createPendingCallTracker();
+    later.add(pending({ callId: 'b', resumedTaskId: 'ses_child' }));
+    later.noteAdmission('ses_child', 'msg_1');
+    later.noteAdmission('ses_child', 'msg_2');
+    later.noteAdmission('ses_child', 'msg_3');
+    expect(later.take('b', 'parent-1')?.inputMessageID).toBeNull();
+  });
+
+  test('a replayed first admission never re-binds a live pending', () => {
+    const tracker = createPendingCallTracker();
+    tracker.add(pending({ callId: 'a', resumedTaskId: 'ses_child' }));
+
+    tracker.noteAdmission('ses_child', 'msg_1');
+    // Old-context replay of the same first id must not disturb the binding.
+    tracker.noteAdmission('ses_child', 'msg_1');
+    expect(tracker.take('a', 'parent-1')?.inputMessageID).toBe('msg_1');
+
+    // ...and must not bind an unbound pending from a previous generation.
+    tracker.add(pending({ callId: 'b', resumedTaskId: 'ses_child' }));
+    tracker.noteAdmission('ses_child', 'msg_1');
+    expect(tracker.take('b', 'parent-1')?.inputMessageID).toBeUndefined();
+  });
+
+  test('ambiguous resumed targets bind nothing', () => {
+    const tracker = createPendingCallTracker();
+    tracker.add(pending({ callId: 'a', resumedTaskId: 'ses_child' }));
+    tracker.add(pending({ callId: 'b', resumedTaskId: 'ses_child' }));
+
+    tracker.noteAdmission('ses_child', 'msg_1');
+    // Permanent ambiguity, not merely "unbound": it survives the cousin.
+    expect(tracker.peekByCallId('a', 'parent-1')?.inputMessageID).toBeNull();
+    expect(tracker.peekByCallId('b', 'parent-1')?.inputMessageID).toBeNull();
+
+    // Consuming the cousin does not clear the ambiguity for the survivor.
+    tracker.take('a', 'parent-1');
+    tracker.noteAdmission('ses_child', 'msg_2');
+    expect(tracker.take('b', 'parent-1')?.inputMessageID).toBeNull();
+  });
+
+  test.each([2, 3])(
+    'a later admission invalidates all %s matching pendings, not other sessions',
+    (count) => {
+      const tracker = createPendingCallTracker();
+      const calls = Array.from({ length: count }, (_, index) =>
+        pending({ callId: `call-${index}`, resumedTaskId: 'ses_child' }),
+      );
+      tracker.add(calls[0]);
+      tracker.noteAdmission('ses_child', 'msg_a');
+      expect(calls[0].inputMessageID).toBe('msg_a');
+      const other = pending({ callId: 'other', resumedTaskId: 'ses_other' });
+      tracker.add(other);
+      tracker.noteAdmission('ses_other', 'msg_other');
+      for (const call of calls.slice(1)) tracker.add(call);
+
+      tracker.noteAdmission('ses_child', 'msg_b');
+      for (const call of calls) expect(call.inputMessageID).toBeNull();
+      expect(other.inputMessageID).toBe('msg_other');
+      tracker.take(calls[1].callId, 'parent-1');
+      tracker.noteAdmission('ses_child', 'msg_c');
+      for (const call of calls) expect(call.inputMessageID).toBeNull();
+    },
+  );
+
+  test('a resumed pending binds its own later admission, not the session map', () => {
+    const tracker = createPendingCallTracker();
+    // Generation 1: a resume of ses_old admitted msg_1.
+    tracker.add(pending({ callId: 'gen1', resumedTaskId: 'ses_old' }));
+    tracker.noteAdmission('ses_old', 'msg_1');
+    tracker.take('gen1', 'parent-1');
+
+    // Generation 2: the session map still holds msg_1; the pending binds its own.
+    tracker.add(pending({ callId: 'gen2', resumedTaskId: 'ses_old' }));
+    tracker.noteAdmission('ses_old', 'msg_2');
+    const taken = tracker.take('gen2', 'parent-1');
+    expect(taken?.inputMessageID).toBe('msg_2');
+    expect(tracker.firstAdmission('ses_old')).toBe('msg_1');
+  });
+
+  test('fresh pendings (no resumedTaskId) never bind admissions', () => {
+    const tracker = createPendingCallTracker();
+    tracker.add(pending({ callId: 'a' }));
+
+    tracker.noteAdmission('parent-1', 'msg_1');
+    expect(tracker.take('a', 'parent-1')?.inputMessageID).toBeUndefined();
+  });
+
+  test('a resumed pending carries the steer run fence it was created with', () => {
+    const tracker = createPendingCallTracker();
+    tracker.add(
+      pending({
+        callId: 'a',
+        resumedTaskId: 'ses_child',
+        steerAmendment: {
+          taskID: 'ses_child',
+          generation: 3,
+          terminalRevision: 1,
+        },
+      }),
+    );
+    expect(tracker.take('a', 'parent-1')?.steerAmendment).toEqual({
+      taskID: 'ses_child',
+      generation: 3,
+      terminalRevision: 1,
+    });
+  });
+
+  test('the first-admission map clears with lifecycle state', () => {
+    const tracker = createPendingCallTracker();
+    tracker.noteAdmission('ses_child', 'msg_1');
+    tracker.clearSession('ses_child');
+    expect(tracker.firstAdmission('ses_child')).toBeUndefined();
+    tracker.noteAdmission('ses_other', 'msg_3');
+    tracker.clearAll();
+    expect(tracker.firstAdmission('ses_other')).toBeUndefined();
+  });
+
+  test('the first-admission map stays bounded at 256 sessions', () => {
+    const tracker = createPendingCallTracker();
+    for (let i = 0; i < 300; i += 1) {
+      tracker.noteAdmission(`ses_${i}`, `msg_${i}`);
+    }
+    expect(tracker.firstAdmission('ses_0')).toBeUndefined();
+    expect(tracker.firstAdmission('ses_299')).toBe('msg_299');
   });
 });

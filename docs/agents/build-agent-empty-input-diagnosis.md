@@ -166,6 +166,6 @@ v1 calls.
 ---
 
 Regression coverage lives in `src/utils/prompt-agent.test.ts`,
-`src/hooks/foreground-fallback/index.test.ts`, `src/tools/task-message.test.ts`,
+`src/hooks/foreground-fallback/index.test.ts`,
 `src/interview/runtime.test.ts`, `src/interview/finalization.test.ts`, and
 `src/v2/interview-bridge.test.ts`.

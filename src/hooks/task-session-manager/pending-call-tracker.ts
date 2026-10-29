@@ -41,6 +41,21 @@ export interface PendingTaskCall {
    *  window-shifted sole take): the label/objective may belong to a
    *  sibling call and must not be painted onto the board record. */
   identityUnresolved?: boolean;
+  /** Host admission id this resumed call's own input was admitted under,
+   *  bound from the session's admission stream while the pending is live.
+   *  `null` means conflicting admissions were observed (permanent
+   *  ambiguity: never anchor). Absent until an admission matched. */
+  inputMessageID?: string | null;
+  /** Set by the before-hook for a v2 native steer: the run this call
+   *  amends, fenced by the board's own run identity. The call stamps the
+   *  amendment only after the host proves it ran (see
+   *  `registerDelegatedLaunchFromStructured`), and only while that exact
+   *  run still owns the record. */
+  steerAmendment?: {
+    taskID: string;
+    generation: number;
+    terminalRevision: number;
+  };
 }
 
 const MAX_PENDING_TASK_CALLS = 100;
@@ -110,6 +125,17 @@ export interface PendingCallTracker {
     backgroundJobBoard: BackgroundJobBoard,
     backgroundJobSupervisor?: BackgroundJobSupervisor,
   ): void;
+  /** Capture an input id (v1 chat.message, v2 pre-admission prompt hook).
+   *  The first id wins for fresh-run anchors. Only a sole resumed pending
+   *  binds it; a conflicting id or multiple matches permanently pin every
+   *  matching pending null, including earlier bindings. Replays of the
+   *  first id never re-bind a live pending. Capture alone proves no admission:
+   *  only a successful native outcome may commit the bound identity. */
+  noteAdmission(sessionID: string, messageID: string): void;
+  /** FIRST host-confirmed admission id for `sessionID`, when the host
+   *  surfaced one. Used only as a fresh-run transcript identity anchor;
+   *  absence means "no identity", never a guess. */
+  firstAdmission(sessionID: string): string | undefined;
   clearSession(sessionId: string): void;
   clearAll(): void;
   pendingCallId(sessionID?: string, callID?: string): string;
@@ -138,6 +164,14 @@ export function createPendingCallTracker(
     { parentSessionId: string; agentType: string }
   >();
   const MAX_CONSUMED_CALLS = 200;
+
+  /** FIRST host-confirmed input admission per session (identity anchor for
+   *  run-scoped transcript reads). First-wins by construction: a later
+   *  admission of the same session must never replace the input that
+   *  opened its first run. Session-map evidence only anchors FRESH runs;
+   *  a resumed run takes its anchor from its own pending. */
+  const firstAdmissions = new Map<string, string>();
+  const MAX_FIRST_ADMISSIONS = 256;
 
   const recordConsumed = (call: PendingTaskCall): void => {
     consumedCalls.set(callKey(call.parentSessionId, call.callId), {
@@ -470,6 +504,43 @@ export function createPendingCallTracker(
       }
     },
 
+    noteAdmission(sessionID: string, messageID: string) {
+      if (!sessionID || !messageID) return;
+      const knownFirst = firstAdmissions.get(sessionID);
+      if (knownFirst === messageID) {
+        // Replay of the session's first recorded admission: never re-bind a
+        // live pending from old context.
+        return;
+      }
+      if (knownFirst === undefined) {
+        firstAdmissions.set(sessionID, messageID);
+        while (firstAdmissions.size > MAX_FIRST_ADMISSIONS) {
+          firstAdmissions.delete(firstAdmissions.keys().next().value as string);
+        }
+      }
+
+      // Multiple resumes make every matching call permanently ambiguous,
+      // including bindings made before another call joined the window.
+      let match: PendingTaskCall | undefined;
+      let ambiguous = false;
+      for (const pending of pendingCalls.values()) {
+        if (pending.resumedTaskId !== sessionID) continue;
+        if (match) {
+          match.inputMessageID = null;
+          pending.inputMessageID = null;
+          ambiguous = true;
+        }
+        match = pending;
+      }
+      if (!match || ambiguous) return;
+      if (match.inputMessageID === undefined) match.inputMessageID = messageID;
+      else if (match.inputMessageID !== messageID) match.inputMessageID = null;
+    },
+
+    firstAdmission(sessionID: string) {
+      return firstAdmissions.get(sessionID);
+    },
+
     clearSession(sessionId: string) {
       const removed: PendingTaskCall[] = [];
       for (const [callId, pending] of pendingCalls.entries()) {
@@ -483,6 +554,7 @@ export function createPendingCallTracker(
         }
       }
       unresolvedDrainParents.delete(sessionId);
+      firstAdmissions.delete(sessionId);
       // Release queued tickets before active tickets. Releasing an active
       // ticket pumps the scheduler, so doing it in insertion order could
       // admit a later call just as the parent is being deleted.
@@ -496,6 +568,7 @@ export function createPendingCallTracker(
       pendingCalls.clear();
       consumedCalls.clear();
       unresolvedDrainParents.clear();
+      firstAdmissions.clear();
       for (const pending of removed) releaseCallLease(pending);
     },
 

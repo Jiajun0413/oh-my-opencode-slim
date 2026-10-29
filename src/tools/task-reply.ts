@@ -112,7 +112,7 @@ function toFormAnswer(
  *
  * A background child that calls the `question` tool parks with no tokens
  * moving until the host's question.reply/reject API resolves the request —
- * a `task_message` text nudge does NOT unblock it. This tool performs the
+ * a queued text nudge does NOT unblock it. This tool performs the
  * actual reply through the host client, scoped to the calling parent's own
  * tracked children: the task must resolve under the parent session and
  * have a recorded open ask for the given request id. A reply for an

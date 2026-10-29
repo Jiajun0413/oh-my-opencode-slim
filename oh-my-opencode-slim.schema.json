@@ -1418,7 +1418,7 @@
         },
         "enabled": {
           "default": true,
-          "description": "Master switch for the OMOS managed background-task lifecycle (job board, retention, wake scheduler, wall-clock watchdog, terminal gate, and the task_cancel/task_message/task_status/task_reply tools). When false, none of that runs and the native OpenCode task/subagent machinery is left completely untouched; every other backgroundJobs key stays accepted but inert. Default true.",
+          "description": "Master switch for the OMOS managed background-task lifecycle (job board, retention, wake scheduler, wall-clock watchdog, terminal gate, and the task_cancel/task_status/task_reply tools). When false, none of that runs and the native OpenCode task/subagent machinery is left completely untouched; every other backgroundJobs key stays accepted but inert. Default true.",
           "type": "boolean"
         },
         "maxSessionsPerAgent": {
