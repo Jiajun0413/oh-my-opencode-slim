@@ -185,6 +185,8 @@ future sessions; existing work and its future subagents retain their saved
 configuration until you explicitly reapply a preset to that session.
 Already-created children keep their own configuration. Main-session models,
 prompts, tools, skills and MCPs are not switched by the session action.
+The sidebar shows the current session's saved team models and variants;
+`/preset` marks its bound preset separately from the global default.
 On v1, reload OpenCode after applying a preset. See
 [Preset Switching](docs/presets/preset-switching.md) for scope and timing, and
 [Configuration](docs/configuration.md#preset-inheritance) for the inheritance

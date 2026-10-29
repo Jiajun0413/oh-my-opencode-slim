@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { sessionPresetRpc } from './preset-rpc';
 import {
   applyRuntimeProfileOptions,
   createSessionProfileBridge,
@@ -154,6 +155,65 @@ describe('durable session team presets', () => {
     };
   }
 
+  test('state and RPC display the saved team rather than the edited same-name default without binding on read', async () => {
+    const f = fixture();
+    const saved = f.bundle('A');
+    saved.profiles.explorer.model = {
+      providerID: 'test',
+      id: 'saved-A',
+      variant: 'high',
+    };
+    saved.profiles.explorer.sidebarVariant = 'low';
+    saved.profiles.oracle = {
+      sidebarModel: 'default',
+      sidebarVariant: 'max',
+    };
+    saved.profiles.designer = { sidebarModel: 'default' };
+    saved.profiles.fixer = {
+      model: { providerID: 'test', id: 'saved-A' },
+      sidebarModel: 'test/saved-A',
+      sidebarVariant: 'medium',
+    };
+    saved.inheritance.fixer = 'orchestrator';
+    f.values.set('session-preset/v1/root', {
+      schemaVersion: 1,
+      bundle: saved,
+    });
+    // Current and named A resolve to test/A, not the saved test/saved-A.
+    const presets = f.create();
+    const state = await presets.readState('root');
+    expect(state).toEqual({
+      sessionID: 'root',
+      status: 'bound',
+      presetName: 'A',
+      affects: 'future-children-only',
+      team: {
+        agentModels: {
+          explorer: 'test/saved-A',
+          oracle: 'default',
+          designer: 'default',
+          fixer: 'test/saved-A',
+        },
+        agentVariants: { explorer: 'high', oracle: 'max', fixer: 'medium' },
+        inheritance: { oracle: 'session', fixer: 'orchestrator' },
+      },
+    });
+    expect(sessionPresetRpc.methods.read.output.parse(state)).toEqual(state);
+    const unbound = await presets.readState('unbound');
+    expect(unbound).toEqual({
+      sessionID: 'unbound',
+      status: 'unbound',
+      presetName: null,
+      affects: 'future-children-only',
+    });
+    expect(sessionPresetRpc.methods.read.output.parse(unbound)).toEqual(
+      unbound,
+    );
+    expect(f.values.has('session-preset/v1/unbound')).toBe(false);
+    expect(f.order).toEqual([]);
+    await presets.dispose();
+  });
+
   test('roots freeze at admission; switch, descendants and restart keep independent complete bundles', async () => {
     const f = fixture();
     let presets = f.create();
@@ -285,7 +345,15 @@ describe('durable session team presets', () => {
     ).toBe('native-resume-compat');
     expect(f.values.has('session-preset/v1/interrupted-child')).toBe(false);
     expect(f.values.has('session-preset/v1/compat-child')).toBe(false);
-    await presets.apply('old-child', 'B');
+    const applied = await presets.apply('old-child', 'B');
+    expect(applied.team).toEqual({
+      agentModels: { explorer: 'test/B' },
+      agentVariants: { explorer: 'high' },
+      inheritance: { oracle: 'session' },
+    });
+    expect(sessionPresetRpc.methods.apply.output.parse(applied)).toEqual(
+      applied,
+    );
     expect((await presets.ensure('old-child')).execution).toEqual(
       f.bundle('A'),
     );

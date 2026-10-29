@@ -53,9 +53,12 @@ import {
   canOpenPresetManagerV2,
   openPresetManagerV2,
   readSessionPreset,
+  sessionPresetLabel,
   type V2PresetManagerContext,
   type V2PresetUiSurface,
 } from './v2/preset-manager';
+import type { SessionPresetState } from './v2/preset-rpc';
+import { createTeamDisplayIdentity } from './v2/team-display';
 
 const PLUGIN_NAME = 'oh-my-opencode-slim';
 const CONFIG_WARNING_COLOR = 'orange';
@@ -1439,6 +1442,77 @@ export function getContrastForeground(
   return RGBA.fromInts(255, 255, 255);
 }
 
+/** Window-local projection; never writes the directory-wide snapshot. */
+export function projectSidebarTeam(
+  snapshot: TuiSnapshot,
+  state?: SessionPresetState,
+): TuiSnapshot {
+  // Older backends omit team; retain their existing sidebar behavior.
+  const team = state?.team;
+  if (!team) return snapshot;
+  const { canonicalName, projectValues } = createTeamDisplayIdentity(
+    snapshot.agentDisplayNames,
+  );
+  const models = projectValues(team.agentModels);
+  const variants = projectValues(team.agentVariants);
+  const inherited = projectValues(team.inheritance);
+  // Applying a team preset does not change the main agent's live model.
+  const rootModel = projectValues(snapshot.agentModels).orchestrator;
+  const rootVariant = projectValues(snapshot.agentVariants).orchestrator;
+  if (rootVariant === undefined) delete variants.orchestrator;
+  else variants.orchestrator = rootVariant;
+  const names = new Set(
+    [
+      ...getSidebarAgentNames(snapshot),
+      ...Object.keys(team.agentModels),
+      ...Object.keys(team.inheritance),
+    ].map(canonicalName),
+  );
+  if (rootModel === undefined) names.delete('orchestrator');
+  return {
+    ...snapshot,
+    agentModels: Object.fromEntries(
+      [...names].map((name) => [
+        name,
+        name === 'orchestrator'
+          ? (rootModel ?? 'Unknown')
+          : inherited[name]
+            ? `Inherits ${inherited[name]}`
+            : (models[name] ?? 'Unknown'),
+      ]),
+    ),
+    agentVariants: variants,
+    activeSessions: Object.fromEntries(
+      Object.entries(snapshot.activeSessions).map(([sessionID, name]) => [
+        sessionID,
+        canonicalName(name),
+      ]),
+    ),
+    reusableByAgent: Object.fromEntries(
+      Object.entries(snapshot.reusableByAgent).map(([parentID, byAgent]) => {
+        const canonical = new Map<string, (typeof byAgent)[string]>();
+        for (const [name, entries] of Object.entries(byAgent)) {
+          const key = canonicalName(name);
+          canonical.set(key, [...(canonical.get(key) ?? []), ...entries]);
+        }
+        return [
+          parentID,
+          Object.fromEntries(
+            [...canonical].map(([name, entries]) => [
+              name,
+              // Activity readers expect running entries before history.
+              entries.sort(
+                (a, b) =>
+                  Number(b.running === true) - Number(a.running === true),
+              ),
+            ]),
+          ),
+        ];
+      }),
+    ),
+  };
+}
+
 export function renderSidebar(
   snapshot: TuiSnapshot,
   version: string,
@@ -1957,7 +2031,10 @@ interface SidebarRuntimeAdapter {
     presetName?: string,
     sessionLabel?: string,
   ) => SidebarPresetRow | undefined;
-  readSessionPreset?: (directory: string, sessionID: string) => Promise<string>;
+  readSessionPreset?: (
+    directory: string,
+    sessionID: string,
+  ) => Promise<SessionPresetState>;
   onMultiplexerConfig?: (type: MultiplexerType) => void;
   /** v2 hosts only: the prompt's live selected model while the visible
    * route is a root orchestrator session. Overlays the sidebar's
@@ -2120,6 +2197,7 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
     directory: string;
     sessionID: string;
     label: string;
+    state?: SessionPresetState;
   }>();
   let disposed = false;
   let unregisterConfigListener = () => {};
@@ -2180,11 +2258,13 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
     }
     if (adapter.readSessionPreset && currentSession) {
       let label: string;
+      let state: SessionPresetState | undefined;
       try {
-        label = await adapter.readSessionPreset(
+        state = await adapter.readSessionPreset(
           currentDirectory,
           currentSession,
         );
+        label = sessionPresetLabel(state);
       } catch {
         label = 'Unavailable';
       }
@@ -2198,12 +2278,14 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
       if (
         previous?.directory !== currentDirectory ||
         previous?.sessionID !== currentSession ||
-        previous?.label !== label
+        previous?.label !== label ||
+        JSON.stringify(previous?.state) !== JSON.stringify(state)
       ) {
         setSessionPreset({
           directory: currentDirectory,
           sessionID: currentSession,
           label,
+          state,
         });
         stateChanged = true;
       }
@@ -2284,12 +2366,14 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
           const visible = adapter.getVisibleSession();
           const currentSnapshot = snapshot();
           const projection = sessionPreset();
+          const isCurrentProjection =
+            projection?.directory === adapter.getDirectory() &&
+            projection.sessionID === visible;
           const sessionLabel = !adapter.readSessionPreset
             ? undefined
             : visible === undefined
               ? 'No session displayed'
-              : projection?.directory === adapter.getDirectory() &&
-                  projection.sessionID === visible
+              : isCurrentProjection
                 ? projection.label
                 : 'Loading…';
           interaction.syncScope(
@@ -2299,7 +2383,13 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
               : resolveTuiSnapshotRoot(currentSnapshot, visible),
           );
           return renderSidebar(
-            currentSnapshot,
+            overlaySelectedRootModel(
+              projectSidebarTeam(
+                currentSnapshot,
+                isCurrentProjection ? projection.state : undefined,
+              ),
+              adapter.getSelectedRootModel?.(),
+            ),
             adapter.version,
             adapter.theme(),
             configInvalid,
@@ -2463,12 +2553,8 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
       warnPaneUnsupported();
       void reconcilePaneWiring();
     },
-    readSessionPreset: async (directory, sessionID) => {
-      const state = await readSessionPreset(ctx, sessionID, directory);
-      return state.status === 'bound'
-        ? (state.presetName ?? '(no named preset)')
-        : 'Not bound';
-    },
+    readSessionPreset: (directory, sessionID) =>
+      readSessionPreset(ctx, sessionID, directory),
     getPresetRow: (directory, presetName, sessionLabel) => {
       const name = presetName ?? '(none)';
       if (!canOpenPresetManagerV2(ctx)) return { name, sessionLabel };

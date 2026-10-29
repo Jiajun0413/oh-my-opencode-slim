@@ -6,6 +6,13 @@ const state = z.object({
   status: z.enum(['bound', 'unbound']),
   presetName: z.string().nullable(),
   affects: z.literal('future-children-only'),
+  team: z
+    .object({
+      agentModels: z.record(z.string(), z.string()),
+      agentVariants: z.record(z.string(), z.string()),
+      inheritance: z.record(z.string(), z.enum(['session', 'orchestrator'])),
+    })
+    .optional(),
 });
 
 /** Shared server/TUI contract. Call context.client.rpc(sessionPresetRpc).

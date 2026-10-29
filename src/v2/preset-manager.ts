@@ -233,7 +233,9 @@ export function sessionPresetClient(ctx: V2PresetManagerContext) {
       }
     | undefined;
   if (typeof client?.rpc !== 'function') {
-    throw new Error('Session preset RPC unavailable. Nothing was applied.');
+    throw new Error(
+      'Session presets are unavailable on this server. Update the server and reconnect.',
+    );
   }
   return client.rpc(sessionPresetRpc);
 }
@@ -252,8 +254,16 @@ export async function readSessionPreset(
     },
   );
   if (state.sessionID !== sessionID)
-    throw new Error('Session response mismatch.');
+    throw new Error(
+      'The server returned a different session. Reopen Presets to retry.',
+    );
   return state;
+}
+
+export function sessionPresetLabel(state: SessionPresetState): string {
+  return state.status === 'bound'
+    ? (state.presetName ?? '(no named preset)')
+    : 'Not bound';
 }
 
 function assertApplyTarget(run: ManagerRun, target: ApplyTarget): void {
@@ -262,9 +272,7 @@ function assertApplyTarget(run: ManagerRun, target: ApplyTarget): void {
     (target.scope === 'session' &&
       run.ctx.getSessionID?.() !== target.sessionID)
   ) {
-    throw new Error(
-      'The displayed session or workspace changed. Nothing was applied; try again.',
-    );
+    throw new Error('The displayed session or workspace changed.');
   }
 }
 
@@ -276,19 +284,19 @@ async function chooseApplyTarget(
   const sessionID = run.ctx.getSessionID?.();
   const scope = await run.dialog.select<'session' | 'global'>({
     title: `${save ? 'Save & apply' : 'Apply'}: ${presetName}`,
-    placeholder: 'Choose where to apply — no change until confirmed',
+    placeholder: 'Choose where to apply',
     options: [
       {
         title: 'Current session',
         value: 'session',
         description: sessionID
-          ? 'Inference only for future children; root and existing children unchanged'
+          ? 'Model settings for future children in this session'
           : 'Unavailable: open a session first',
       },
       {
         title: 'Global default',
         value: 'global',
-        description: 'Write the user default; already-bound sessions unchanged',
+        description: 'Default preset for new, unbound sessions',
       },
     ],
   });
@@ -299,7 +307,7 @@ async function chooseApplyTarget(
       run.ctx,
       'warning',
       'Preset not applied',
-      'No session is displayed. Open a session first. Global default unchanged.',
+      'No session is displayed. Open a session first.',
     );
     return undefined;
   }
@@ -307,15 +315,15 @@ async function chooseApplyTarget(
     scope === 'session' ? { scope, sessionID: sessionID as string } : { scope };
   const message =
     scope === 'session'
-      ? `Apply "${presetName}" to this session's future child team? Inference only: model, variant, temperature, options and fallback. Root model, existing children, prompts, skills and MCPs stay unchanged. Global default unchanged.`
-      : `Set "${presetName}" as the global default? This writes user config for future unbound roots; project overrides still apply. Live refresh is inference only, not a hot-swap of prompts, skills or MCPs. Already-bound sessions and their future children stay unchanged.`;
+      ? `Use "${presetName}" for future children in this session? Applies model, variant, temperature, options and fallback settings.`
+      : `Set "${presetName}" as the global default for new, unbound sessions? Project overrides still apply.`;
   if (
     !(await run.dialog.confirm({
       title:
         scope === 'session'
           ? 'Apply to current session?'
           : 'Change global default?',
-      message: `${save ? 'First save this preset definition to user config. Saving alone does not change any bound session. ' : ''}${message}`,
+      message: `${save ? 'Save this preset to user config, then apply it. ' : ''}${message}`,
     }))
   )
     return undefined;
@@ -432,14 +440,14 @@ export function liveRefreshSuccessMessage(
   summary: string[] = [],
 ): string {
   const suffix = summary.length > 0 ? ` ${summary.join('; ')}` : '';
-  return `Saved preset "${presetName}" to user config. Live refresh requested, not confirmed — changes affect future unbound roots only; bound sessions unchanged, including their future children.${suffix}`;
+  return `Saved preset "${presetName}". Live refresh requested.${suffix}`;
 }
 
 export function liveRefreshFailureMessage(
   presetName: string,
   reason: string,
 ): string {
-  return `Saved preset "${presetName}" to user config, but the live refresh request failed: ${reason}. Reload OpenCode to refresh the default for future unbound roots. Bound sessions unchanged.`;
+  return `Saved preset "${presetName}" to user config, but the live refresh request failed: ${reason}. Reload OpenCode to refresh the default for new, unbound sessions.`;
 }
 
 /** Run the live-refresh seam after a successful config write and report the
@@ -503,6 +511,7 @@ async function runPresetList(run: ManagerRun): Promise<void> {
     );
     const activePreset = config.preset ?? null;
     const sessionID = run.ctx.getSessionID?.();
+    let sessionState: SessionPresetState | undefined;
     let sessionLabel = 'No session displayed';
     if (sessionID) {
       try {
@@ -511,20 +520,26 @@ async function runPresetList(run: ManagerRun): Promise<void> {
           sessionID,
           run.directory,
         );
-        sessionLabel =
-          state.status === 'bound'
-            ? (state.presetName ?? '(no named preset)')
-            : 'Not bound';
-        if (run.ctx.getSessionID?.() !== sessionID)
+        if (run.ctx.getSessionID?.() !== sessionID) {
           sessionLabel = 'Session changed — reopen manager';
+        } else {
+          sessionState = state;
+          sessionLabel = sessionPresetLabel(state);
+          if (state.presetName && !names.includes(state.presetName))
+            sessionLabel += ' (definition unavailable)';
+        }
       } catch {
-        sessionLabel = 'Unavailable';
+        sessionLabel = 'Unavailable — reopen to retry';
       }
     }
 
     // No presets at all: jump straight to "create" (same as v1). A cancelled
     // create closes the manager — there is nothing else to do.
-    if (names.length === 0 && !activePreset) {
+    if (
+      names.length === 0 &&
+      !activePreset &&
+      sessionState?.status !== 'bound'
+    ) {
       if ((await createAndEditPreset(run)) !== 'created') return;
       continue;
     }
@@ -534,22 +549,25 @@ async function runPresetList(run: ManagerRun): Promise<void> {
         getPresetSource(run.directory, name, 'v2') === 'project';
       const tag = isProject ? ' [project - read-only]' : '';
       return {
-        title:
-          name === activePreset ? `${name} (default)${tag}` : `${name}${tag}`,
+        title: `${name}${sessionState?.status === 'bound' && name === sessionState.presetName ? ' (current session)' : ''}${name === activePreset ? ' (default)' : ''}${tag}`,
         value: wrapUserChoice(name),
         description: describePreset(name, allPresets),
       };
     });
     options.push({ title: '+ Create new preset', value: ACTION_NEW_PRESET });
 
+    const currentPreset =
+      sessionState?.status === 'bound' ? sessionState.presetName : activePreset;
     const choice = await run.dialog.select<PresetChoice>({
-      title: 'Presets',
-      placeholder: `Session team snapshot: ${sessionLabel}. Same name does not imply the same definition; reapply to update.`,
+      title: sessionID
+        ? `Presets — current session: ${sessionLabel}`
+        : 'Presets',
+      placeholder: 'Choose a preset',
       options,
       // Only pass `current` when it matches an option: a stale config preset
       // name must not break the host dialog.
-      ...(activePreset !== null && names.includes(activePreset)
-        ? { current: wrapUserChoice(activePreset) }
+      ...(currentPreset != null && names.includes(currentPreset)
+        ? { current: wrapUserChoice(currentPreset) }
         : {}),
     });
     if (choice === undefined) return; // dismissed → close the manager
@@ -655,7 +673,7 @@ async function applyPresetWithMessage(
         run.ctx,
         'success',
         saved ? 'Preset saved & session team updated' : 'Session team updated',
-        `Session team snapshot: "${state.presetName ?? presetName}". Inference only for future children. Root model, existing children and global default unchanged.`,
+        `"${presetName}" applied.`,
       );
       return;
     }
@@ -671,7 +689,7 @@ async function applyPresetWithMessage(
         run.ctx,
         'warning',
         saved ? 'Preset saved — not applied' : 'Preset not applied',
-        `${saved ? 'Definition saved, but global default was not changed. ' : ''}${result.message}`,
+        `${saved ? 'Definition saved. ' : ''}${result.message}`,
       );
       return;
     }
@@ -686,7 +704,7 @@ async function applyPresetWithMessage(
       run.ctx,
       'warning',
       saved ? 'Preset saved — not applied' : 'Preset not applied',
-      `${saved ? 'Definition saved, but apply was not confirmed. ' : 'Apply was not confirmed. '}${target.scope === 'session' ? 'Global default unchanged. ' : ''}${String(err)}`,
+      `${saved ? 'Definition saved. ' : ''}${String(err)} Reopen Presets to check ${target.scope === 'session' ? 'the session binding' : 'the default'}.`,
     );
   }
 }
