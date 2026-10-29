@@ -7782,6 +7782,24 @@ describe('ForegroundFallbackManager session.deleted', () => {
     (mgr as any).inProgress.delete(sessionID);
   });
 
+  test('handleEvent session.deleted clears sessionParent without a coordinator', async () => {
+    const mgr = new ForegroundFallbackManager(makeChains(), true, {
+      directory: '/test',
+    } as never);
+
+    await mgr.handleEvent({
+      type: 'session.created',
+      properties: { info: { id: 'child', parentID: 'parent' } },
+    });
+    expect((mgr as any).sessionParent.has('child')).toBe(true);
+
+    await mgr.handleEvent({
+      type: 'session.deleted',
+      properties: { info: { id: 'child' } },
+    });
+    expect((mgr as any).sessionParent.has('child')).toBe(false);
+  });
+
   test('shares fallback progress across plugin manager instances', () => {
     const first = new ForegroundFallbackManager(
       makeChains(),
@@ -7806,70 +7824,42 @@ describe('ForegroundFallbackManager session.deleted', () => {
 // ---------------------------------------------------------------------------
 
 // Teardown must actually drop per-session state. None of the maps below
-// have a TTL or prune path, so a leaked entry outlives its session and can
-// change later behavior — e.g. one stale sessionRetryEnabled entry reopens
-// handleEvent's idle gate for every session (see the behavioral test below).
+// have a per-entry TTL or prune sweep, so a leaked entry outlives its session
+// and can change later behavior — e.g. one stale sessionRetryEnabled entry
+// reopens handleEvent's idle gate for every session (see the behavioral
+// test below).
 
-describe('forgetSession (issue #1721)', () => {
+function seedMap(target, id) {
+  if (typeof target.add === 'function') target.add(id);
+  else target.set(id, 1);
+}
+
+describe('ForegroundFallbackManager forgetSession cleanup', () => {
   test.each([
-    ['sessionModel entry is removed on session.deleted', 'sessionModel'],
-    ['activeFallback entry is removed on session.deleted', 'activeFallback'],
-    ['sessionAgent entry is removed on session.deleted', 'sessionAgent'],
-    ['sessionTried entry is removed on session.deleted', 'sessionTried'],
-    ['sessionChains entry is removed on session.deleted', 'sessionChains'],
-    [
-      'sessionRetryEnabled entry is removed on session.deleted',
-      'sessionRetryEnabled',
-    ],
-    [
-      'unknownFinishStreak entry is removed on session.deleted',
-      'unknownFinishStreak',
-    ],
-    ['v2RetryNotices entry is removed on session.deleted', 'v2RetryNotices'],
-    ['lastTrigger entry is removed on session.deleted', 'lastTrigger'],
-    [
-      'lastTriggerModel entry is removed on session.deleted',
-      'lastTriggerModel',
-    ],
-    [
-      'lastSwitchTrigger entry is removed on session.deleted',
-      'lastSwitchTrigger',
-    ],
-    [
-      'triggerIncidents entry is removed on session.deleted',
-      'triggerIncidents',
-    ],
-    [
-      'pendingErrorCorrelation entry is removed on session.deleted',
-      'pendingErrorCorrelation',
-    ],
-    [
-      'lastUserMessageID entry is removed on session.deleted',
-      'lastUserMessageID',
-    ],
-    [
-      'userEventSequence entry is removed on session.deleted',
-      'userEventSequence',
-    ],
-    [
-      'replayMessageIds entry is removed on session.deleted',
-      'replayMessageIds',
-    ],
-    ['retryAttempt entry is removed on session.deleted', 'retryAttempt'],
-    ['sessionRetries entry is removed on session.deleted', 'sessionRetries'],
-    [
-      'deterministicTerminal entry is removed on session.deleted',
-      'deterministicTerminal',
-    ],
-    [
-      'lastFallbackTime entry is removed on session.deleted',
-      'lastFallbackTime',
-    ],
-    [
-      'initialDelayUsed entry is removed on session.deleted',
-      'initialDelayUsed',
-    ],
-  ])('%s', (_label, mapName) => {
+    'sessionModel',
+    'activeFallback',
+    'sessionAgent',
+    'sessionTried',
+    'sessionChains',
+    'sessionRetryEnabled',
+    'unknownFinishStreak',
+    'v2RetryNotices',
+    'lastTrigger',
+    'lastTriggerModel',
+    'lastSwitchTrigger',
+    'triggerIncidents',
+    'pendingErrorCorrelation',
+    'lastUserMessageID',
+    'userEventSequence',
+    'replayMessageIds',
+    'retryAttempt',
+    'sessionRetries',
+    'deterministicTerminal',
+    'lastFallbackTime',
+    'initialDelayUsed',
+    'chainExhaustion',
+    'quotaExhaustedProviders',
+  ])('%s entry is removed on session.deleted', (mapName) => {
     const coordinator = new SessionLifecycle(() => {});
     const mgr = new ForegroundFallbackManager(
       makeChains(),
@@ -7879,13 +7869,15 @@ describe('forgetSession (issue #1721)', () => {
       coordinator,
     );
     const target = (mgr as any)[mapName];
-    if (typeof target.add === 'function') target.add('gone');
-    else target.set('gone', 1);
+    expect(target).toBeDefined();
+    seedMap(target, 'gone');
+    seedMap(target, 'keep');
     coordinator.dispatchSessionDeleted('gone');
     expect(target.has('gone')).toBe(false);
+    expect(target.has('keep')).toBe(true);
   });
 
-  test('a leaked sessionRetryEnabled entry keeps a disabled manager processing events', async () => {
+  test('teardown closes the idle gate for a disabled manager', async () => {
     const coordinator = new SessionLifecycle(() => {});
     const mgr = new ForegroundFallbackManager(
       makeChains(),
@@ -7906,74 +7898,74 @@ describe('forgetSession (issue #1721)', () => {
   });
 });
 
-describe('noteExternalTurn (issue #1721)', () => {
+describe('ForegroundFallbackManager noteExternalTurn cleanup', () => {
   test.each([
-    ['lastTrigger entry is removed on an external turn', 'lastTrigger'],
-    [
-      'lastTriggerModel entry is removed on an external turn',
-      'lastTriggerModel',
-    ],
-    [
-      'lastSwitchTrigger entry is removed on an external turn',
-      'lastSwitchTrigger',
-    ],
-    [
-      'triggerIncidents entry is removed on an external turn',
-      'triggerIncidents',
-    ],
-    ['retryAttempt entry is removed on an external turn', 'retryAttempt'],
-    ['chainExhaustion entry is removed on an external turn', 'chainExhaustion'],
-    [
-      'deterministicTerminal entry is removed on an external turn',
-      'deterministicTerminal',
-    ],
-  ])('%s', (_label, mapName) => {
+    'lastTrigger',
+    'lastTriggerModel',
+    'lastSwitchTrigger',
+    'triggerIncidents',
+    'pendingErrorCorrelation',
+    'lastFallbackTime',
+    'initialDelayUsed',
+    'sessionRetries',
+    'quotaExhaustedProviders',
+    'unknownFinishStreak',
+    'retryAttempt',
+    'chainExhaustion',
+    'deterministicTerminal',
+    'v2RetryNotices',
+  ])('%s entry is removed on an external turn', (mapName) => {
     const mgr = new ForegroundFallbackManager(makeChains(), true, {
       directory: '/test',
-    } as never);
+    });
     const target = (mgr as any)[mapName];
-    if (typeof target.add === 'function') target.add('gone');
-    else target.set('gone', 1);
+    expect(target).toBeDefined();
+    seedMap(target, 'gone');
+    seedMap(target, 'keep');
     (mgr as any).noteExternalTurn('gone', 'msg-1');
     expect(target.has('gone')).toBe(false);
+    expect(target.has('keep')).toBe(true);
   });
 });
 
-describe('dispose (issue #1721)', () => {
-  test.each([
-    ['replayMessageIds are cleared on dispose', 'replayMessageIds'],
-    ['userEventSequence is cleared on dispose', 'userEventSequence'],
-  ])('%s', (_label, mapName) => {
-    const mgr = new ForegroundFallbackManager(makeChains(), true, {
-      directory: '/test',
-    } as never);
-    const target = (mgr as any)[mapName];
-    if (mapName === 'replayMessageIds') target.set('gone', new Set(['m1']));
-    else target.set('gone', 5);
-    mgr.dispose();
-    expect(target.has('gone')).toBe(false);
-  });
+describe('ForegroundFallbackManager dispose cleanup', () => {
+  test.each(['replayMessageIds', 'userEventSequence', 'v2RetryNotices'])(
+    '%s is cleared on dispose',
+    (mapName) => {
+      const mgr = new ForegroundFallbackManager(makeChains(), true, {
+        directory: '/test',
+      });
+      const target = (mgr as any)[mapName];
+      expect(target).toBeDefined();
+      target.set('gone', 1);
+      mgr.dispose();
+      expect(target.has('gone')).toBe(false);
+    },
+  );
 });
 
-describe('resetRecoveryState (issue #1721)', () => {
+describe('ForegroundFallbackManager resetRecoveryState cleanup', () => {
   test.each([
-    [
-      'lastFallbackTime entry is removed on resetRecoveryState',
-      'lastFallbackTime',
-    ],
-    [
-      'initialDelayUsed entry is removed on resetRecoveryState',
-      'initialDelayUsed',
-    ],
-  ])('%s', (_label, mapName) => {
+    'lastFallbackTime',
+    'initialDelayUsed',
+    'retryAttempt',
+    'v2RetryNotices',
+    'sessionRetries',
+    'chainExhaustion',
+    'deterministicTerminal',
+    'sessionTried',
+    'quotaExhaustedProviders',
+  ])('%s entry is removed on resetRecoveryState', (mapName) => {
     const mgr = new ForegroundFallbackManager(makeChains(), true, {
       directory: '/test',
-    } as never);
+    });
     const target = (mgr as any)[mapName];
-    if (typeof target.add === 'function') target.add('gone');
-    else target.set('gone', 1);
+    expect(target).toBeDefined();
+    seedMap(target, 'gone');
+    seedMap(target, 'keep');
     (mgr as any).resetRecoveryState('gone');
     expect(target.has('gone')).toBe(false);
+    expect(target.has('keep')).toBe(true);
   });
 });
 
