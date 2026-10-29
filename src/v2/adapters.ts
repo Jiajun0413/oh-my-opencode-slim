@@ -185,7 +185,8 @@ export function adaptTool(
         sessionID?: string;
         messageID?: string;
         agent?: string;
-        progress?: (m: unknown) => unknown;
+        signal?: AbortSignal;
+        progress?: (m: Record<string, unknown>) => Promise<void>;
       };
       const v1Ctx = {
         sessionID: ctx?.sessionID ?? '',
@@ -197,9 +198,16 @@ export function adaptTool(
             : 'orchestrator'),
         directory,
         worktree: directory,
-        abort: new AbortController().signal,
-        metadata(m: unknown) {
-          log('[v2][tool] metadata (no-op)', { tool: name, m });
+        abort: ctx?.signal ?? new AbortController().signal,
+        metadata(m: { title?: string; metadata?: Record<string, unknown> }) {
+          void ctx
+            ?.progress?.({
+              ...m.metadata,
+              ...(m.title !== undefined ? { title: m.title } : {}),
+            })
+            .catch((error: unknown) => {
+              log('[v2][tool] metadata failed', { tool: name, error });
+            });
         },
         async ask(_m: unknown) {
           /* permission deferred to v2 model */

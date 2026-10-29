@@ -3242,6 +3242,19 @@ describe('removed config keys', () => {
     });
   }
 
+  test('SF-01: drops webfetch.model without losing the other file settings', () => {
+    const { config, warnings } = load({
+      webfetch: { model: 'test/retired-model', enabled: false },
+      sidebar: false,
+    });
+
+    expect(config.agents?.oracle?.model).toBe('test/preset-oracle');
+    expect(config.webfetch).toEqual({ enabled: false });
+    expect(config.sidebar).toBe(false);
+    expect(warnings.map((warning) => warning.kind)).toEqual(['removed-key']);
+    expect(warnings[0]?.message).toContain('"webfetch.model" was removed');
+  });
+
   test('reports every removed key in one file', () => {
     const { config, warnings } = load({
       tmux: {},

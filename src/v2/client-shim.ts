@@ -38,7 +38,7 @@ const HISTORY_PAGE_SIZE = 100;
 const MAX_HISTORY_PAGES = 10;
 const HISTORY_READ_TIMEOUT_MS = 4_000;
 
-/** v2 model reference accepted by `ctx.generate.text`. */
+/** v2 model reference translated from a v1 prompt body. */
 export interface V2GenerateModelRef {
   id: string;
   providerID: string;

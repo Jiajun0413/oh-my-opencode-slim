@@ -481,6 +481,74 @@ describe('foreground fallback redo harness', () => {
     expect(manager.willAttemptFallback(sessionID)).toBe(false);
   });
 
+  test('FB-01: provider marks expire after 30 minutes for the session and its children', async () => {
+    const { manager } = makeManager({
+      chain: ['primary/a', 'backup/b', 'primary/c', 'last/d'],
+      hostFlavor: 'v2',
+      maxRetries: 0,
+    });
+    const switchModel = mock(async (_sessionID: string, _model: unknown) => {});
+    const fail = (sessionID: string, model: string) => {
+      const [providerID, id] = model.split('/');
+      return manager.handleV2Retry(
+        {
+          sessionID,
+          agent: 'orchestrator',
+          model: { providerID, id },
+          error: { type: 'provider.rate-limit', status: 429, message: '429' },
+          decision: { retry: true },
+        },
+        switchModel,
+      );
+    };
+    const recordedAt = Date.now();
+
+    await fail('expiry-parent', 'primary/a');
+    expect(manager.getActiveFallback('expiry-parent')).toEqual({
+      model: 'backup/b',
+      downProviders: new Set(['primary']),
+    });
+    await manager.handleEvent({
+      type: 'session.execution.succeeded',
+      data: { sessionID: 'expiry-parent' },
+    });
+    expect(manager.getActiveFallback('expiry-parent')?.downProviders).toEqual(
+      new Set(['primary']),
+    );
+    await manager.handleEvent({
+      type: 'session.created',
+      properties: { info: { id: 'expiry-child', parentID: 'expiry-parent' } },
+    });
+
+    jest.setSystemTime(recordedAt + 30 * 60_000 - 1);
+    await fail('expiry-parent', 'backup/b');
+    expect(switchModel.mock.calls.at(-1)).toEqual([
+      'expiry-parent',
+      { providerID: 'last', id: 'd' },
+    ]);
+    await fail('expiry-child', 'backup/b');
+    expect(switchModel.mock.calls.at(-1)).toEqual([
+      'expiry-child',
+      { providerID: 'last', id: 'd' },
+    ]);
+
+    jest.setSystemTime(recordedAt + 30 * 60_000);
+    await fail('expiry-child', 'last/d');
+    expect(switchModel.mock.calls.at(-1)).toEqual([
+      'expiry-child',
+      { providerID: 'primary', id: 'a' },
+    ]);
+    expect(manager.getActiveFallback('expiry-parent')).toEqual({
+      model: 'last/d',
+      downProviders: new Set(['backup']),
+    });
+    await fail('expiry-parent', 'last/d');
+    expect(switchModel.mock.calls.at(-1)).toEqual([
+      'expiry-parent',
+      { providerID: 'primary', id: 'a' },
+    ]);
+  });
+
   test('T2: v2 chain walk skips providers abandoned by the session or its parent', async () => {
     const { mocks } = createMockClient();
     const manager = new ForegroundFallbackManager(
@@ -3272,6 +3340,10 @@ describe('ForegroundFallbackManager spent allowance (issue #966)', () => {
       },
     });
     jest.advanceTimersByTime(6_000);
+    // Bun's advanceTimersByTime drops the pinned system time and Date.now()
+    // jumps to the real clock, which would expire the 30-minute provider
+    // marks. Re-pin the clock to the advanced fake time.
+    jest.setSystemTime(1_006_000);
     await manager.handleEvent(failed(sid, 'p2/c', SPENT, 'after-recovery'));
     // p1 is no longer exhausted, only down (activeFallback keeps abandoned
     // providers), so the bounded sticky retry may use p1 again instead of

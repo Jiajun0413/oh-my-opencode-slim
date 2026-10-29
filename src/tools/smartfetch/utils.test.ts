@@ -28,6 +28,16 @@ const CSS_PARSING_ERROR_HTML = `<!DOCTYPE html><html><head>
 </head><body><article><h1>Hello</h1><p>World</p></article></body></html>`;
 
 describe('smartfetch/utils', () => {
+  test('SF-05: preserves inline whitespace separators without indenting block starts', async () => {
+    const html = `<html><body><article><p> \n <strong>Hello</strong> <em>world</em> !</p><p> \n <strong>Next</strong> block</p><p>${'Useful article content with enough detail for Readability. '.repeat(12)}</p></article></body></html>`;
+    const article = await extractFromHtml(html, 'https://example.com/', true);
+    const fallback = await extractFromHtml(html, 'https://example.com/', false);
+
+    expect(article.extractedMain).toBe(true);
+    expect(article.text).toStartWith('Hello world !\n\nNext block\n\n');
+    expect(fallback.text).toStartWith('Hello world !\n\nNext block\n\n');
+  });
+
   test('extracts article content without boilerplate or joined inline words', async () => {
     const html = `<html><body><nav>NAVTOKENR3</nav><article><h1>Main heading</h1><p><b>line break</b> <script>1</script>C# F#</p><p>${'Lorem ipsum dolor sit amet, consectetur adipiscing elit. '.repeat(12)}</p></article><footer>FOOTERTOKENR3</footer></body></html>`;
     const result = await extractFromHtml(
@@ -167,7 +177,7 @@ describe('smartfetch/utils', () => {
     }
   });
 
-  test('suppresses css-parsing errors on both paths but forwards other jsdomErrors', async () => {
+  test('suppresses css-parsing errors during main extraction but forwards other jsdomErrors', async () => {
     const originalError = console.error;
     const errorCalls: unknown[][] = [];
     console.error = (...args: unknown[]) => errorCalls.push(args);

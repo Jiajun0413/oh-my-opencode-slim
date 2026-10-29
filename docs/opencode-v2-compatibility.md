@@ -1062,9 +1062,9 @@ v2.0.x stable hosts both probes fail and the shims degrade:
   because it probes the *shim's* `list` function, which always exists.
   The interview dashboard's session scan likewise sees no sessions from
   `list` on v2.
-- **Session delete.** `client.session.delete` is a **no-op**. No caller is
-  affected: smartfetch summarizes through `generate.text` and never creates
-  temp sessions on v2.
+- **Session delete.** `client.session.delete` is a **no-op** on hosts without
+  `session.remove`. Smartfetch does not create temporary sessions or call a
+  secondary model.
 
 Both degradations announce themselves in the plugin log with a single
 deterministic, **one-time-per-process** warning instead of degrading

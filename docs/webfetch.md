@@ -27,7 +27,7 @@ decision are emitted, and the header is omitted entirely when there is nothing
 to report:
 
 - `title` — page title, when available
-- `final_url` — only when it differs from the requested URL (redirects, llms.txt path)
+- `final_url` — only when it differs from the requested URL (redirects, HTTPS upgrade, llms.txt path; fragments are ignored)
 - `truncated` — only when the body was cut off; a `[..content truncated..]`
   marker is also appended after the body
 - `quality_signals` — only when non-empty:
@@ -60,8 +60,9 @@ URL was attempted and provides the redirect URL so you can fetch it directly.
 Fetches are cached in memory with an LRU cache (50 MiB max, 15-minute TTL).
 Page cache keys include the URL and request options (`format`, `save_binary`);
 changing format re-fetches the page with its preferred `Accept`. llms.txt keeps
-its own text `Accept` and shares one format-independent cache entry, probed
-again when stale.
+its own text `Accept` and shares one format-independent cache entry across
+pages of the same origin, probed again when stale. Permission is requested on
+every call, including cache hits.
 
 Expired entries are revalidated with `ETag`/`Last-Modified` when available.
 On `304` at the same final URL, the cached body is reused and its TTL refreshed.

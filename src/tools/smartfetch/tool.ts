@@ -126,7 +126,9 @@ export function createWebfetchTool(
         save_binary: args.save_binary,
       };
       const cacheKey = buildCacheKey(args.url, cacheOptions);
-      const llmsCacheKey = buildCacheKey(args.url, {
+      // The requested origin distinguishes HTTPS-only and HTTP-fallback probes.
+      const llmsOrigin = new URL(args.url).origin;
+      const llmsCacheKey = buildCacheKey(`${llmsOrigin}/llms-full.txt`, {
         ...cacheOptions,
         format: undefined,
       });
@@ -345,6 +347,7 @@ export function createWebfetchTool(
                 const binaryTooLarge =
                   oversizedBinary ||
                   body.truncated ||
+                  body.data.byteLength > binaryDownloadLimit ||
                   (typeof headerMetadata.contentLength === 'number' &&
                     headerMetadata.contentLength > binaryDownloadLimit);
                 fetchResult = {
@@ -358,8 +361,13 @@ export function createWebfetchTool(
                 };
               } else {
                 const decoded =
-                  provisionalDecoded ||
-                  decodeBody(body.data, headerMetadata.charset, contentType);
+                  contentType === declaredType && provisionalDecoded
+                    ? provisionalDecoded
+                    : decodeBody(
+                        body.data,
+                        headerMetadata.charset,
+                        contentType,
+                      );
                 const rawText = decoded.text;
                 const isHtml = isHtmlLikeContentType(contentType);
                 const extracted = isHtml
@@ -463,7 +471,7 @@ export function createWebfetchTool(
         const header = statusHeader({
           title: fetchResult.title,
           final_url:
-            fetchResult.finalUrl !== url.toString()
+            fetchResult.finalUrl !== (normalized.fallbackUrl ?? normalized.url)
               ? fetchResult.finalUrl
               : undefined,
           truncated: fetchResult.truncated || undefined,

@@ -42,7 +42,7 @@ immediately before native admission; it is never forwarded to the host.
 
 The v2 runtime surface and plugin contracts are adapted through the following data flow:
 
-1. **Capability Detection**: The v2 orchestrator calls `setup(ctx)` which probes optional capabilities like `ctx.generate.text` for one-shot generation and `ctx.location.directory` for directory access.
+1. **Capability Detection**: The v2 orchestrator calls `setup(ctx)` which probes optional capabilities like `ctx.location.directory` for directory access.
 
 2. **V1 Plugin Input Construction**: The client shim builds a v1-shaped `PluginInput` using the v2 session surface where it exists (real delegation) with honest degradation where it doesn't. This includes:
    - Translating `subagent` tool calls to v1 `task` semantics
@@ -56,7 +56,7 @@ The v2 runtime surface and plugin contracts are adapted through the following da
 
    - **Agent domain**: Uses `applyAgentToDraft` to create v2 agent drafts from v1 agent configs, with the orchestrator agent registered as default. Definitions are registered exactly once — config changes never re-register or reload them
     - **Runtime profiles**: A config-candidate watcher (`config-watch.ts`) re-resolves ONLY model/variant/temperature/options through the v1 `v2.refreshProfiles` hook, atomically swaps the profile table, republishes the fallback chains in the same generation (config + marketplace-merged; `buildChainGeneration`/`publishChainGeneration` in the v1 factory), rewrites the sidebar projection (`recordTuiAgentModels`), and freezes the current profile — pinning that chain generation via `v2.pinSessionChains` — for each plugin child (`runtime-profiles.ts`) on the AWAITED `session.prompt` path (the `session.created` event consumer is a prewarm) before its first request (`session.switchModel` unless the child already runs a per-call model/variant that still resolves in the host catalog — a provably retired pin is refreshed to the current profile (issue #1689) —, + request options). A malformed config is rejected before any swap (last-known-good state kept)
-   - **Tool domain**: Uses `adaptTool` to convert v1 tool definitions to v2 JSON schemas via zod shape adaptation
+   - **Tool domain**: Uses `adaptTool` to convert v1 tool definitions to v2 JSON schemas via zod shape adaptation, passing the native cancellation signal to `abort` and tool metadata to `progress`
    - **MCP domain**: Uses `adaptMcpServer` to convert v1 McpConfig to v2 Mcp.ServerConfig (fields are nearly identical with minor cleanup)
    - **Command domain**: Uses marker-based round-trip registration where v2 command drafts are add-only, and `execute` submits whole-text-anchored `<omos-cmd-command>` markers as user prompts
    - **Session hooks**: Single `ctx.session.hook("context")` handles system/messages transforms, chat.message agent tracking, and marker dispatch with interview bridge integration

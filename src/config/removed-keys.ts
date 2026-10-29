@@ -29,6 +29,7 @@ export const REMOVED_CONFIG_KEYS = [
   'fallback.retry_on_empty',
   'fallback.runtimeOverride',
   'multiplexer.zellij_pane_mode',
+  'webfetch.model',
 ] as const;
 
 export function removedConfigKeyMessage(path: string): string {
