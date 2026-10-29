@@ -55,7 +55,6 @@ import {
   createCouncilInjectHook,
   createDeepworkCommandHook,
   createDeepworkGoalHook,
-  createDeepworkGuardHook,
   createDeepworkHeadGate,
   createJsonErrorRecoveryHook,
   createLoopCommandHook,
@@ -616,7 +615,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let deepworkCommandHook:
     | ReturnType<typeof createDeepworkCommandHook>
     | undefined;
-  let deepworkGuardHook: ReturnType<typeof createDeepworkGuardHook> | undefined;
   let reflectCommandHook:
     | ReturnType<typeof createReflectCommandHook>
     | undefined;
@@ -634,9 +632,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     | ReturnType<typeof createAbsolutePathRescueHook>
     | undefined;
   let toolLoopGuard: ToolLoopGuardHook | undefined;
-  let deepworkGuardAfter:
-    | ((i: unknown, o: unknown) => Promise<void>)
-    | undefined;
   let jsonErrorRecoveryAfter: (i: unknown, o: unknown) => Promise<void> =
     async () => {};
   let taskSessionManagerAfter: (i: unknown, o: unknown) => Promise<void> =
@@ -1775,13 +1770,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       absolutePathRescue = createAbsolutePathRescueHook(ctx);
     }
 
-    if (!runtime.disabledHooks.has('deepwork-guard')) {
-      const hook = createDeepworkGuardHook(ctx);
-      deepworkGuardHook = hook;
-      deepworkGuardAfter = wrapPostToolHook('deepwork-guard', (i, o) =>
-        hook['tool.execute.after'](i as never, o as never),
-      );
-    }
     if (!runtime.disabledHooks.has('json-error-recovery')) {
       const jsonErrorRecoveryHook = createJsonErrorRecoveryHook(ctx);
       jsonErrorRecoveryAfter = wrapPostToolHook('json-error-recovery', (i, o) =>
@@ -3289,10 +3277,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         input as never,
         output as never,
       );
-      await deepworkGuardHook?.['tool.execute.before'](
-        input as never,
-        output as never,
-      );
       await taskSessionManagerHook?.['tool.execute.before'](
         input as never,
         output as never,
@@ -3997,7 +3981,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     },
 
     'tool.execute.after': async (input, output) => {
-      await deepworkGuardAfter?.(input, output);
       await jsonErrorRecoveryAfter(input, output);
       await toolLoopGuard?.['tool.execute.after'](
         input as never,

@@ -30,7 +30,6 @@ export {
   createDeepworkHeadGate,
   GOAL_POINTER_METADATA_KEY,
 } from './deepwork-goal';
-export { createDeepworkGuardHook } from './deepwork-guard';
 export {
   ForegroundFallbackManager,
   type ForegroundFallbackModel,
