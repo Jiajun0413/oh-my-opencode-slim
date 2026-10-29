@@ -11,8 +11,13 @@ import {
 } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { type ConfigLoadWarningKind, loadPluginConfig } from '../config/loader';
+import type { ConfigLoadWarningKind } from '../config/loader';
 import type { CompanionConfig } from '../config/schema';
+import {
+  cloneConfigValue,
+  type PluginConfigSnapshot,
+  readPluginConfigSnapshot,
+} from '../config/snapshot';
 import {
   clearProjectPresetOnDisk,
   getPresetSelectionState,
@@ -38,6 +43,7 @@ const activeManagers = new Set<CompanionManager>();
 const MAX_PRESET_REQUESTS = 64;
 const MAX_KNOWN_COMPANION_PROJECTS = 64;
 const PRESET_REFRESH_EVERY_TICKS = 4;
+const POLL_INTERVAL_MS = 250;
 const STATE_PUBLISH_RETRY_MS = 250;
 const HARD_PRESET_REFRESH_WARNING_KINDS: ReadonlySet<ConfigLoadWarningKind> =
   new Set(['invalid-json', 'invalid-schema', 'read-error']);
@@ -169,16 +175,121 @@ export function resolveCompanionBinaryPath(
   return existsSync(bin) ? bin : null;
 }
 
-function readState(): CompanionState {
+/**
+ * Identity of the state file on disk. Two reads with the same identity are
+ * byte-identical, so the parsed state can be reused.
+ */
+interface StateFileIdentity {
+  dev: number;
+  ino: number;
+  mtimeMs: number;
+  ctimeMs: number;
+  size: number;
+}
+
+interface StateFileMemo {
+  identity: StateFileIdentity;
+  state: CompanionState;
+}
+
+/**
+ * Per-process memo of the parsed state file, keyed by the resolved state
+ * path (one entry per distinct `XDG_DATA_HOME` seen in this process). The
+ * memo is only an optimization: every read re-stats the file and falls back
+ * to a full parse whenever the identity moved, so a stale memo can never be
+ * served.
+ */
+const stateFileMemos = new Map<string, StateFileMemo>();
+/** Bound the memo so a process that keeps changing `XDG_DATA_HOME` cannot
+ * grow it without limit. */
+const MAX_STATE_FILE_MEMOS = 4;
+
+function statStateFile(file: string): StateFileIdentity | null {
   try {
-    const raw = readFileSync(stateFilePath(), 'utf8');
+    const stat = statSync(file);
+    return {
+      dev: stat.dev,
+      ino: stat.ino,
+      mtimeMs: stat.mtimeMs,
+      ctimeMs: stat.ctimeMs,
+      size: stat.size,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function sameStateIdentity(
+  left: StateFileIdentity,
+  right: StateFileIdentity,
+): boolean {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.mtimeMs === right.mtimeMs &&
+    left.ctimeMs === right.ctimeMs &&
+    left.size === right.size
+  );
+}
+
+function rememberStateFile(
+  file: string,
+  identity: StateFileIdentity,
+  state: CompanionState,
+): void {
+  if (
+    stateFileMemos.size >= MAX_STATE_FILE_MEMOS &&
+    !stateFileMemos.has(file)
+  ) {
+    const oldest = stateFileMemos.keys().next();
+    if (!oldest.done) stateFileMemos.delete(oldest.value);
+  }
+  stateFileMemos.set(file, { identity, state });
+}
+
+function forgetStateFile(file: string): void {
+  stateFileMemos.delete(file);
+}
+
+/**
+ * Read the companion state file.
+ *
+ * The happy path is a stat plus a memo lookup: the parsed state is reused
+ * while the file identity (`dev`/`ino`/`mtime`/`ctime`/`size`) is unchanged.
+ * A changed identity re-reads and re-parses the file, and the identity is
+ * re-checked afterwards so a file rewritten during the read is never cached
+ * as if it were stable. Any stat/read/parse failure drops the memo and
+ * returns the empty default state, so the next call retries from scratch.
+ */
+function readState(): CompanionState {
+  const file = stateFilePath();
+  const before = statStateFile(file);
+  const memo = stateFileMemos.get(file);
+  if (before && memo && sameStateIdentity(before, memo.identity)) {
+    return memo.state;
+  }
+
+  try {
+    const raw = readFileSync(file, 'utf8');
     const parsed = JSON.parse(raw) as Partial<CompanionState>;
     if (parsed?.version === 1 && Array.isArray(parsed.sessions)) {
-      return parsed as CompanionState;
+      const state = parsed as CompanionState;
+      // Identity drift during the read means the bytes may be a mixture of
+      // two revisions: keep them out of the memo and re-read next time.
+      const after = statStateFile(file);
+      if (after && before && sameStateIdentity(before, after)) {
+        rememberStateFile(file, after, state);
+      } else {
+        forgetStateFile(file);
+      }
+      return state;
     }
   } catch (err) {
     log('[companion] state load failed', String(err));
   }
+  // A missing, unreadable, or malformed file is never remembered: the next
+  // read must observe the repaired file instead of this fallback.
+  forgetStateFile(file);
   return { version: 1, sessions: [] };
 }
 
@@ -234,6 +345,25 @@ function pruneDeadSessions(state: CompanionState): void {
   if (state.preset_requests.length === 0) delete state.preset_requests;
 }
 
+/**
+ * Read the state file for mutation.
+ *
+ * The writer must never hand out the memoized object itself: the mutator
+ * mutates it in place, and the memo is shared with every reader. The memoized
+ * state is therefore cloned before it is handed to the mutator, and a fresh
+ * identity is taken under the lock so a state file rewritten by another
+ * writer (the native Companion) is picked up instead of the stale memo.
+ */
+function readStateForWrite(file: string): CompanionState {
+  const before = statStateFile(file);
+  const memo = stateFileMemos.get(file);
+  if (before && memo && sameStateIdentity(before, memo.identity)) {
+    return structuredClone(memo.state);
+  }
+  forgetStateFile(file);
+  return structuredClone(readState());
+}
+
 function writeState(mutator: (state: CompanionState) => void): boolean {
   const file = stateFilePath();
   try {
@@ -244,7 +374,7 @@ function writeState(mutator: (state: CompanionState) => void): boolean {
     const release = acquirePidFileLock(file);
     if (!release) return false;
     try {
-      const state = readState();
+      const state = readStateForWrite(file);
       pruneDeadSessions(state);
       mutator(state);
       const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
@@ -255,6 +385,12 @@ function writeState(mutator: (state: CompanionState) => void): boolean {
         return false;
       }
       renameSync(tmp, file);
+      // The published file is the new source of truth: refresh the memo
+      // only after the rename succeeded, so a failed write can never leave
+      // readers with a memo that does not match the file on disk.
+      const identity = statStateFile(file);
+      if (identity) rememberStateFile(file, identity, structuredClone(state));
+      else forgetStateFile(file);
       return true;
     } finally {
       release();
@@ -274,27 +410,6 @@ export function companionSessionIdForDirectory(directory: string): string {
     .digest('hex')
     .slice(0, 12);
   return `proc_${process.pid}_${digest}`;
-}
-
-export function normalizeCompanionSessionStatus(
-  eventType: string,
-  status?: string,
-): 'busy' | 'idle' | undefined {
-  if (eventType === 'session.idle' || eventType === 'session.error') {
-    return 'idle';
-  }
-  if (eventType !== 'session.status') return undefined;
-  if (status === 'busy' || status === 'retry') return 'busy';
-  if (
-    status === 'idle' ||
-    status === 'completed' ||
-    status === 'stopped' ||
-    status === 'error' ||
-    status === 'failed'
-  ) {
-    return 'idle';
-  }
-  return undefined;
 }
 
 /**
@@ -337,16 +452,30 @@ export class CompanionManager {
   private presetResultOk: boolean | undefined;
   private presetLastScope: CompanionPresetScope | undefined;
   private readonly appliedPresetRequestIds = new Set<string>();
+  /**
+   * Fingerprint of the config snapshot the published preset state was
+   * derived from. `undefined` while nothing was derived yet, and never set
+   * from an errored snapshot (hard warnings) so a repaired config is always
+   * re-derived instead of being mistaken for the last good input.
+   */
+  private presetSnapshotFingerprint: string | undefined;
+  /**
+   * Snapshot taken by the root orchestrator during async setup and passed
+   * in so the first refresh does not duplicate that initialization load.
+   */
+  private pendingInitialSnapshot?: PluginConfigSnapshot;
 
   constructor(
     sessionId: string,
     cwd: string,
     config?: CompanionConfig,
     private readonly hostFlavor?: string,
+    initialSnapshot?: PluginConfigSnapshot,
   ) {
     this.id = sessionId;
     this.cwd = cwd;
     this.config = config;
+    this.pendingInitialSnapshot = initialSnapshot;
   }
 
   private restoreAttentionState(): void {
@@ -367,17 +496,20 @@ export class CompanionManager {
   }
 
   private refreshPresetState(): boolean {
-    let hardWarning = false;
-    loadPluginConfig(this.cwd, {
-      hostFlavor: this.hostFlavor,
-      silent: true,
-      onWarning: (warning) => {
-        if (HARD_PRESET_REFRESH_WARNING_KINDS.has(warning.kind)) {
-          hardWarning = true;
-        }
-      },
-    });
-    if (hardWarning) return false;
+    const snapshot =
+      this.pendingInitialSnapshot ??
+      readPluginConfigSnapshot(this.cwd, { hostFlavor: this.hostFlavor });
+    this.pendingInitialSnapshot = undefined;
+    if (
+      snapshot.warnings.some((warning) =>
+        HARD_PRESET_REFRESH_WARNING_KINDS.has(warning.kind),
+      )
+    ) {
+      return false;
+    }
+    if (this.presetSnapshotFingerprint === snapshot.fingerprint) {
+      return false;
+    }
 
     const next = getPresetSelectionState(this.cwd, this.hostFlavor);
     const projectCatalogChanged =
@@ -397,6 +529,10 @@ export class CompanionManager {
       projectCatalogChanged ||
       globalCatalogChanged;
 
+    // The fingerprint is recorded even when the derived view did not change:
+    // it is the input identity, not the output identity, so an unchanged view
+    // under a changed input must become the new fast-path baseline.
+    this.presetSnapshotFingerprint = snapshot.fingerprint;
     if (!changed) return false;
     this.effectivePreset = next.effective;
     this.projectPreset = next.project;
@@ -416,7 +552,15 @@ export class CompanionManager {
     this.presetRefreshTick += 1;
     if (this.presetRefreshTick < PRESET_REFRESH_EVERY_TICKS) return;
     this.presetRefreshTick = 0;
+    this.refreshConfigDrivenPresetState();
+  }
 
+  /**
+   * The once-per-four-ticks (~1s) config refresh: only an external
+   * `/preset` or manual config edit lands here, and it supersedes feedback
+   * from an older Companion request.
+   */
+  private refreshConfigDrivenPresetState(): void {
     if (this.refreshPresetState()) {
       // An external /preset or manual config edit supersedes feedback from an
       // older Companion request.
@@ -430,7 +574,10 @@ export class CompanionManager {
 
   private startPresetPoller(): void {
     if (this.presetPoller) return;
-    this.presetPoller = setInterval(() => this.pollPresetState(), 250);
+    this.presetPoller = setInterval(
+      () => this.pollPresetState(),
+      POLL_INTERVAL_MS,
+    );
     this.presetPoller.unref();
   }
 
@@ -491,7 +638,10 @@ export class CompanionManager {
 
   private consumePresetRequest(): boolean {
     if (this.config?.enabled !== true) return false;
-    const request = readState().preset_requests?.find(
+    // One shared read serves both the request selection and the offline
+    // known-project validation; a second identical read adds only latency.
+    const state = readState();
+    const request = state.preset_requests?.find(
       (candidate) => candidate.session_id === this.id,
     );
     if (!request) return false;
@@ -509,7 +659,7 @@ export class CompanionManager {
 
     const offlineTarget = request.target_cwd?.trim();
     const targetCwd = offlineTarget
-      ? resolveKnownCompanionProject(readState(), offlineTarget)
+      ? resolveKnownCompanionProject(state, offlineTarget)
       : this.cwd;
     let targetAvailable = targetCwd !== null;
     if (offlineTarget && targetCwd) {
@@ -535,25 +685,23 @@ export class CompanionManager {
         };
       }
 
-      let invalidConfig = false;
-      const config = loadPluginConfig(targetCwd, {
-        silent: true,
+      const snapshot = readPluginConfigSnapshot(targetCwd, {
         hostFlavor: this.hostFlavor,
-        onWarning: (warning) => {
-          if (HARD_PRESET_REFRESH_WARNING_KINDS.has(warning.kind)) {
-            invalidConfig = true;
-          }
-        },
       });
-      if (invalidConfig) {
+      if (
+        snapshot.warnings.some((warning) =>
+          HARD_PRESET_REFRESH_WARNING_KINDS.has(warning.kind),
+        )
+      ) {
         return {
           ok: false,
           presetName: '',
           message:
-            'Cannot edit preset: project configuration cannot be read or validated. No files were changed.',
+            'Project configuration cannot be read or validated. Nothing was changed.',
           summary: [],
         };
       }
+      const config = cloneConfigValue(snapshot.config);
       if (scope === 'project' && request.inherit === true) {
         return clearProjectPresetOnDisk(targetCwd, this.hostFlavor);
       }
@@ -585,11 +733,16 @@ export class CompanionManager {
         );
         if (!known) return;
         known.preset = {
-          current: next?.effective ?? known.preset?.current,
+          // The frozen snapshot handed out above may have been consumed by
+          // the switch; the memoized known-project row is persisted JSON, so
+          // clone the derived objects to keep the cache private.
+          current: cloneConfigValue(next?.effective ?? known.preset?.current),
           available: next?.projectAvailable ?? known.preset?.available ?? [],
-          effective: next?.effective ?? known.preset?.effective,
-          project: next?.project ?? known.preset?.project,
-          global: next?.global ?? known.preset?.global,
+          effective: cloneConfigValue(
+            next?.effective ?? known.preset?.effective,
+          ),
+          project: cloneConfigValue(next?.project ?? known.preset?.project),
+          global: cloneConfigValue(next?.global ?? known.preset?.global),
           project_available:
             next?.projectAvailable ?? known.preset?.project_available ?? [],
           global_available:
@@ -618,17 +771,7 @@ export class CompanionManager {
 
   onLoad(): void {
     if (this.config?.enabled !== true) {
-      CompanionManager.disposeActiveManagers(this.id);
-      try {
-        if (!existsSync(stateFilePath())) return;
-        writeState((state) => {
-          state.sessions = state.sessions.filter(
-            (s) => s.session_id !== this.id,
-          );
-        });
-      } catch (err) {
-        log('[companion] status update failed', String(err));
-      }
+      pruneDisabledCompanionSession(this.id);
       return;
     }
     this.restorePresetRequestFence();
@@ -682,7 +825,7 @@ export class CompanionManager {
     activeManagers.delete(this);
   }
 
-  private static disposeActiveManagers(sessionId?: string): void {
+  static disposeActiveManagers(sessionId?: string): void {
     for (const manager of [...activeManagers]) {
       if (sessionId && manager.id !== sessionId) continue;
       manager.onExit();
@@ -1055,5 +1198,22 @@ export class CompanionManager {
     } finally {
       releasePidFileLock?.();
     }
+  }
+}
+
+/**
+ * Disabled-companion startup cleanup: stop any manager this process still
+ * runs for the session (live config flip) and drop the session's stale
+ * entry from the shared state file. Never creates the state file.
+ */
+export function pruneDisabledCompanionSession(sessionId: string): void {
+  CompanionManager.disposeActiveManagers(sessionId);
+  try {
+    if (!existsSync(stateFilePath())) return;
+    writeState((state) => {
+      state.sessions = state.sessions.filter((s) => s.session_id !== sessionId);
+    });
+  } catch (err) {
+    log('[companion] status update failed', String(err));
   }
 }

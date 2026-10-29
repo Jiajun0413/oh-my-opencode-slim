@@ -132,8 +132,8 @@ export function applyActivityEvent(
   tracker: TaskActivityTracker,
   event: ActivityEvent,
   now = Date.now(),
+  sessionID = resolveEventSessionID(event),
 ): void {
-  const sessionID = resolveEventSessionID(event);
   if (!sessionID) return;
   if (shouldRecordActivity(event)) {
     tracker.touch(sessionID, now);

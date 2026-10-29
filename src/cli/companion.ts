@@ -5,8 +5,8 @@ import {
   getCompanionBinaryPath,
   getCompanionTarget,
 } from '../companion/updater';
-import { mutateJsonFile } from './config-io';
-import { getExistingLiteConfigPath } from './paths';
+import { mutateJsonFile } from '../config/json-file';
+import { getExistingLiteConfigPath } from '../config/paths';
 import type { ConfigMergeResult } from './types';
 
 export { getCompanionBinaryPath, getCompanionTarget };

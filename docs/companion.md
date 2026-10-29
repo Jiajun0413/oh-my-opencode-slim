@@ -139,6 +139,11 @@ You can enable the companion by adding a `companion` section to your setting con
 }
 ```
 
+`companion.enabled` is also the cold-gate switch: when it is `false` (the
+default), the plugin does not construct the Companion manager, start its
+pollers, or write Companion state. Setting it to `true` enables the whole
+surface; no code is removed.
+
 ### Supported Values
 
 - **`companion.position`**:

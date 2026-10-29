@@ -496,6 +496,30 @@ describe('resolveInstalledVersion', () => {
 });
 
 describe('checkForUpdate', () => {
+  test('finds the running package manifest from a nested emitted chunk', async () => {
+    const root = makeTempRoot();
+    try {
+      writeInstall(root, '3.0.4');
+      const moduleUrl = pathToFileURL(
+        path.join(root, 'dist', 'server', 'chunks', 'hash.js'),
+      );
+      const check = await checkForUpdate(
+        {},
+        {
+          moduleUrl,
+          fetchImpl: async () => ({
+            ok: true,
+            json: async () => ({ version: '3.0.5' }),
+          }),
+        },
+      );
+      expect(check.installed).toBe('3.0.4');
+      expect(check.notify).toBe('3.0.5');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test('reports the decision for an outdated install', async () => {
     const root = makeTempRoot();
     try {

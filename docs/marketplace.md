@@ -53,6 +53,11 @@ called inside a running plugin generation. Standalone CLI status reports
 `liveAvailable: false`, `livePackages: null`, and `reloadRequired: null`, since
 it cannot inspect the host's in-memory agent registry.
 
+Status and reload checks share their inspection inputs. Package verification
+still runs on every inspection; a desired registry projection is rebuilt from
+the current config, host and package digest facts when status is requested.
+Failed or incomplete inspections never become a cached success.
+
 ## Orchestrator tools
 
 The orchestrator can use `marketplace_inspect` (`list`, `show`, `verify`,

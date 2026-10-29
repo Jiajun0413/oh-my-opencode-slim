@@ -1,13 +1,16 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { stripJsonComments } from '../../config/jsonc';
 import {
   getOpenCodeConfigPaths,
-  stripJsonComments,
-} from '../../cli/config-manager';
-import { getTuiConfig, getTuiConfigJsonc } from '../../cli/paths';
+  getTuiConfig,
+  getTuiConfigJsonc,
+} from '../../config/paths';
 import { INSTALLER_MANAGED_PLUGIN_OPTION } from '../../plugin-entry';
 import { log } from '../../utils/logger';
+import { findOwnedPackageJson } from '../../utils/package-root';
+import { compareNumericVersions } from '../../utils/version';
 import {
   INSTALLED_PACKAGE_JSON,
   NPM_FETCH_TIMEOUT,
@@ -247,16 +250,11 @@ function compareVersions(a: string, b: string): number {
   const parsedB = parseVersion(b);
   if (!parsedA || !parsedB) return a.localeCompare(b);
 
-  const parts: Array<keyof Pick<ParsedVersion, 'major' | 'minor' | 'patch'>> = [
-    'major',
-    'minor',
-    'patch',
-  ];
-  for (const part of parts) {
-    if (parsedA[part] !== parsedB[part]) {
-      return parsedA[part] - parsedB[part];
-    }
-  }
+  const numeric = compareNumericVersions(
+    [parsedA.major, parsedA.minor, parsedA.patch],
+    [parsedB.major, parsedB.minor, parsedB.patch],
+  );
+  if (numeric !== 0) return numeric;
 
   if (parsedA.prerelease === parsedB.prerelease) return 0;
   if (!parsedA.prerelease) return 1;
@@ -372,31 +370,11 @@ function getLocalDevPath(directory: string): string | null {
 
 /**
  * Recursively searches upwards for a package.json belonging to this plugin.
+ * Shared with the TUI update notice (`src/utils/package-root.ts`) — no
+ * caller-side traversal logic duplicates here.
  */
 function findPackageJsonUp(startPath: string): string | null {
-  try {
-    const stat = fs.statSync(startPath);
-    let dir = stat.isDirectory() ? startPath : path.dirname(startPath);
-
-    for (let i = 0; i < 10; i++) {
-      const pkgPath = path.join(dir, 'package.json');
-      if (fs.existsSync(pkgPath)) {
-        try {
-          const content = fs.readFileSync(pkgPath, 'utf-8');
-          const pkg = JSON.parse(content) as PackageJson;
-          if (pkg.name === PACKAGE_NAME) return pkgPath;
-        } catch {
-          /* empty */
-        }
-      }
-      const parent = path.dirname(dir);
-      if (parent === dir) break;
-      dir = parent;
-    }
-  } catch {
-    /* empty */
-  }
-  return null;
+  return findOwnedPackageJson(startPath, PACKAGE_NAME)?.path ?? null;
 }
 
 /**
@@ -479,7 +457,6 @@ export function findPluginEntry(directory: string): PluginEntryInfo | null {
   return selected;
 }
 
-const _cachedLocalVersion: string | null = null;
 let cachedPackageVersion: string | null = null;
 
 /**

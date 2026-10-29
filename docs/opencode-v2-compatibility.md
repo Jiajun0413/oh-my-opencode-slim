@@ -15,10 +15,19 @@ removed, and v1-era skill drafts expose `{source, list}` rather than `add`.
 The adapter targets the v2 plugin API surface (see
 [The v2 plugin API surface](#the-v2-plugin-api-surface-this-adapter-uses)),
 and the compile-time mirror guard below is pinned to `@opencode/plugin`
-2.1.4. Typecheck covers the consumed listing filters, nullable continuation
+2.2.0. Typecheck covers the consumed listing filters, nullable continuation
 cursors, native execution event envelope, compaction result names and the
 existing hook/permission contracts. This is source-contract coverage against
-v2.1.4; the latest live-host smoke baseline remains the version stated below.
+v2.2.0; the latest live-host smoke baseline remains the version stated below.
+
+The 2.2.0 release adds the Desktop GUI plugin SDK, per-session
+`session.instructions.entry.*`, type-filtered event subscriptions,
+`experimental.generate`, and richer media endpoints. OMOS freezes its required
+event-type union at setup and subscribes to Interview text streams only when
+Interview is enabled. It consumes none of the GUI surface and retains the
+existing promise-adapter bridges. The native patch tool is
+still named `patch` with a `{ patchText }` input, and the apply-patch preflight
+now serves both that name and v1's `apply_patch`.
 
 The 2.1 replay renames do not require rewriting host-owned data here: the
 compaction bridge leaves `result.native` and `metadata.keepID` untouched.
@@ -89,24 +98,29 @@ plugin rejected with "invalid tui export".
   the entry through the package's `exports["./tui"]` map — the server-side
   export plays no role in that discovery.
 
-Three builds are produced:
+The host entry builds retain their public paths and include ESM chunks for
+optional implementations. Install or copy the complete package: an entry file
+alone is no longer self-contained. Packed-artifact verification checks every
+relative static and dynamic import target.
+
+Three host entry builds are produced:
 
 | Export | File | Build | Externals |
 |---|---|---|---|
 | `.` (main) | `dist/index.js` | `build:plugin` | zod, jsdom, @opencode-ai/*, @opentui/* (shared with v1 host) |
-| `./server` | `dist/server/index.js` | `build:v2` | jsdom only (self-contained for v2) |
+| `./server` | `dist/server/index.js` + chunks | `build:v2` | jsdom, jsonc-parser (other runtime dependencies bundled) |
 | `./tui` | `dist/tui2.js` | `build:tui` | same external set as `build:plugin` (composes the v1 TUI entry; inlines zod) |
 
-The optional `@opentui/*` pins (0.5.11) provide the v2 TUI entry's rendering
-stack. The development-only `@opencode/plugin` 2.1.4 contract declares an
-optional OpenTUI peer floor of `>=0.6.8`. Runtime pins stay unchanged in
-this patch; TUI runtime compatibility with that peer floor is unverified. `@opentui/solid` pins
-`solid-js` exactly (0.5.12 still requires 1.9.12), so any future OpenTUI
-bump must re-check that pin.
+The optional `@opentui/*` dependencies provide the v2 TUI entry's rendering
+stack. The development-only `@opencode/plugin` 2.2.0 contract declares an
+optional OpenTUI peer floor of `0.7.0`; the runtime pins track that family
+(`@opentui/core`/`@opentui/solid` 0.7.0) so the dependency-contract test and
+the host agree. `@opentui/solid` pins `solid-js` exactly (0.7.0 requires
+1.9.12), so any future OpenTUI bump must re-check that pin.
 
 v2's plugin resolver tries the `server` subpath first
 (`subpaths: ["server", ""]`), which the exports map resolves directly to
-`dist/server/index.js` — the self-contained v2 server bundle, and the
+`dist/server/index.js` — the v2 server entry with its packaged chunks, and the
 artifact the release check requires. Local source development registers an
 external shim directory instead of pointing at `dist/` (see
 [Local source development](#local-source-development-no-publishing)); v1
@@ -135,7 +149,7 @@ Verified live on OpenCode v2 (all bridges green — health check
 name for the chat.headers bridge; the event stream and bridges are exercised end-to-end on the stable host;
 since the council 2026-10-23 removal the plugin creates no wake scheduler on
 v2 — terminal delivery is the host's native background notifier). v2 conformance is compile-time-pinned by the
-mirror-conformance guard against the `@opencode/plugin` 2.1.4
+mirror-conformance guard against the `@opencode/plugin` 2.2.0
 devDependency and exercised by the mock-driven bridge tests. Every v2
 API the adapter touches is
 capability-probed at runtime (`s.switchModel`, `ctx.generate`, …), so a host

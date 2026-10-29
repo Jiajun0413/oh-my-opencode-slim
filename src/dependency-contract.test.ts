@@ -167,6 +167,59 @@ function importChain(
   return chain;
 }
 
+function eagerDependencies(entry: string): Set<string> {
+  const parser = new Bun.Transpiler({ loader: 'ts' });
+  const found = new Set<string>();
+  const pending = [entry];
+  for (let index = 0; index < pending.length; index += 1) {
+    const file = pending[index];
+    if (found.has(file)) continue;
+    found.add(file);
+    // Bundled skills are imported as raw Markdown, not executable modules.
+    if (!/\.[cm]?[jt]sx?$/.test(file)) continue;
+    const source = readFileSync(file, 'utf8');
+    let dependencies: ReturnType<Bun.Transpiler['scan']>['imports'];
+    try {
+      dependencies = parser.scan(source).imports;
+    } catch (error) {
+      throw new Error(`Cannot parse eager dependency ${file}`, {
+        cause: error,
+      });
+    }
+    for (const dependency of dependencies) {
+      if (dependency.kind !== 'import-statement') continue;
+      const target = resolveRelativeImport(
+        file,
+        dependency.path.replace(/\.js$/, ''),
+      );
+      if (target && !found.has(target)) pending.push(target);
+    }
+  }
+  return found;
+}
+
+describe('optional implementation loading', () => {
+  test('server eager graph excludes disabled feature implementations and CLI I/O', () => {
+    const eager = eagerDependencies(SERVER_ENTRY);
+    expect(eager.has(path.join(SRC_DIR, 'agents', 'registry.ts'))).toBe(true);
+    for (const file of [
+      'interview/manager.ts',
+      'interview/parser.ts',
+      'interview/server.ts',
+      'marketplace/activation.ts',
+      'marketplace/agent-definitions.ts',
+      'marketplace/schemas.ts',
+      'marketplace/service.ts',
+      'companion/manager.ts',
+      'companion/updater.ts',
+      'cli/config-io.ts',
+      'cli/paths.ts',
+    ]) {
+      expect(eager.has(path.join(SRC_DIR, file))).toBe(false);
+    }
+  });
+});
+
 describe('server entry dependency graph (pane process boundary)', () => {
   const graph = collectDependencyGraph(SERVER_ENTRY);
   const reachable = [...graph.keys()];

@@ -20,8 +20,8 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import * as pathsMod from '../config/paths';
 import * as packageManagerModule from '../utils/package-manager';
-import * as pathsMod from './paths';
 
 type SpawnResult = {
   exited: Promise<number>;

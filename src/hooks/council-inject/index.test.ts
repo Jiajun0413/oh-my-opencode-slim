@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import { createInternalAgentTextPart } from '../../utils';
+import { createInternalAgentTextPart } from '../../utils/internal-initiator';
+import { appendTaggedSyntheticPart } from '../cache-safe-injection';
+import { createMessageTransformView } from '../message-transform-view';
+import type { MessageWithParts } from '../types';
 import {
   buildCouncilModeBlock,
   COUNCIL_INJECT_METADATA_KEY,

@@ -1,9 +1,5 @@
 import * as path from 'node:path';
 import type { PluginInput } from '@opencode-ai/plugin';
-import {
-  ensureCompanionVersion,
-  loadCompanionManifestFromPackageRoot,
-} from '../../companion/updater';
 import { TOAST_DURATION_MS } from '../../config/constants';
 import { crossSpawn } from '../../utils/compat';
 import { log } from '../../utils/logger';
@@ -86,6 +82,8 @@ async function ensureCompanionForPackageRoot(
 
   if (companion?.enabled === true) {
     try {
+      const { ensureCompanionVersion, loadCompanionManifestFromPackageRoot } =
+        await import('../../companion/updater');
       const manifest = loadCompanionManifestFromPackageRoot(packageRoot);
       const companionResult = await ensureCompanionVersion({
         config: companion,

@@ -1,4 +1,4 @@
-import { MarketplacePackageIdSchema } from './schemas.js';
+import { MarketplacePackageIdSchema } from './id-schema.js';
 
 export function normalizeMarketplacePackageId(value: string): string {
   const normalized = value.trim().toLowerCase();

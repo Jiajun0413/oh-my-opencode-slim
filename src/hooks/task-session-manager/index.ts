@@ -32,9 +32,13 @@ import {
   DEFAULT_RUNTIME_SESSION_STATUS_TIMEOUT_MS,
   readLiveSession,
 } from '../../utils/session-runtime-status';
+import {
+  type MessageTransformView,
+  resolveView,
+} from '../message-transform-view';
 import { isGenuineOperatorMessage } from '../orchestrator-wake/index';
 import type { SessionLifecycle } from '../session-lifecycle';
-import { isMessageWithParts, isUserMessageWithParts } from '../types';
+import { isMessageWithParts } from '../types';
 import {
   BACKGROUND_JOB_BOARD_METADATA_KEY,
   type InjectionState,
@@ -954,8 +958,10 @@ export function createTaskSessionManagerHook(
     'experimental.chat.messages.transform': async (
       _input: Record<string, never>,
       output: { messages?: unknown },
+      view?: MessageTransformView,
     ): Promise<void> => {
       const messages = Array.isArray(output.messages) ? output.messages : [];
+      const resolved = resolveView(view, messages);
       if (adoptionEnabled) {
         let viewSession: unknown;
         let viewStart = Number.POSITIVE_INFINITY;
@@ -993,14 +999,18 @@ export function createTaskSessionManagerHook(
         await runtimeStatusReconciler.reconcile();
       }
 
-      for (const [messageIndex, message] of messages.entries()) {
-        if (!isUserMessageWithParts(message)) continue;
-        if (
-          !message.info.sessionID ||
-          !options.shouldManageSession(message.info.sessionID)
-        ) {
+      // The view's user entries carry the source-array indices: the
+      // injected-completion occurrence IDs below key on part indices and
+      // must see the same positions the transcript array holds. Part reads
+      // stay live — stabilize/rehydrate above mutate parts in place, and
+      // nothing here adds or removes messages, so the indices hold.
+      for (const { index: messageIndex, message } of resolved.userEntries) {
+        if (!message.info.sessionID) {
+          continue;
+        }
+        if (!options.shouldManageSession(message.info.sessionID)) {
           const sessionID = message.info.sessionID;
-          if (!sessionID || message.info.agent !== 'orchestrator') {
+          if (message.info.agent !== 'orchestrator') {
             continue;
           }
           options.registerSessionAsOrchestrator?.(sessionID);

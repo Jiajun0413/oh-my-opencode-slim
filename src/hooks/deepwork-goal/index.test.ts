@@ -8,6 +8,7 @@ import {
 } from 'node:fs';
 import { stripTaggedContent } from '../cache-safe-injection';
 import { routerHeadAnnouncement } from '../deepwork';
+import { createMessageTransformView } from '../message-transform-view';
 import { BACKGROUND_JOB_BOARD_METADATA_KEY } from '../task-session-manager/board-injection';
 import type { MessageWithParts } from '../types';
 import {

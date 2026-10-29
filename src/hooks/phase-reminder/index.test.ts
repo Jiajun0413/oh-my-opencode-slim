@@ -2,7 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import {
   createInternalAgentTextPart,
   SLIM_INTERNAL_INITIATOR_MARKER,
-} from '../../utils';
+} from '../../utils/internal-initiator';
+import { createMessageTransformView } from '../message-transform-view';
 import {
   createPhaseReminderHook,
   hasPhaseReminder,

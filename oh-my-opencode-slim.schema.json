@@ -8,6 +8,10 @@
     "setDefaultAgent": {
       "type": "boolean"
     },
+    "tui": {
+      "description": "Master switch for all OMOS TUI surfaces (sidebar, /preset, /killall, /subagent, update notice). When false, the TUI entry registers nothing; server-side features are untouched. Defaults to true.",
+      "type": "boolean"
+    },
     "compactSidebar": {
       "description": "Use the compact TUI sidebar layout. Defaults to true; set false to use the expanded layout.",
       "type": "boolean"
@@ -1274,7 +1278,7 @@
       }
     },
     "disabled_hooks": {
-      "description": "Hook names to disable completely. Valid values: phase-reminder, foreground-fallback, deepwork-guard, deepwork-goal, chat-headers, cache-monitor, json-error-recovery, tool-loop-guard, search-path-guard, absolute-path-rescue, apply-patch, council-inject, auto-update-checker. \"phase-reminder\" is not registered, so orchestrator phase reminders are never injected; \"foreground-fallback\" marks the fallback manager inert: it is still constructed but never triggers automatic intervention, same effect as fallback.enabled = false; \"chat-headers\" is not registered, so the Copilot x-initiator header is never stamped (v1 chat.headers and the v2 model.request bridge); \"cache-monitor\" stops the prompt-cache bust watchdog, so cache warnings are never logged; the on-demand tool guards (\"json-error-recovery\", \"tool-loop-guard\", \"search-path-guard\", \"absolute-path-rescue\", \"apply-patch\") stop intercepting tool calls entirely, so malformed output, repeated identical calls, and invalid or guessed paths surface raw to the model; \"council-inject\" is not registered, so the keyword-triggered Council Mode injection is never appended to orchestrator messages; \"auto-update-checker\" stops both update checking and automatic installation (a stronger switch than autoUpdate, which only controls installation). Unknown values are stripped with a warning when the config loads. A value consisting only of unknown names is treated as unset, so a lower config layer's list still applies.",
+      "description": "Hook names to disable completely. Valid values: phase-reminder, foreground-fallback, deepwork-guard, deepwork-goal, chat-headers, cache-monitor, json-error-recovery, tool-loop-guard, search-path-guard, absolute-path-rescue, apply-patch, council-inject, auto-update-checker. \"phase-reminder\" is not registered, so orchestrator phase reminders are never injected; \"foreground-fallback\" prevents the fallback manager from being constructed at all and never triggers automatic intervention, same effect as fallback.enabled = false; \"chat-headers\" is not registered, so the Copilot x-initiator header is never stamped (v1 chat.headers and the v2 model.request bridge); \"cache-monitor\" stops the prompt-cache bust watchdog, so cache warnings are never logged; the on-demand tool guards (\"json-error-recovery\", \"tool-loop-guard\", \"search-path-guard\", \"absolute-path-rescue\", \"apply-patch\" — v1 apply_patch / v2 patch) stop intercepting tool calls entirely, so malformed output, repeated identical calls, and invalid or guessed paths surface raw to the model; \"deepwork-guard\" prevents the receipt/claim guard from being constructed; \"council-inject\" is not registered, so the keyword-triggered Council Mode injection is never appended to orchestrator messages; \"auto-update-checker\" stops both update checking and automatic installation (a stronger switch than autoUpdate, which only controls installation). Unknown values are stripped with a warning when the config loads. A value consisting only of unknown names is treated as unset, so a lower config layer's list still applies.",
       "type": "array",
       "items": {
         "type": "string",
@@ -1296,7 +1300,7 @@
       }
     },
     "disabled_commands": {
-      "description": "Slash-command names to disable completely. Valid values: implement, interview, deepwork, reflect, loop, preset. Disabled commands are neither registered nor intercepted at execution time, so a user-defined command with the same name is left untouched. The /reflect command is also disabled when \"reflect\" is listed in disabled_skills. Unknown values are stripped with a warning when the config loads. A value consisting only of unknown names is treated as unset, so a lower config layer's list still applies.",
+      "description": "Slash-command names to disable completely. Valid values: implement, interview, deepwork, reflect, loop, preset, killall, subagent. Disabled commands are neither registered nor intercepted at execution time, so a user-defined command with the same name is left untouched. The /reflect command is also disabled when \"reflect\" is listed in disabled_skills. Unknown values are stripped with a warning when the config loads. A value consisting only of unknown names is treated as unset, so a lower config layer's list still applies.",
       "type": "array",
       "items": {
         "type": "string",
@@ -1306,7 +1310,9 @@
           "deepwork",
           "reflect",
           "loop",
-          "preset"
+          "preset",
+          "killall",
+          "subagent"
         ]
       }
     },

@@ -14,6 +14,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { resolveImageRouting } from '../config/constants';
 import { processImageAttachments } from './image-hook';
+import { createMessageTransformView } from './message-transform-view';
 import type { MessageWithParts } from './types';
 
 const TEST_DIR = path.join(os.tmpdir(), `image-hook-test-${process.pid}`);

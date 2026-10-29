@@ -1,9 +1,9 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { stripJsonComments } from '../cli/config-io';
-import { getConfigSearchDirs } from '../cli/paths';
 import { DEFAULT_DISABLED_AGENTS } from './constants';
 import { COUNCIL_CONFIG_KEYS } from './council-schema';
+import { stripJsonComments } from './jsonc';
+import { getConfigSearchDirs } from './paths';
 import type { ResolvedPresetMap } from './presets';
 import {
   deepMerge,

@@ -32,10 +32,10 @@ import {
   isTaggedPart,
 } from '../cache-safe-injection';
 import {
-  findLatestUserMessage,
-  isUserMessageWithParts,
-  type MessagePart,
-} from '../types';
+  type MessageTransformView,
+  resolveView,
+} from '../message-transform-view';
+import type { MessagePart } from '../types';
 
 export { PHASE_REMINDER };
 
@@ -50,16 +50,25 @@ export function hasPhaseReminder(part: MessagePart): boolean {
  * This hook runs right before sending to API, so it doesn't affect UI display.
  * Injection eligibility is per-message (orchestrator-authored user turns only);
  * see the module docblock for the history-stability contract.
+ *
+ * `view` is an internal wiring argument: the root transform passes the
+ * request-local message view it already built so the latest-user lookup and
+ * the eligible-user iteration reuse one traversal instead of re-scanning the
+ * transcript. When omitted the hook builds its own view; `resolveView`
+ * rebuilds when the view's identity or length no longer matches the array.
  */
 export function createPhaseReminderHook() {
   return {
     'experimental.chat.messages.transform': async (
       _input: Record<string, never>,
       output: { messages?: unknown },
+      view?: MessageTransformView,
     ): Promise<void> => {
       const messages = Array.isArray(output.messages) ? output.messages : [];
 
-      const lastUserMessage = findLatestUserMessage(messages);
+      const resolved = resolveView(view, messages);
+
+      const lastUserMessage = resolved.latestUser;
       if (!lastUserMessage) {
         return;
       }
@@ -68,9 +77,8 @@ export function createPhaseReminderHook() {
 
       // Append as a separate part instead of mutating user-authored text;
       // the reminder stays out of the UI display and history (issue #448).
-      for (const message of messages) {
+      for (const message of resolved.userMessages) {
         if (
-          !isUserMessageWithParts(message) ||
           message.info.agent !== 'orchestrator' ||
           message.info.sessionID !== sessionID
         ) {

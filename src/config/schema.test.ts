@@ -336,6 +336,8 @@ describe('PluginConfigSchema disabled_hooks and disabled_commands', () => {
       'reflect',
       'loop',
       'preset',
+      'killall',
+      'subagent',
     ]);
   });
 

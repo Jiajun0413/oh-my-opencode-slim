@@ -242,7 +242,7 @@ garbage
 *** End Patch`,
       ),
     ).rejects.toThrow(
-      'apply_patch validation failed: Invalid patch format: unexpected line in patch chunk: garbage',
+      'patch validation failed: Invalid patch format: unexpected line in patch chunk: garbage',
     );
   });
 
@@ -259,7 +259,7 @@ garbage
 *** End Patch`,
       ),
     ).rejects.toThrow(
-      'apply_patch validation failed: Invalid patch format: unexpected line in Add File body: garbage',
+      'patch validation failed: Invalid patch format: unexpected line in Add File body: garbage',
     );
   });
 
@@ -317,11 +317,11 @@ garbage
       expect(error).toBeInstanceOf(ApplyPatchError);
       expect((error as ApplyPatchError).kind).toBe('blocked');
       expect((error as Error).message).toContain(
-        'apply_patch blocked: patch contains path outside workspace root:',
+        'patch blocked: patch contains path outside workspace root:',
       );
       if (kind === 'absolute') {
         expect((error as Error).message).toBe(
-          `apply_patch blocked: patch contains path outside workspace root: ${outsidePath}`,
+          `patch blocked: patch contains path outside workspace root: ${outsidePath}`,
         );
       }
     },
@@ -339,7 +339,7 @@ garbage
 *** End Patch`,
       ),
     ).rejects.toThrow(
-      `apply_patch verification failed: Add File target already exists: ${root}`,
+      `patch verification failed: Add File target already exists: ${root}`,
     );
   });
 
@@ -356,7 +356,7 @@ garbage
 *** End Patch`,
       ),
     ).rejects.toThrow(
-      `apply_patch verification failed: Add File target already exists: ${path.join(root, 'added.txt')}`,
+      `patch verification failed: Add File target already exists: ${path.join(root, 'added.txt')}`,
     );
   });
 
@@ -400,7 +400,7 @@ garbage
 *** End Patch`,
       ),
     ).rejects.toThrow(
-      `apply_patch verification failed: Move destination already exists: ${path.join(root, 'nested/after.txt')}`,
+      `patch verification failed: Move destination already exists: ${path.join(root, 'nested/after.txt')}`,
     );
   });
 
@@ -439,7 +439,7 @@ garbage
     await expect(
       rewritePatchText(root, `*** Begin Patch\n${body}\n*** End Patch`),
     ).rejects.toThrow(
-      `apply_patch verification failed: Failed to read file to delete: ${path.join(root, file)}`,
+      `patch verification failed: Failed to read file to delete: ${path.join(root, file)}`,
     );
   });
 
@@ -704,7 +704,7 @@ garbage
  right
 *** End Patch`,
       ),
-    ).rejects.toThrow('apply_patch verification failed:');
+    ).rejects.toThrow('patch verification failed:');
   });
 
   test('applyPatch supports move + update when the block is stale', async () => {

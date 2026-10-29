@@ -38,6 +38,21 @@ immediately before native admission; it is never forwarded to the host.
 | `interview-bridge.ts` | v2-only `/interview` marker command, trailing-message context bridge, v2 interview runtime, and per-session transcript projections. |
 | `mirror-conformance.ts` | Compile-time conformance guard binding the hand-mirrored v2 context types in `types.ts` to the pinned `@opencode/plugin` surface; enforced by `bun run typecheck` — deliberately no `.test.ts` suffix (tsc excludes test files) and never imported at runtime. |
 
+## Runtime Input Reuse
+
+`setup.ts` shares one startup config snapshot with the factory, switches, skills
+and initial profile seed; deliberate refreshes revalidate source identity.
+`session-presets.ensureAdmission` returns the record and validated host identity
+from one binding transaction. `admission-view.ts` supplies profile facts to the
+existing capture seam without a second binding read. Later admissions still
+check directory/parent/storage. Attributed messages skip stored-history reads.
+
+`event-subscription.ts` freezes the native type union for enabled consumers.
+Interview receives `session.text.*` with `assistantMessageID`; its v2 bridge is
+the only Interview owner on this host. Event payload extraction is shared, but
+recovery/permission/profile owners remain distinct. One native-event batch
+coalesces its mapped TUI projections without changing raw-first synthesis.
+
 ## Flow
 
 The v2 runtime surface and plugin contracts are adapted through the following data flow:

@@ -1742,7 +1742,7 @@ describe('writePreset', () => {
       }),
     );
 
-    const configIoUrl = new URL('../cli/config-io.ts', import.meta.url).href;
+    const configIoUrl = new URL('../config/json-file.ts', import.meta.url).href;
     const child = Bun.spawn(
       [
         process.execPath,

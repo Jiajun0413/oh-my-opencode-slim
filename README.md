@@ -731,7 +731,8 @@ Use this section as a map: start with installation, then jump to features, confi
 | Doc | What it covers |
 |-----|----------------|
 | **[Installation Guide](docs/installation.md)** | Install the plugin, use CLI flags, reset config, and troubleshoot setup |
-| **[OpenCode v2 Compatibility](docs/opencode-v2-compatibility.md)** | Run the same plugin on `opencode2`: feature matrix, v2.0.x compatibility baseline, version pinning |
+| **[OpenCode v2 Compatibility](docs/opencode-v2-compatibility.md)** | Host contracts, feature matrix, entrypoints and package loading |
+| **[Runtime Efficiency](docs/runtime-efficiency.md)** | Shared configuration reads, request-local facts, optional implementation loading and verification |
 | **[Configuration](docs/configuration.md)** | Config file locations, JSONC support, prompt overrides, and full option reference |
 | **[Marketplace](docs/marketplace.md)** | Install, inspect, activate, and update marketplace agent packages |
 | **[Project Customization](docs/project-local-customization.md)** | Repository-specific custom agents, prompt overrides, per-agent skills, and precedence |

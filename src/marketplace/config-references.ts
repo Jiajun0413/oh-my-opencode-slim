@@ -6,9 +6,9 @@ import {
   publishPreparedJsonConfig,
   restorePreparedJsonConfig,
   withSerializedConfigWrites,
-} from '../cli/config-io';
-import { getConfigSearchDirs } from '../cli/paths';
+} from '../config/json-file';
 import { findPluginConfigPaths } from '../config/loader';
+import { getConfigSearchDirs } from '../config/paths';
 import { MarketplaceActivationError } from './errors';
 import { normalizeMarketplacePackageId } from './ids';
 

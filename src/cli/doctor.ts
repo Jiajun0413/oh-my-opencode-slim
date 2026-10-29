@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import { z } from 'zod';
+import { stripJsonComments } from '../config/jsonc';
 import {
   findPluginConfigPaths,
   mergePluginConfigs,
@@ -15,7 +16,6 @@ import {
   type PluginConfig,
   PluginConfigSchema,
 } from '../config/schema';
-import { stripJsonComments } from './config-io';
 
 export type DoctorArgs = {
   json?: boolean;

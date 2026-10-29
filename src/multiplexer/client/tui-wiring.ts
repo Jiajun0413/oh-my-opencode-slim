@@ -150,6 +150,13 @@ export interface TuiPaneWiringOptions {
   env?: Record<string, string | undefined>;
   /** Config loader seam; defaults to `loadPluginConfig`. */
   loadConfig?: (directory: string) => LoadedPaneConfig;
+  /**
+   * Pre-read admission config (the TUI entry's own config snapshot). When
+   * set, the wiring admits from it instead of reading the config again;
+   * a later multiplexer change rebuilds the wiring, which reads the current
+   * config afresh.
+   */
+  paneConfig?: LoadedPaneConfig;
   /** Adapter factory seam; defaults to `getMultiplexer`. */
   adapterFactory?: AdapterFactory;
   /** Diagnostic sink; defaults to the plugin file logger. */
@@ -471,6 +478,23 @@ function parseMultiplexerConfig(value: unknown): MultiplexerConfig | null {
   }
 }
 
+/**
+ * Derive the admission config from an already-read plugin config: the
+ * loader-level failure flag and the parsed multiplexer block. A malformed
+ * multiplexer block forces admission off (invalid), exactly like a
+ * loader-level failure.
+ */
+export function paneConfigOf(
+  config: { multiplexer?: unknown },
+  loaderInvalid: boolean,
+): LoadedPaneConfig {
+  const multiplexer = parseMultiplexerConfig(config.multiplexer ?? {});
+  if (multiplexer === null) {
+    return { multiplexer: FALLBACK_MULTIPLEXER_CONFIG, invalid: true };
+  }
+  return { multiplexer, invalid: loaderInvalid };
+}
+
 /** Reads the project config; loader-level failures force admission off. */
 export function loadPaneConfig(directory: string): LoadedPaneConfig {
   let invalid = false;
@@ -486,11 +510,7 @@ export function loadPaneConfig(directory: string): LoadedPaneConfig {
       }
     },
   });
-  const multiplexer = parseMultiplexerConfig(config.multiplexer ?? {});
-  if (multiplexer === null) {
-    return { multiplexer: FALLBACK_MULTIPLEXER_CONFIG, invalid: true };
-  }
-  return { multiplexer, invalid };
+  return paneConfigOf(config, invalid);
 }
 
 export function initClientLogging(): void {
@@ -518,7 +538,8 @@ export async function createTuiPaneWiring(
 
   let loaded: LoadedPaneConfig;
   try {
-    loaded = (options.loadConfig ?? loadPaneConfig)(directory);
+    loaded =
+      options.paneConfig ?? (options.loadConfig ?? loadPaneConfig)(directory);
   } catch {
     loaded = {
       multiplexer: FALLBACK_MULTIPLEXER_CONFIG,

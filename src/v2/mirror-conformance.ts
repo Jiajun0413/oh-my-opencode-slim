@@ -3,7 +3,7 @@
  *
  * Compile-time assertions binding the hand-mirrored v2 plugin context in
  * `./types.ts` to the official `@opencode/plugin` types (pinned to the
- * audited version in devDependencies; baseline `2.1.4`). Enforcement
+ * audited version in devDependencies; baseline `2.2.0`). Enforcement
  * point is `bun run typecheck`: this file must NOT carry a test suffix,
  * because tsconfig excludes test-suffixed files (`*.test.ts`) from tsc —
  * a test-suffixed guard silently checks nothing.
@@ -40,6 +40,7 @@ import type {
   SessionHooks,
 } from '@opencode/plugin/promise/session';
 import type { Rpc } from '@opencode/plugin/rpc';
+import type { V2EventSubscriptionType } from './event-subscription';
 import type { V2PresetRpcCallOptions } from './preset-manager';
 import type { sessionPresetRpc } from './preset-rpc';
 import type {
@@ -56,7 +57,7 @@ type Equal<A, B> =
 
 /** The deliberately narrow RPC mirror supports only our portable Zod
  * contract. Keep handler inference, cancellation and client location options
- * pinned to the official 2.1.4 API without exporting its dev-only types. */
+ * pinned to the official 2.2.0 API without exporting its dev-only types. */
 type PresetRpc = typeof sessionPresetRpc;
 type _presetRpcPortable = Expect<
   PresetRpc extends Rpc.PortableDefinition ? true : false
@@ -302,6 +303,28 @@ type _shutdownIsSuspended = Expect<
     >['data']['reason'],
     'user' | 'shutdown' | 'superseded' | 'inactivity'
   >
+>;
+
+/** The mirrored `event.subscribe` options are exactly the official
+ * options' `types` field (`shared-events.SubscribeOptions` subset;
+ * `signal`/`onActivity` stay host-side). Element typing stays `string`
+ * in the mirror (the host name union is not mirrored); membership of the
+ * setup-fixed filter union is pinned against the host below. */
+type _eventSubscribeOptions = Expect<
+  Equal<
+    Parameters<V2Context['event']['subscribe']>[0],
+    { readonly types?: ReadonlyArray<string> } | undefined
+  >
+>;
+
+/** Every setup-fixed filter name must be an official pinned host event
+ * type — a guessed/renamed string fails typecheck here instead of
+ * silently filtering out a production event at runtime. */
+type HostEventType = HostEvent extends { readonly type: infer T } ? T : never;
+type _subscriptionTypesAreHostEvents = Expect<
+  ReadonlyArray<V2EventSubscriptionType> extends ReadonlyArray<HostEventType>
+    ? true
+    : false
 >;
 type CompactionResult = NonNullable<SessionHooks['compaction']['result']>;
 type _nativeCompactionResult = Expect<

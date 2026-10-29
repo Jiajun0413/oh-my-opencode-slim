@@ -7,13 +7,19 @@ import {
   spyOn,
   test,
 } from 'bun:test';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import {
+  CompanionManager,
+  companionSessionIdForDirectory,
+  stateFilePath,
+} from './companion/manager';
 import * as hookFactories from './hooks';
 import * as handoffFactories from './hooks/task-session-manager/fallback-observation-transfer';
 import { OhMyOpenCodeLite as plugin } from './index';
+import * as interviewFactories from './interview';
 import { getTuiStatePath, readTuiSnapshot } from './tui-state';
 import type { BackgroundJobRecord } from './utils/background-job-board';
 import * as gateFactories from './utils/background-job-terminal-gate';
@@ -168,17 +174,195 @@ describe('plugin feature gates through exported hooks', () => {
         error: { message: 'Rate limit exceeded' },
         decision: { retry: true, delay: 2_000 },
       };
-      // The host still dispatches the retry hook, but disabled_hooks
-      // suppresses steering internally (v2RetryEnabled=false): the
-      // interface outcome must be a no-op switch and an untouched host
-      // decision.
+      // The host still dispatches the retry hook, but the disabled hook
+      // means no manager is constructed: the interface outcome must be a
+      // no-op switch and an untouched host decision.
       await hooks['v2.session.retry']?.(retry as never, switchModel as never);
-      expect(retrySpy).toHaveBeenCalledTimes(1);
+      expect(retrySpy).toHaveBeenCalledTimes(0);
       expect(switchModel).not.toHaveBeenCalled();
       expect(retry.decision).toEqual({ retry: true, delay: 2_000 });
     } finally {
       await hooks?.dispose?.();
       retrySpy.mockRestore();
+    }
+  });
+
+  test('v2 fallback disabled at startup can still be enabled live', async () => {
+    await configure({
+      backgroundJobs: { enabled: false },
+      fallback: { enabled: false, maxRetries: 0 },
+      agents: {
+        orchestrator: { model: ['openai/gpt-b', 'openai/gpt-c'] },
+      },
+    });
+    let hooks: PluginHooks | undefined;
+    try {
+      hooks = await createHooks('v2');
+      const sessionID = 'ses_live_enabled_retry';
+      // A live config refresh pins the refreshed bundle with fallback on.
+      hooks['v2.pinSessionChains']?.(
+        sessionID,
+        { orchestrator: ['openai/gpt-b', 'openai/gpt-c'] },
+        true,
+      );
+      const switchModel = mock(async () => ({}));
+      const retry = {
+        sessionID,
+        agent: 'orchestrator',
+        model: { providerID: 'openai', id: 'gpt-b' },
+        error: { message: 'Rate limit exceeded' },
+        decision: { retry: true, delay: 2_000 },
+      };
+      await hooks['v2.session.retry']?.(retry as never, switchModel as never);
+      expect(switchModel).toHaveBeenCalledWith(sessionID, {
+        providerID: 'openai',
+        id: 'gpt-c',
+      });
+    } finally {
+      await hooks?.dispose?.();
+    }
+  });
+
+  test('v1 interview disabled keeps request transforms inert', async () => {
+    await configure({
+      backgroundJobs: { enabled: false },
+      interview: { enabled: false },
+      disabled_hooks: [
+        'auto-update-checker',
+        'phase-reminder',
+        'council-inject',
+        'deepwork-goal',
+      ],
+    });
+    let hooks: PluginHooks | undefined;
+    try {
+      hooks = await createHooks('v1');
+      const messages = [
+        {
+          info: { id: 'msg_1', role: 'user', sessionID: 'ses_interview_off' },
+          parts: [{ type: 'text', text: 'hello' }],
+        },
+      ];
+      await expect(
+        hooks['experimental.chat.messages.transform']?.(
+          {} as never,
+          { messages } as never,
+        ),
+      ).resolves.toBeUndefined();
+
+      const completed = { text: 'hello' };
+      await hooks['experimental.text.complete']?.(
+        { sessionID: 'ses_interview_off', messageID: 'msg_1' } as never,
+        completed as never,
+      );
+      expect(completed.text).toBe('hello');
+    } finally {
+      await hooks?.dispose?.();
+    }
+  });
+
+  test('v2 uses the bridge service without constructing a v1 interview owner', async () => {
+    await configure({ backgroundJobs: { enabled: false } });
+    const managerSpy = spyOn(interviewFactories, 'createInterviewManager');
+    const submitState = mock(async () => ({ ok: true, message: 'accepted' }));
+    const service = {
+      getActiveInterviewId: () => 'interview_1',
+      submitState,
+    };
+    let hooks: PluginHooks | undefined;
+    try {
+      hooks = await createHooks('v2');
+      expect(managerSpy).not.toHaveBeenCalled();
+      expect(hooks.tool?.interview_submit_state).toBeDefined();
+      hooks['v2.setInterviewService']?.(service as never);
+      const result = await hooks.tool?.interview_submit_state.execute(
+        { state: { summary: 'Specification', questions: [] } } as never,
+        { sessionID: 'ses_interview', messageID: 'msg_1' } as never,
+      );
+      expect(result).toBe('accepted');
+      expect(submitState).toHaveBeenCalledTimes(1);
+    } finally {
+      await hooks?.dispose?.();
+      managerSpy.mockRestore();
+    }
+  });
+
+  test('v1 still constructs exactly one enabled interview owner', async () => {
+    await configure({ backgroundJobs: { enabled: false } });
+    const managerSpy = spyOn(interviewFactories, 'createInterviewManager');
+    let hooks: PluginHooks | undefined;
+    try {
+      hooks = await createHooks('v1');
+      expect(managerSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      await hooks?.dispose?.();
+      managerSpy.mockRestore();
+    }
+  });
+
+  test('companion cold gate: disabled companion is not constructed', async () => {
+    await configure({});
+    const onLoadSpy = spyOn(CompanionManager.prototype, 'onLoad');
+    let hooks: PluginHooks | undefined;
+    try {
+      hooks = await createHooks('v2');
+      // companion.enabled defaults to false in this suite's config: no
+      // manager is constructed, so no onLoad (and its state-file cleanup
+      // I/O) ever runs and no state file is created.
+      expect(onLoadSpy).not.toHaveBeenCalled();
+      expect(existsSync(stateFilePath())).toBe(false);
+    } finally {
+      await hooks?.dispose?.();
+      onLoadSpy.mockRestore();
+    }
+  });
+
+  test('companion cold gate: disabled companion still prunes its stale session', async () => {
+    await configure({});
+    const ownID = companionSessionIdForDirectory(projectDir);
+    const file = stateFilePath();
+    await Bun.write(
+      file,
+      JSON.stringify({
+        version: 1,
+        sessions: [
+          { session_id: ownID, pid: process.pid },
+          { session_id: 'other-session', pid: process.pid },
+        ],
+      }),
+    );
+    let hooks: PluginHooks | undefined;
+    try {
+      hooks = await createHooks('v2');
+      const state = JSON.parse(readFileSync(file, 'utf8')) as {
+        sessions: Array<{ session_id: string }>;
+      };
+      expect(state.sessions.map((s) => s.session_id)).toEqual([
+        'other-session',
+      ]);
+    } finally {
+      await hooks?.dispose?.();
+    }
+  });
+
+  test('companion cold gate: enabled companion loads and cleans up', async () => {
+    await configure({
+      companion: {
+        enabled: true,
+        // Missing binary: registration and state writes run, but the
+        // updater and spawn path touch neither network nor a child.
+        binaryPath: `${projectDir}/missing-companion-bin`,
+      },
+    });
+    const onLoadSpy = spyOn(CompanionManager.prototype, 'onLoad');
+    let hooks: PluginHooks | undefined;
+    try {
+      hooks = await createHooks('v2');
+      expect(onLoadSpy).toHaveBeenCalledTimes(1);
+      expect(existsSync(stateFilePath())).toBe(true);
+    } finally {
+      await hooks?.dispose?.();
+      onLoadSpy.mockRestore();
     }
   });
 

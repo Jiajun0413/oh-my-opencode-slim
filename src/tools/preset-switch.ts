@@ -1,11 +1,6 @@
 import * as fs from 'node:fs';
 import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import {
-  mutateJsonFile,
-  removeTopLevelJsonProperty,
-  stripJsonComments,
-} from '../cli/config-io';
 import type {
   AgentOverrideConfig,
   PluginConfig,
@@ -16,6 +11,11 @@ import type {
 } from '../config';
 import { normalizePreset, PresetResolutionError } from '../config';
 import { AGENT_ALIASES } from '../config/constants';
+import {
+  mutateJsonFile,
+  removeTopLevelJsonProperty,
+} from '../config/json-file';
+import { stripJsonComments } from '../config/jsonc';
 import {
   findPluginConfigPaths,
   isProjectConfigDisabled,

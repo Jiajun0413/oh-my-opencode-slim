@@ -63,12 +63,12 @@ import {
 } from '../cache-safe-injection';
 import { routerHeadAnnouncement } from '../deepwork';
 import { isCompletedFlip } from '../deepwork-guard';
-import { BACKGROUND_JOB_BOARD_METADATA_KEY } from '../task-session-manager/board-injection';
 import {
-  findLatestUserMessage,
-  isMessageWithParts,
-  type MessagePart,
-} from '../types';
+  type MessageTransformView,
+  resolveView,
+} from '../message-transform-view';
+import { BACKGROUND_JOB_BOARD_METADATA_KEY } from '../task-session-manager/board-injection';
+import type { MessagePart, MessageWithParts } from '../types';
 
 export const GOAL_POINTER_METADATA_KEY = 'oh-my-opencode-slim.deepworkGoal';
 
@@ -146,10 +146,11 @@ const MAX_TRACKED_EPOCHS = 256;
  * compaction epoch, and every compaction rebuild drops the epoch's first
  * real message (v1 summary anchor, v2 truncation marker), so the token
  * changes across epochs. Synthetic entries (summaries, wakes) are skipped
- * so a rebuilt window is still anchored by a real message. */
-function epochOf(messages: unknown[]): string | undefined {
+ * so a rebuilt window is still anchored by a real message. Takes the view's
+ * live `valid` refs — parts are read at consumption time, so a strip that
+ * replaced a trailing message's parts is still seen correctly. */
+function epochOf(messages: readonly MessageWithParts[]): string | undefined {
   for (const message of messages) {
-    if (!isMessageWithParts(message)) continue;
     if (
       message.info.role === 'user' &&
       message.parts.every((part) => !isGenuineTextPart(part))
@@ -186,10 +187,16 @@ export function createDeepworkGoalHook(options: DeepworkGoalOptions) {
     'experimental.chat.messages.transform': async (
       _input: Record<string, never>,
       output: { messages?: unknown },
+      view?: MessageTransformView,
     ): Promise<void> => {
       const messages = Array.isArray(output.messages) ? output.messages : [];
 
-      const sessionID = findLatestUserMessage(messages)?.info.sessionID;
+      // The pointer runs LAST, after the board's trailing zone: the root
+      // forwards a view rebuilt after that append/strip. resolveView is only
+      // the failsafe (identity+length); the rebuild is the contract.
+      const resolved = resolveView(view, messages);
+
+      const sessionID = resolved.latestUser?.info.sessionID;
       if (!sessionID || !options.isEligible(sessionID)) {
         // Ineligible: drop any stale pointer so a head deletion or a
         // completed flip only ever costs the volatile tail.
@@ -202,10 +209,9 @@ export function createDeepworkGoalHook(options: DeepworkGoalOptions) {
       // recording the epoch here keeps the revert guarantee intact — an
       // undo that rewinds past the activation message must not re-add a
       // pointer the user unwound, even though the announcement vanished.
-      const epoch = epochOf(messages);
+      const epoch = epochOf(resolved.valid);
       const announcement = routerHeadAnnouncement(sessionID);
-      for (const message of messages) {
-        if (!isMessageWithParts(message)) continue;
+      for (const message of resolved.valid) {
         for (const part of message.parts) {
           if (isGenuineTextPart(part) && part.text.includes(announcement)) {
             stripTaggedContent(messages, GOAL_POINTER_METADATA_KEY);

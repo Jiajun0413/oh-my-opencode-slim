@@ -1,10 +1,13 @@
 import type { ApplyPatchErrorCode, ApplyPatchErrorKind } from './types';
 
+// Model-facing wording names the operation, not a tool, so it is accurate
+// for both served names (v1 `apply_patch`, v2 native `patch`) and matches
+// the v2 patch tool's own failure wording ("patch verification failed").
 const APPLY_PATCH_ERROR_PREFIX: Record<ApplyPatchErrorKind, string> = {
-  blocked: 'apply_patch blocked',
-  validation: 'apply_patch validation failed',
-  verification: 'apply_patch verification failed',
-  internal: 'apply_patch internal error',
+  blocked: 'patch blocked',
+  validation: 'patch validation failed',
+  verification: 'patch verification failed',
+  internal: 'patch internal error',
 };
 
 const APPLY_PATCH_ERROR_CODE: Record<ApplyPatchErrorKind, ApplyPatchErrorCode> =

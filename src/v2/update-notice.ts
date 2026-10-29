@@ -24,9 +24,10 @@
  * injected by the entry point, so every path here is testable without a
  * renderer.
  */
-import * as fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { log } from '../utils/logger';
+import { findOwnedPackageJson } from '../utils/package-root';
+import { compareNumericVersions, type NumericVersion } from '../utils/version';
 
 /** The package this notice is about; also the npm name on the registry. */
 export const PACKAGE_NAME = 'oh-my-opencode-slim';
@@ -47,7 +48,7 @@ export const UPDATE_FETCH_TIMEOUT_MS = 4_000;
 export const UPDATE_TOAST_DURATION_MS = 10_000;
 
 /** Parsed `major.minor.patch`; the tuple keeps comparison allocation-free. */
-export type VersionTriple = readonly [number, number, number];
+export type VersionTriple = NumericVersion;
 
 /** A `ui.toast.show` input (v2 `ToastOptions` subset this module sends). */
 export interface UpdateNoticeToast {
@@ -131,12 +132,7 @@ export function compareVersions(
   left: VersionTriple,
   right: VersionTriple,
 ): number {
-  for (let index = 0; index < 3; index += 1) {
-    const a = left[index] as number;
-    const b = right[index] as number;
-    if (a !== b) return a < b ? -1 : 1;
-  }
-  return 0;
+  return compareNumericVersions(left, right);
 }
 
 /**
@@ -199,33 +195,12 @@ function versionFromPluginList(result: unknown): string | undefined {
 }
 
 /**
- * Read a `package.json` and return its version when it is *our* package with
- * a version we could compare. The name check is what keeps a stray ancestor
- * `package.json` (a host's, a parent project's) from answering the question.
- */
-function versionAtPackageRoot(url: URL): string | undefined {
-  try {
-    const manifest = JSON.parse(
-      fs.readFileSync(fileURLToPath(url), 'utf8'),
-    ) as {
-      name?: unknown;
-      version?: unknown;
-    };
-    if (manifest.name !== PACKAGE_NAME) return undefined;
-    const version =
-      typeof manifest.version === 'string' ? manifest.version : undefined;
-    return parseVersion(version) === undefined ? undefined : version;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
  * Version of the copy that is actually executing — the only copy whose version
- * describes what the user is running. The module lives in three places over a
- * release and all of them resolve to the package root's manifest:
- * `src/v2/` in the source tree, `dist/tui2.js` in the bundle, and
- * `node_modules/<pkg>/dist/tui2.js` in a host install.
+ * describes what the user is running. The module lives in several places over
+ * a release — `src/v2/` in the source tree, `dist/tui2.js` in the bundle, and
+ * a split `dist/chunks/<hash>.js` in a host install — so the manifest is
+ * resolved by walking up from the running module itself, not by a fixed list
+ * of relative candidates (which the chunk layout breaks).
  *
  * This deliberately does NOT look around at sibling install directories. The
  * cache keeps several versions at once, so "newest on disk" can be an
@@ -235,25 +210,18 @@ function versionAtPackageRoot(url: URL): string | undefined {
 export function resolveRunningVersion(
   moduleUrl: string | URL = import.meta.url,
 ): string | undefined {
-  let base: URL;
+  let modulePath: string;
   try {
-    base = new URL(moduleUrl);
+    modulePath = fileURLToPath(new URL(moduleUrl));
   } catch {
     return undefined;
   }
-  for (const relative of [
-    '../../package.json',
-    '../package.json',
-    './package.json',
-  ]) {
-    try {
-      const version = versionAtPackageRoot(new URL(relative, base));
-      if (version !== undefined) return version;
-    } catch {
-      // Unresolvable candidate: try the next one.
-    }
-  }
-  return undefined;
+
+  const manifest = findOwnedPackageJson(modulePath, PACKAGE_NAME);
+  if (manifest === null) return undefined;
+  return parseVersion(manifest.version) === undefined
+    ? undefined
+    : manifest.version;
 }
 
 /**

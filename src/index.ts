@@ -24,13 +24,9 @@ import {
 } from './agents/registry';
 import type { RegistryFactoryBridge } from './agents/registry-bridge';
 import { roleHasWriteCapability } from './agents/role-definitions';
-import {
-  CompanionManager,
-  companionSessionIdForDirectory,
-  normalizeCompanionSessionStatus,
-} from './companion/manager';
-import { ensureCompanionVersion } from './companion/updater';
-import { deepMerge, loadPluginConfig, type Preset } from './config';
+import type { CompanionManager } from './companion/manager';
+import { normalizeCompanionSessionStatus } from './companion/status';
+import { deepMerge, type loadPluginConfig, type Preset } from './config';
 import {
   BUILTIN_OPENCODE_SUBAGENTS_TO_DISABLE,
   DEFAULT_MAX_SESSION_METADATA_ENTRIES,
@@ -38,8 +34,17 @@ import {
 } from './config/constants';
 import type { ConfigLoadWarning, ConfigLoadWarningKind } from './config/loader';
 import { RuntimeConfig } from './config/runtime';
+import {
+  cloneConfigValue,
+  type PluginConfigSnapshot,
+  readPluginConfigSnapshot,
+} from './config/snapshot';
 import { getBuildInfo } from './generated/build-info';
-import { HEALTH_CHECK, minimumExpectedToolCount } from './health-check';
+import {
+  HEALTH_CHECK,
+  minimumExpectedAgentCount,
+  minimumExpectedToolCount,
+} from './health-check';
 import {
   COUNCIL_INJECT_METADATA_KEY,
   createAbsolutePathRescueHook,
@@ -69,12 +74,13 @@ import {
   SessionLifecycle,
   stoppedJobRecoveryReason,
 } from './hooks';
-import { stripTaggedContent } from './hooks/cache-safe-injection';
+import { stripTaggedContents } from './hooks/cache-safe-injection';
 import { isCommandEnabled } from './hooks/command-hook-utils';
 import { createCouncilSeatHook } from './hooks/council-seats';
 import { createManagedSeatResolver } from './hooks/council-seats/managed';
 import { createNativeSeatResolver } from './hooks/council-seats/native';
-import { isImagePart, processImageAttachments } from './hooks/image-hook';
+import { processImageAttachments } from './hooks/image-hook';
+import { createMessageTransformView } from './hooks/message-transform-view';
 import { clearAllWakeSessions } from './hooks/orchestrator-wake/wake-gate';
 import { PHASE_REMINDER_METADATA_KEY } from './hooks/phase-reminder';
 import type { ChildInputWaitRecord } from './hooks/task-session-manager/child-input-wait';
@@ -92,16 +98,12 @@ import {
   recoverSubagentSessionsAtStartup,
 } from './hooks/task-session-manager/session-recovery';
 import type { ToolLoopGuardHook } from './hooks/tool-loop-guard/hook';
-import {
-  findLatestUserMessage,
-  isMessageWithParts,
-  isUserMessageWithParts,
-  type MessageWithParts,
-} from './hooks/types';
-import { createInterviewManager } from './interview';
-import { collapseInterviewHistory } from './interview/history';
+import type { MessageWithParts } from './hooks/types';
+import type { createInterviewManager } from './interview';
+import type { collapseInterviewHistory } from './interview/history';
 import { discoverPreflightSkills } from './marketplace/preflight';
-import { MarketplaceService } from './marketplace/service';
+import type { MarketplaceRegistryImplementation } from './marketplace/registry-runtime';
+import type { MarketplaceService } from './marketplace/service';
 import { resolveDesiredMarketplacePackageIds } from './marketplace/status';
 import { createBuiltinMcps, getOverriddenBuiltinMcpKeys } from './mcp';
 import {
@@ -110,14 +112,12 @@ import {
   createAcpRunTool,
   createCancelTaskTool,
   createInterviewSubmitStateTool,
-  createMarketplaceTools,
   createTaskMessageTool,
   createTaskReplyTool,
   createTaskReviveTool,
   createTaskStatusTool,
   createWaitForUserTool,
   createWebfetchTool,
-  resolveFinalizedOrchestratorIdentities,
 } from './tools';
 import {
   applyActivityEvent,
@@ -128,6 +128,7 @@ import {
   clearTuiAgentActivities,
   clearTuiSessionAlias,
   collectAgentDisplayNames,
+  flushTuiSnapshotBatch,
   readTuiSnapshot,
   recordTuiAgentActivity,
   recordTuiAgentModel,
@@ -135,6 +136,7 @@ import {
   recordTuiSessionParent,
   type TuiSessionDetails,
   updateTuiSessionDetails,
+  withTuiSnapshotBatch,
 } from './tui-state';
 import {
   BackgroundJobBoard,
@@ -370,6 +372,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   // Declare variables that must survive the try/catch for the return
   // closure. These are set inside the try block.
   let config: ReturnType<typeof loadPluginConfig>;
+  let startupConfigSnapshot: PluginConfigSnapshot;
   let runtime: RuntimeConfig;
   // Per-generation image capability cache; the config hook drops the
   // cached promise on config changes and each factory run starts fresh.
@@ -599,6 +602,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     ownedTuiActivitySessions.clear();
   };
   let sessionLifecycle: SessionLifecycle | undefined;
+  // Mirror of the runtime fallback switches, hoisted out of the try so the
+  // returned hooks object can gate v2-only surfaces (retry registration).
+  let fallbackRetryHookEnabled = false;
 
   let chatHeadersHook: ReturnType<typeof createChatHeadersHook> | undefined;
   let foregroundFallback: ForegroundFallbackManager | undefined;
@@ -607,10 +613,14 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     | ((sessionID: string) => SessionTeamBundle | undefined)
     | undefined;
   let selectedMarketplacePackageIds: readonly string[] = [];
-  let deepworkCommandHook: ReturnType<typeof createDeepworkCommandHook>;
-  let deepworkGuardHook: ReturnType<typeof createDeepworkGuardHook>;
-  let reflectCommandHook: ReturnType<typeof createReflectCommandHook>;
-  let loopCommandHook: ReturnType<typeof createLoopCommandHook>;
+  let deepworkCommandHook:
+    | ReturnType<typeof createDeepworkCommandHook>
+    | undefined;
+  let deepworkGuardHook: ReturnType<typeof createDeepworkGuardHook> | undefined;
+  let reflectCommandHook:
+    | ReturnType<typeof createReflectCommandHook>
+    | undefined;
+  let loopCommandHook: ReturnType<typeof createLoopCommandHook> | undefined;
   let taskSessionManagerHook:
     | ReturnType<typeof createTaskSessionManagerHook>
     | undefined;
@@ -624,8 +634,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     | ReturnType<typeof createAbsolutePathRescueHook>
     | undefined;
   let toolLoopGuard: ToolLoopGuardHook | undefined;
-  let deepworkGuardAfter: (i: unknown, o: unknown) => Promise<void> =
-    async () => {};
+  let deepworkGuardAfter:
+    | ((i: unknown, o: unknown) => Promise<void>)
+    | undefined;
   let jsonErrorRecoveryAfter: (i: unknown, o: unknown) => Promise<void> =
     async () => {};
   let taskSessionManagerAfter: (i: unknown, o: unknown) => Promise<void> =
@@ -645,17 +656,20 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let admissionRuntimeLease: AdmissionRuntimeLease | undefined;
   let finalHostAgentConfig: Record<string, unknown> | undefined;
   let interviewManager: ReturnType<typeof createInterviewManager> | undefined;
-  let companionManager: CompanionManager;
+  let collapseActiveInterviewHistory:
+    | typeof collapseInterviewHistory
+    | undefined;
+  let companionManager: CompanionManager | undefined;
   let revivedRunTracker: ReturnType<typeof createRevivedRunTracker> | undefined;
   let terminalGate: BackgroundJobTerminalGate | undefined;
   let markRevivedRunPending: (taskID: string) => void = () => {};
   let markRevivedRunSettled: (taskID: string) => void = () => {};
   let getRevivedContextFiles = (_taskID: string): ContextFile[] => [];
   let pruneRevivedContext = () => {};
-  const taskActivityTracker = new TaskActivityTracker();
-  let interviewSubmitService: ReturnType<
-    typeof createInterviewManager
-  >['service'];
+  let taskActivityTracker: TaskActivityTracker | undefined;
+  let interviewSubmitService:
+    | ReturnType<typeof createInterviewManager>['service']
+    | undefined;
   let acpRunTools: Record<string, ReturnType<typeof createAcpRunTool>>;
   let webfetch: ReturnType<typeof createWebfetchTool> | undefined;
   const isFallbackPending = (taskID: string): boolean =>
@@ -673,7 +687,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   >;
 
   // Counters for post-init health check (set inside try, checked outside)
-  let toolCount = 0;
 
   // The wake scheduler is created AFTER the task-session-manager hook (see
   // the try block below): the hook's onChildInputWait closes over
@@ -863,7 +876,21 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // is first resolved — and on every later in-session reload.
     hostFlavor = (ctx as Parameters<Plugin>[0] & { hostFlavor?: string })
       .hostFlavor;
-    config = loadPluginConfig(ctx.directory, { hostFlavor });
+    startupConfigSnapshot =
+      (
+        ctx as Parameters<Plugin>[0] & {
+          pluginConfigSnapshot?: PluginConfigSnapshot;
+        }
+      ).pluginConfigSnapshot ??
+      readPluginConfigSnapshot(ctx.directory, { hostFlavor });
+    for (const warning of startupConfigSnapshot.warnings) {
+      log('[plugin] config warning', warning);
+      console.warn(
+        `[oh-my-opencode-slim] ${warning.path}: ${warning.message}`,
+        warning.formatted ?? '',
+      );
+    }
+    config = cloneConfigValue(startupConfigSnapshot.config);
     // Seed the per-directory runtime registry with the raw plugin file
     // config. The runtime preset reapplication below mutates `config` for
     // legacy consumers; RuntimeConfig keeps the pre-mutation snapshot and
@@ -917,21 +944,33 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // hook, wake scheduler, or task_* / wait_for_user tool factories. The
     // native OpenCode task/subagent machinery stays completely untouched.
     const lifecycleEnabled = runtime.backgroundJobsEnabled;
+    if (lifecycleEnabled) {
+      taskActivityTracker = new TaskActivityTracker();
+    }
     const activePresetName = runtime.getRuntimePreset() ?? config.preset;
-    selectedMarketplacePackageIds = resolveDesiredMarketplacePackageIds(
-      config,
-      activePresetName,
-    );
+    selectedMarketplacePackageIds = runtime.marketplaceEnabled
+      ? resolveDesiredMarketplacePackageIds(config, activePresetName)
+      : [];
     rewriteDisplayNameMentions = createDisplayNameMentionRewriter(runtime);
     // Host flavor marker ('v2' on OpenCode v2 hosts, set by the v2 client
     // shim; absent on v1). Threads the native delegation vocabulary into
     // prompt assembly so v2 prompts say subagent(...)/agent directly.
     const delegation = delegationWording(hostFlavor);
-    // Slash-command hooks are lifecycle-independent: they only intercept
-    // their own runtime commands.
-    deepworkCommandHook = createDeepworkCommandHook();
-    reflectCommandHook = createReflectCommandHook();
-    loopCommandHook = createLoopCommandHook();
+    // Slash-command hooks are lifecycle-independent, but disabled commands
+    // need neither a handler nor its captured state.
+    const commandOptions = {
+      disabledCommands: runtime.disabledCommands,
+      disabledSkills: runtime.disabledSkills,
+    };
+    if (isCommandEnabled('deepwork', commandOptions)) {
+      deepworkCommandHook = createDeepworkCommandHook();
+    }
+    if (isCommandEnabled('reflect', commandOptions)) {
+      reflectCommandHook = createReflectCommandHook();
+    }
+    if (isCommandEnabled('loop', commandOptions)) {
+      loopCommandHook = createLoopCommandHook();
+    }
     agentDefs = createAgents(runtime, {
       projectDirectory: ctx.directory,
       hostFlavor,
@@ -1208,11 +1247,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           sessionMetadata.markTaskManaged(sessionID);
         },
         isFallbackInProgress: (sessionID) =>
-          foregroundFallback!.isFallbackInProgress(sessionID),
+          foregroundFallback?.isFallbackInProgress(sessionID) ?? false,
         willAttemptFallback: (sessionID) =>
-          foregroundFallback!.willAttemptFallback(sessionID),
+          foregroundFallback?.willAttemptFallback(sessionID) ?? false,
         fallbackFailureReason: (sessionID) =>
-          foregroundFallback!.fallbackFailureReason(sessionID),
+          foregroundFallback?.fallbackFailureReason(sessionID) ??
+          'Model fallback is disabled.',
         coordinator: sessionLifecycle,
         revivedRunTracker,
         onChildInputWait: (notification) => {
@@ -1261,7 +1301,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
               hasInputWait: (sessionID) =>
                 taskSessionManagerHook!.hasInputWait(sessionID),
               isFallbackInProgress: (sessionID) =>
-                foregroundFallback!.isFallbackInProgress(sessionID),
+                foregroundFallback?.isFallbackInProgress(sessionID) ?? false,
               resolveSelection: lifecycleSelectionResolver,
               // C2 writer-lane predicate: the queued child's agent from the board
               // record, graded by its role's write permission data. A missing
@@ -1661,6 +1701,15 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     const fallbackUserEnabled =
       runtime.fallback.enabled !== false &&
       !runtime.disabledHooks.has('foreground-fallback');
+    // v2 can enable fallback per session through a live config refresh
+    // (pinned bundle `fallbackEnabled`), so keep the manager and its retry
+    // hook unless the hook itself is disabled; it stays cheap while every
+    // path is off (handleEvent early-returns).
+    const fallbackManagerNeeded =
+      fallbackUserEnabled ||
+      (hostFlavor === 'v2' &&
+        !runtime.disabledHooks.has('foreground-fallback'));
+    fallbackRetryHookEnabled = fallbackManagerNeeded;
     const fallbackEnabled = fallbackUserEnabled && hostFlavor !== 'v2';
     const v2RetryEnabled = fallbackUserEnabled;
     if (fallbackUserEnabled && hostFlavor === 'v2') {
@@ -1674,43 +1723,46 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // registry finalize and every successful profile refresh. The manager
     // aliases this record; see publishChainGeneration.
     foregroundFallbackChains = runtime.modelArrays;
-    foregroundFallback = new ForegroundFallbackManager(
-      foregroundFallbackChains,
-      fallbackEnabled,
-      ctx,
-      runtime.fallback.maxRetries,
-      sessionLifecycle,
-      // A managed background-task session switching models mid-flight must
-      // move its admission accounting (provider/model caps) to the new
-      // model. No-op for unknown/non-task sessions; idempotent per model.
-      // Undefined when the lifecycle is off: no admission runtime exists.
-      lifecycleEnabled
-        ? (sessionID, model) =>
-            backgroundTaskConcurrency?.migrateTask(sessionID, model)
-        : undefined,
-      runtime.fallback.initialRetryDelayMs,
-      runtime.fallback.retryDelayMs,
-      backgroundFallbackHandoff,
-      // Identify confirmed background children even after cancellation or
-      // termination, so handoff preparation rejects a delayed stale replay.
-      // Undefined remains exclusive to foreground/unmanaged sessions, and
-      // is the honest value when no board exists.
-      lifecycleEnabled
-        ? (sessionID) => {
-            const record = backgroundJobBoard?.get(sessionID);
-            return record?.background === true ? record.generation : undefined;
-          }
-        : undefined,
-      lifecycleEnabled
-        ? (sessionID) => backgroundJobBoard?.hasRunning(sessionID) ?? false
-        : undefined,
-      v2RetryEnabled,
-    );
+    foregroundFallback = fallbackManagerNeeded
+      ? new ForegroundFallbackManager(
+          foregroundFallbackChains,
+          fallbackEnabled,
+          ctx,
+          runtime.fallback.maxRetries,
+          sessionLifecycle,
+          // A managed background-task session switching models mid-flight must
+          // move its admission accounting (provider/model caps) to the new
+          // model. No-op for unknown/non-task sessions; idempotent per model.
+          // Undefined when the lifecycle is off: no admission runtime exists.
+          lifecycleEnabled
+            ? (sessionID, model) =>
+                backgroundTaskConcurrency?.migrateTask(sessionID, model)
+            : undefined,
+          runtime.fallback.initialRetryDelayMs,
+          runtime.fallback.retryDelayMs,
+          backgroundFallbackHandoff,
+          // Identify confirmed background children even after cancellation or
+          // termination, so handoff preparation rejects a delayed stale replay.
+          // Undefined remains exclusive to foreground/unmanaged sessions, and
+          // is the honest value when no board exists.
+          lifecycleEnabled
+            ? (sessionID) => {
+                const record = backgroundJobBoard?.get(sessionID);
+                return record?.background === true
+                  ? record.generation
+                  : undefined;
+              }
+            : undefined,
+          lifecycleEnabled
+            ? (sessionID) => backgroundJobBoard?.hasRunning(sessionID) ?? false
+            : undefined,
+          v2RetryEnabled,
+        )
+      : undefined;
 
     // P0 cold gating: each on-demand tool guard is only constructed when
     // its disabled_hooks entry is absent, so a disabled guard performs no
-    // construction work and its composed before/after calls no-op. Deepwork
-    // guard keeps its per-call self-gate inside its own module.
+    // construction work or per-tool-call work.
     if (!runtime.disabledHooks.has('apply-patch')) {
       applyPatch = createApplyPatchHook(ctx);
     }
@@ -1723,7 +1775,13 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       absolutePathRescue = createAbsolutePathRescueHook(ctx);
     }
 
-    deepworkGuardHook = createDeepworkGuardHook(ctx);
+    if (!runtime.disabledHooks.has('deepwork-guard')) {
+      const hook = createDeepworkGuardHook(ctx);
+      deepworkGuardHook = hook;
+      deepworkGuardAfter = wrapPostToolHook('deepwork-guard', (i, o) =>
+        hook['tool.execute.after'](i as never, o as never),
+      );
+    }
     if (!runtime.disabledHooks.has('json-error-recovery')) {
       const jsonErrorRecoveryHook = createJsonErrorRecoveryHook(ctx);
       jsonErrorRecoveryAfter = wrapPostToolHook('json-error-recovery', (i, o) =>
@@ -1734,10 +1792,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       toolLoopGuard = createToolLoopGuardHook({ directory: ctx.directory });
     }
 
-    // Pre-created wrapped handlers for tool.execute.after (error-isolated)
-    deepworkGuardAfter = wrapPostToolHook('deepwork-guard', (i, o) =>
-      deepworkGuardHook['tool.execute.after'](i as never, o as never),
-    );
+    // Pre-created wrapped handler for tool.execute.after (error-isolated).
     if (taskSessionManagerHook) {
       taskSessionManagerAfter = wrapPostToolHook(
         'task-session-manager',
@@ -1756,15 +1811,28 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         : createNativeSeatResolver(ctx),
     });
     if (runtime.interviewEnabled) {
-      interviewManager = createInterviewManager(ctx, config);
-      interviewSubmitService = interviewManager.service;
+      const { collapseInterviewHistory } = await import('./interview/history');
+      collapseActiveInterviewHistory = collapseInterviewHistory;
+      // v2 owns its bridge; the submit tool resolves its service after the
+      // setup handoff. v1 alone loads the legacy command/event owner.
+      if (hostFlavor !== 'v2') {
+        const { createInterviewManager } = await import('./interview');
+        interviewManager = createInterviewManager(ctx, config);
+        interviewSubmitService = interviewManager.service;
+      }
     }
-    companionManager = new CompanionManager(
-      companionSessionIdForDirectory(ctx.directory),
-      ctx.directory,
-      runtime.companion,
-      hostFlavor,
-    );
+    if (runtime.companion?.enabled === true) {
+      const { CompanionManager, companionSessionIdForDirectory } = await import(
+        './companion/manager'
+      );
+      companionManager = new CompanionManager(
+        companionSessionIdForDirectory(ctx.directory),
+        ctx.directory,
+        runtime.companion,
+        hostFlavor,
+        startupConfigSnapshot,
+      );
+    }
     if (lifecycleEnabled) {
       // Invariant: the lifecycle block above initialized the shared recovery
       // and alias state. Checked once here so TypeScript narrows it for the
@@ -1864,7 +1932,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       runtime.interviewEnabled && !runtime.disabledCommands.has('interview');
     const interviewTools = shouldRegisterInterview
       ? createInterviewSubmitStateTool({
-          service: () => interviewSubmitService,
+          service: () => {
+            if (!interviewSubmitService) {
+              throw new Error('interview service unavailable');
+            }
+            return interviewSubmitService;
+          },
           maxQuestions: config.interview?.maxQuestions,
         })
       : {};
@@ -1882,12 +1955,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         Object.entries(tools).filter(([name]) => !disabledTools.has(name)),
       );
     }
-
-    toolCount =
-      Object.keys(tools).length +
-      ['marketplace_inspect', 'marketplace_manage'].filter(
-        (name) => !runtime.disabledTools.includes(name),
-      ).length;
   } catch (err) {
     terminalGate?.dispose();
     admissionRuntimeLease?.release();
@@ -1904,42 +1971,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       `INIT FAILED: ${String(err)}. Report at github.com/alvinunreal/oh-my-opencode-slim/issues/310`,
     );
     throw err;
-  }
-
-  // ── Health check: validate registrations ────────────────────────────
-  const agentCount = Object.keys(agents).length;
-  const mcpCount = Object.keys(mcps).length;
-  // Skip MCP threshold when user explicitly disabled all built-in MCPs
-  const mcpThreshold =
-    runtime.disabledMcps.length > 0 ? 0 : HEALTH_CHECK.minMcps;
-  const toolThreshold = minimumExpectedToolCount(
-    runtime.disabledTools,
-    runtime.webfetch.enabled !== false,
-    hostFlavor,
-    runtime.backgroundJobsEnabled,
-  );
-  if (
-    agentCount < HEALTH_CHECK.minAgents ||
-    toolCount < toolThreshold ||
-    mcpCount < mcpThreshold
-  ) {
-    const msg = [
-      'Health check: registrations suspiciously low.',
-      `  agents: ${agentCount} (expected >=${HEALTH_CHECK.minAgents})`,
-      `  tools:  ${toolCount} (expected >=${toolThreshold})`,
-      `  mcps:   ${mcpCount} (expected >=${mcpThreshold})`,
-      'This usually means a dependency failed to resolve (jsdom, etc).',
-      'If you recently updated opencode, see:',
-      '  github.com/alvinunreal/oh-my-opencode-slim/issues/310',
-    ].join('\n');
-    log(`[plugin] WARN: ${msg}`);
-    await appLog(ctx, 'warn', msg);
-  } else {
-    log('[plugin] health check passed', {
-      agents: agentCount,
-      tools: toolCount,
-      mcps: mcpCount,
-    });
   }
 
   // ── Probe jsdom (async, non-blocking) ───────────────────────────────
@@ -1959,6 +1990,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
   if (runtime.companion?.enabled === true) {
     try {
+      const { ensureCompanionVersion } = await import('./companion/updater');
       const companionResult = await ensureCompanionVersion({
         config: runtime.companion,
         downloadTimeoutMs: 3_000,
@@ -1974,7 +2006,17 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     }
   }
 
-  companionManager.onLoad();
+  if (companionManager) {
+    companionManager.onLoad();
+  } else {
+    // Disabled: no manager, but still prune this session's stale entry
+    // (and any manager a previous enabled load left running).
+    const { companionSessionIdForDirectory, pruneDisabledCompanionSession } =
+      await import('./companion/manager');
+    pruneDisabledCompanionSession(
+      companionSessionIdForDirectory(ctx.directory),
+    );
+  }
 
   function resolveTuiVariantForModel(
     agentName: string,
@@ -2012,105 +2054,121 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   // package IDs are ignored. This is distinct from an empty per-preset
   // activation list, which keeps the service running with nothing selected.
   const marketplaceEnabled = runtime.marketplaceEnabled;
-  const marketplaceService = marketplaceEnabled
-    ? new MarketplaceService({
-        projectDir: ctx.directory,
-        hostFlavor,
-        pluginVersion: getBuildInfo().version,
-        getLivePackages: () => {
-          if (registryRetired || !resolvedAgentRegistry) return undefined;
-          return registryBridge.requireRegistry().marketplacePackages;
-        },
-        getPresetOverride: () => runtime.getRuntimePreset() ?? undefined,
-        getDesiredState: (packageInspection) => {
-          const freshConfig = loadPluginConfig(ctx.directory, {
-            silent: true,
-            hostFlavor,
-          });
-          const runtimePreset = runtime.resolveRuntimePreset(freshConfig);
-          const desiredPackageIds = resolveDesiredMarketplacePackageIds(
-            freshConfig,
-            runtimePreset ?? undefined,
-          );
-          if (hostSnapshotProvenance !== 'clean' || !latestHostSnapshot) {
-            return {
-              packageIds: desiredPackageIds,
-              error:
-                'The current host agent snapshot is not trustworthy for desired marketplace status',
-            };
-          }
-          if (
-            packageInspection.lockfileError ||
-            packageInspection.operationalError
-          ) {
-            return {
-              packageIds: desiredPackageIds,
-              error:
-                packageInspection.lockfileError ??
-                packageInspection.operationalError ??
-                'Marketplace package inspection is incomplete',
-            };
-          }
-          const installedPackages = new Map(
-            packageInspection.packages.map((stored) => [
-              stored.manifest.id,
-              stored,
-            ]),
-          );
-          const readOnlyActivationStore = {
-            loadSelected(ids: readonly string[]) {
-              const packages = new Map();
-              const errors = new Map<string, Error>();
-              for (const id of ids) {
-                const stored = installedPackages.get(id);
-                if (stored) packages.set(id, stored);
-                else
-                  errors.set(
-                    id,
-                    new Error(`${id} is not installed or verified`),
-                  );
-              }
-              return { packages, errors };
-            },
+  let marketplaceImplementation: MarketplaceRegistryImplementation | undefined;
+  let marketplaceService: MarketplaceService | undefined;
+  if (marketplaceEnabled) {
+    const { MarketplaceService } = await import('./marketplace/service');
+    const implementation = await import('./marketplace/registry-runtime');
+    marketplaceImplementation = implementation;
+    marketplaceService = new MarketplaceService({
+      projectDir: ctx.directory,
+      hostFlavor,
+      pluginVersion: getBuildInfo().version,
+      getLivePackages: () => {
+        if (registryRetired || !resolvedAgentRegistry) return undefined;
+        return registryBridge.requireRegistry().marketplacePackages;
+      },
+      getPresetOverride: () => runtime.getRuntimePreset() ?? undefined,
+      getDesiredState: (packageInspection) => {
+        const snapshot = readPluginConfigSnapshot(ctx.directory, {
+          hostFlavor,
+        });
+        const freshConfig = snapshot.config;
+        const runtimePreset = runtime.resolveRuntimePreset(freshConfig);
+        const desiredPackageIds = resolveDesiredMarketplacePackageIds(
+          freshConfig,
+          runtimePreset ?? undefined,
+        );
+        const invalid = snapshot.warnings.filter((warning) =>
+          HARD_PROFILE_REFRESH_WARNING_KINDS.has(warning.kind),
+        );
+        if (invalid.length > 0) {
+          return {
+            packageIds: desiredPackageIds,
+            error: `Plugin configuration is invalid: ${invalid.map((warning) => `${warning.kind} (${warning.path}): ${warning.message}`).join('; ')}`,
           };
-          const freshRuntime = RuntimeConfig.createDetached(
-            ctx.directory,
-            freshConfig,
+        }
+        if (hostSnapshotProvenance !== 'clean' || !latestHostSnapshot) {
+          return {
+            packageIds: desiredPackageIds,
+            error:
+              'The current host agent snapshot is not trustworthy for desired marketplace status',
+          };
+        }
+        if (
+          packageInspection.lockfileError ||
+          packageInspection.operationalError
+        ) {
+          return {
+            packageIds: desiredPackageIds,
+            error:
+              packageInspection.lockfileError ??
+              packageInspection.operationalError ??
+              'Marketplace package inspection is incomplete',
+          };
+        }
+        if (desiredPackageIds.length === 0) {
+          return { packageIds: desiredPackageIds, packages: [] };
+        }
+        const installedPackages = new Map(
+          packageInspection.packages.map((stored) => [
+            stored.manifest.id,
+            stored,
+          ]),
+        );
+        const readOnlyActivationStore = {
+          loadSelected(ids: readonly string[]) {
+            const packages = new Map();
+            const errors = new Map<string, Error>();
+            for (const id of ids) {
+              const stored = installedPackages.get(id);
+              if (stored) packages.set(id, stored);
+              else
+                errors.set(id, new Error(`${id} is not installed or verified`));
+            }
+            return { packages, errors };
+          },
+        };
+        const freshRuntime = RuntimeConfig.createDetached(
+          ctx.directory,
+          freshConfig,
+          hostFlavor,
+        );
+        freshRuntime.captureHostConfig(latestHostSnapshot ?? {});
+        if (runtimePreset) freshRuntime.setRuntimePreset(runtimePreset);
+        const availableSkillNames = discoverPreflightSkills(
+          freshRuntime,
+          ctx.directory,
+        );
+        const freshPluginMcps = createBuiltinMcps(freshRuntime.disabledMcps);
+        try {
+          const freshRegistry = buildResolvedAgentRegistry(freshRuntime, {
+            hostSnapshot: latestHostSnapshot,
+            nativePermissionsByAgent: latestNativePermissionsByAgent,
+            projectDirectory: ctx.directory,
             hostFlavor,
-          );
-          freshRuntime.captureHostConfig(latestHostSnapshot ?? {});
-          if (runtimePreset) freshRuntime.setRuntimePreset(runtimePreset);
-          const freshPluginMcps = createBuiltinMcps(freshRuntime.disabledMcps);
-          try {
-            const freshRegistry = buildResolvedAgentRegistry(freshRuntime, {
-              hostSnapshot: latestHostSnapshot,
-              nativePermissionsByAgent: latestNativePermissionsByAgent,
-              projectDirectory: ctx.directory,
-              hostFlavor,
-              pluginMcps: freshPluginMcps,
-              marketplace: {
-                selectedPackageIds: desiredPackageIds,
-                store: readOnlyActivationStore,
-                pluginVersion: getBuildInfo().version,
-                availableSkillNames: discoverPreflightSkills(
-                  freshRuntime,
-                  ctx.directory,
-                ),
-              },
-            });
-            return {
-              packageIds: desiredPackageIds,
-              packages: freshRegistry.marketplacePackages,
-            };
-          } catch (error) {
-            return {
-              packageIds: desiredPackageIds,
-              error: error instanceof Error ? error.message : String(error),
-            };
-          }
-        },
-      })
-    : undefined;
+            pluginMcps: freshPluginMcps,
+            marketplace: {
+              implementation,
+              selectedPackageIds: desiredPackageIds,
+              store: readOnlyActivationStore,
+              pluginVersion: getBuildInfo().version,
+              availableSkillNames,
+            },
+          });
+          return {
+            packageIds: desiredPackageIds,
+            packages: freshRegistry.marketplacePackages,
+          };
+        } catch (error) {
+          return {
+            packageIds: desiredPackageIds,
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+      },
+    });
+  }
   registryBridge = {
     marketplaceService,
     finalize(hostSnapshot, nativePermissionsByAgent) {
@@ -2131,11 +2189,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           hostFlavor,
           pluginMcps: mcps,
           nativePermissionsByAgent,
-          ...(marketplaceEnabled
+          ...(marketplaceImplementation && marketplaceService
             ? {
                 marketplace: {
+                  implementation: marketplaceImplementation,
                   selectedPackageIds: selectedMarketplacePackageIds,
-                  store: marketplaceService!.store,
+                  store: marketplaceService.store,
                   pluginVersion: getBuildInfo().version,
                   availableSkillNames: selectedMarketplacePackageIds.length
                     ? discoverPreflightSkills(runtime, ctx.directory)
@@ -2184,13 +2243,13 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         });
       }
       if (isCommandEnabled('deepwork', commandGate)) {
-        deepworkCommandHook.registerCommand(opencodeConfig);
+        deepworkCommandHook?.registerCommand(opencodeConfig);
       }
       if (isCommandEnabled('reflect', commandGate)) {
-        reflectCommandHook.registerCommand(opencodeConfig);
+        reflectCommandHook?.registerCommand(opencodeConfig);
       }
       if (isCommandEnabled('loop', commandGate)) {
-        loopCommandHook.registerCommand(opencodeConfig);
+        loopCommandHook?.registerCommand(opencodeConfig);
       }
     },
     retire() {
@@ -2198,6 +2257,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     },
   };
   if (marketplaceEnabled && marketplaceService) {
+    const { createMarketplaceTools, resolveFinalizedOrchestratorIdentities } =
+      await import('./tools/marketplace');
     const marketplaceTools = createMarketplaceTools({
       service: marketplaceService,
       cwd: ctx.directory,
@@ -2213,7 +2274,45 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       tools.marketplace_manage = marketplaceTools.marketplace_manage;
     }
   }
-  toolCount = Object.keys(tools).length;
+  // Count the completed registration records once, after marketplace tools.
+  const agentCount = Object.keys(agents).length;
+  const toolCount = Object.keys(tools).length;
+  const mcpCount = Object.keys(mcps).length;
+  const mcpThreshold =
+    runtime.disabledMcps.length > 0 ? 0 : HEALTH_CHECK.minMcps;
+  const minAgents = minimumExpectedAgentCount(
+    [...runtime.disabledAgents],
+    Boolean(runtime.council),
+  );
+  const toolThreshold = minimumExpectedToolCount(
+    runtime.disabledTools,
+    runtime.webfetch.enabled !== false,
+    hostFlavor,
+    runtime.backgroundJobsEnabled,
+  );
+  if (
+    agentCount < minAgents ||
+    toolCount < toolThreshold ||
+    mcpCount < mcpThreshold
+  ) {
+    const msg = [
+      'Health check: registrations suspiciously low.',
+      `  agents: ${agentCount} (expected >=${minAgents})`,
+      `  tools:  ${toolCount} (expected >=${toolThreshold})`,
+      `  mcps:   ${mcpCount} (expected >=${mcpThreshold})`,
+      'This usually means a dependency failed to resolve (jsdom, etc).',
+      'If you recently updated opencode, see:',
+      '  github.com/alvinunreal/oh-my-opencode-slim/issues/310',
+    ].join('\n');
+    log(`[plugin] WARN: ${msg}`);
+    await appLog(ctx, 'warn', msg);
+  } else {
+    log('[plugin] health check passed', {
+      agents: agentCount,
+      tools: toolCount,
+      mcps: mcpCount,
+    });
+  }
 
   /**
    * Re-read the plugin config from disk and resolve ONLY the
@@ -2248,23 +2347,25 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     allowInvalidFallback?: boolean;
     presetName?: string;
     detached?: boolean;
+    /** Startup generation already resolved these files and warnings. */
+    configSnapshot?: PluginConfigSnapshot;
   }): Promise<V2ProfileRefreshResult> => {
     try {
       // Malformed config handling: collect warnings and abort BEFORE any
       // resolution or sidebar rewrite when the load is invalid. The loader
       // falls back to `{}` for invalid JSON/schema, which would otherwise
       // report a successful "refresh" that wipes every profile/model.
-      const hardWarnings: ConfigLoadWarning[] = [];
-      const freshConfig = loadPluginConfig(ctx.directory, {
-        hostFlavor,
-        ...(options?.presetName ? { presetName: options.presetName } : {}),
-        silent: true,
-        onWarning: (warning) => {
-          if (HARD_PROFILE_REFRESH_WARNING_KINDS.has(warning.kind)) {
-            hardWarnings.push(warning);
-          }
-        },
-      });
+      const snapshot =
+        options?.configSnapshot ??
+        readPluginConfigSnapshot(ctx.directory, {
+          hostFlavor,
+          fresh: true,
+          ...(options?.presetName ? { presetName: options.presetName } : {}),
+        });
+      const freshConfig = snapshot.config;
+      const hardWarnings = snapshot.warnings.filter((warning) =>
+        HARD_PROFILE_REFRESH_WARNING_KINDS.has(warning.kind),
+      );
       // The loader omits each broken inheritance chain independently. Only
       // named, successfully resolved selections may ignore those unrelated
       // diagnostics; layer/schema/image-routing failures remain fatal. Keep
@@ -2608,8 +2709,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // Per-instance background-default flip handle: v2 setup arms it after
     // its description rewrite verifies and disarms it with its teardown.
     'v2.backgroundDefaultFlip': backgroundDefaultFlip,
-    'v2.session.retry': (input: never, switchModel: never) =>
-      foregroundFallback?.handleV2Retry(input, switchModel),
+    'v2.session.retry': fallbackRetryHookEnabled
+      ? (input: never, switchModel: never) =>
+          foregroundFallback?.handleV2Retry(input, switchModel)
+      : undefined,
     // v2-only extension hook: pin the chain generation in effect when a
     // child session registers — the same generation as its frozen profile.
     'v2.pinSessionChains': (
@@ -2801,317 +2904,332 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       registryBridge.prepareCommands(opencodeConfig);
     },
 
-    event: async (input) => {
-      if (input.event.type === 'server.instance.disposed') {
-        instanceDisposed = true;
-        terminalGate?.dispose();
-      }
-      // Token-stream deltas fire on every reasoning/text chunk. Slim has no
-      // work for them; skip the rest of the fan-out. v2 names:
-      // session.next.{text,reasoning}.delta.
-      const streamEventType = (input.event as { type?: string } | undefined)
-        ?.type;
-      if (
-        streamEventType === 'message.part.delta' ||
-        streamEventType === 'session.next.text.delta' ||
-        streamEventType === 'session.next.reasoning.delta'
-      ) {
-        return;
-      }
+    event: (input) =>
+      withTuiSnapshotBatch(async () => {
+        if (input.event.type === 'server.instance.disposed') {
+          instanceDisposed = true;
+          terminalGate?.dispose();
+        }
+        // Token streams have no work in this fan-out. The v2 Interview
+        // bridge consumes text deltas independently before dispatching here.
+        const streamEventType = (input.event as { type?: string } | undefined)
+          ?.type;
+        if (
+          streamEventType === 'message.part.delta' ||
+          streamEventType === 'session.text.delta' ||
+          streamEventType === 'session.reasoning.delta'
+        ) {
+          return;
+        }
 
-      // Directory-local handling stays scoped; moved children still reach
-      // their task owner. Unresolved events fall through (fail-open).
-      eventDirectoryScope?.note(input.event);
-      if (eventDirectoryScope?.isForeign(input.event)) {
-        await observeForeignTaskEvent(input);
-        return;
-      }
+        // Directory-local handling stays scoped; moved children still reach
+        // their task owner. Unresolved events fall through (fail-open).
+        eventDirectoryScope?.note(input.event);
+        if (eventDirectoryScope?.isForeign(input.event)) {
+          await observeForeignTaskEvent(input);
+          return;
+        }
 
-      const event = input.event as {
-        type: string;
-        // Raw v2 envelope: host time and payload.
-        created?: unknown;
-        data?: { sessionID?: unknown };
-        properties?: {
-          info?: {
-            id?: string;
-            parentID?: string;
-            title?: string;
-            agent?: string;
-            providerID?: string;
-            modelID?: string;
-            model?: {
+        const event = input.event as {
+          type: string;
+          // Raw v2 envelope: host time and payload.
+          created?: unknown;
+          data?: { sessionID?: unknown };
+          properties?: {
+            info?: {
+              id?: string;
+              parentID?: string;
+              title?: string;
+              agent?: string;
               providerID?: string;
               modelID?: string;
+              model?: {
+                providerID?: string;
+                modelID?: string;
+              };
+              sessionID?: string;
+              directory?: string;
+              time?: { created?: unknown; completed?: unknown };
             };
             sessionID?: string;
-            directory?: string;
-            time?: { created?: unknown; completed?: unknown };
+            id?: string;
+            requestID?: string;
+            status?: { type: string };
           };
-          sessionID?: string;
-          id?: string;
-          requestID?: string;
-          status?: { type: string };
         };
-      };
 
-      // Session-scoped events (session.*) carry the session id in info.id;
-      // message/step-scoped events (message.updated, step-finish) carry the
-      // message id in info.id and the session id in info.sessionID. Resolve
-      // by session so child activity refreshes the correct stuck timer.
-      const eventSessionID = resolveEventSessionID(event);
-      // cache-monitor is created only when its disabled_hooks entry is
-      // absent; the optional chain keeps the event path fail-open either way.
-      await cacheMonitor?.event(input);
-      const rawStatus = event.properties?.status;
-      const statusType =
-        typeof rawStatus === 'string'
-          ? rawStatus
-          : typeof rawStatus === 'object' &&
-              rawStatus !== null &&
-              'type' in rawStatus &&
-              typeof (rawStatus as { type?: unknown }).type === 'string'
-            ? (rawStatus as { type: string }).type
-            : undefined;
-      if (
-        eventSessionID &&
-        sessionMetadata.getAgent(eventSessionID) === 'orchestrator' &&
-        (event.type === 'session.idle' ||
-          (event.type === 'session.status' && statusType === 'idle'))
-      ) {
-        toolLoopGuard?.resetTurn(eventSessionID);
-      }
-      if (eventSessionID && event.type === 'session.deleted') {
-        toolLoopGuard?.resetSession(eventSessionID);
-      }
-      if (eventSessionID) {
-        applyActivityEvent(taskActivityTracker, event);
+        // Session-scoped events (session.*) carry the session id in info.id;
+        // message/step-scoped events (message.updated, step-finish) carry the
+        // message id in info.id and the session id in info.sessionID. Resolve
+        // by session so child activity refreshes the correct stuck timer.
+        const eventSessionID = resolveEventSessionID(event);
+        // cache-monitor is created only when its disabled_hooks entry is
+        // absent; the optional chain keeps the event path fail-open either way.
+        await cacheMonitor?.event(input);
+        const rawStatus = event.properties?.status;
+        const statusType =
+          typeof rawStatus === 'string'
+            ? rawStatus
+            : typeof rawStatus === 'object' &&
+                rawStatus !== null &&
+                'type' in rawStatus &&
+                typeof (rawStatus as { type?: unknown }).type === 'string'
+              ? (rawStatus as { type: string }).type
+              : undefined;
         if (
-          event.type === 'session.status' &&
-          (statusType === 'busy' || statusType === 'retry')
+          eventSessionID &&
+          sessionMetadata.getAgent(eventSessionID) === 'orchestrator' &&
+          (event.type === 'session.idle' ||
+            (event.type === 'session.status' && statusType === 'idle'))
         ) {
-          sessionMetadata.markOrchestratorActive(eventSessionID);
-          const agentName = sessionMetadata.getAgent(eventSessionID);
-          if (agentName) {
-            pendingTuiBusySessions.delete(eventSessionID);
-            markTuiAgentActive(eventSessionID, agentName, statusType);
-          } else {
-            pendingTuiBusySessions.set(eventSessionID, statusType);
-          }
-        } else if (
-          event.type === 'session.idle' ||
-          (event.type === 'session.status' &&
-            (statusType === 'idle' ||
-              statusType === 'completed' ||
-              statusType === 'stopped' ||
-              statusType === 'error' ||
-              statusType === 'failed')) ||
-          event.type === 'session.deleted' ||
-          event.type === 'session.error'
-        ) {
-          pendingTuiBusySessions.delete(eventSessionID);
-          sessionMetadata.markOrchestratorIdle(eventSessionID);
-          markTuiAgentInactive(eventSessionID);
+          toolLoopGuard?.resetTurn(eventSessionID);
         }
-      }
-
-      if (event.type === 'message.updated') {
-        const info = event.properties?.info;
-        const providerID =
-          typeof info?.providerID === 'string'
-            ? info.providerID
-            : typeof info?.model?.providerID === 'string'
-              ? info.model.providerID
-              : undefined;
-        const modelID =
-          typeof info?.modelID === 'string'
-            ? info.modelID
-            : typeof info?.model?.modelID === 'string'
-              ? info.model.modelID
-              : undefined;
-        // Track each session's current model so background task admission
-        // can resolve the model a model-less subagent will inherit.
-        if (typeof info?.sessionID === 'string' && providerID && modelID) {
-          const model = `${providerID}/${modelID}`;
-          // Accounting/fallback follows the model actually executing.
-          // External selection tracking does not: a synthetic wake's
-          // message.updated must not poison Plan/Build metadata (#1079).
-          const internalAdmission =
-            (typeof info.id === 'string' &&
-              isInternalAdmission(info.sessionID, info.id)) ||
-            (typeof info.parentID === 'string' &&
-              isInternalAdmission(info.sessionID, info.parentID));
-          if (!internalAdmission) {
-            sessionMetadata.setModel(info.sessionID, model);
-            companionManager.onSessionModelChanged({
-              sessionId: info.sessionID,
-              model,
-            });
-          }
-          // Managed background-task sessions are identified by their session
-          // ID. If the model serving one changed (fallback re-prompt, runtime
-          // switch), migrate the admission accounting so provider/model caps
-          // keep tracking the model actually in use. No-op for other
-          // sessions and idempotent when the model is unchanged.
-          backgroundTaskConcurrency?.migrateTask(info.sessionID, model);
+        if (eventSessionID && event.type === 'session.deleted') {
+          toolLoopGuard?.resetSession(eventSessionID);
         }
-        if (typeof info?.agent === 'string' && providerID && modelID) {
-          const agentName = resolveRuntimeAgentName(runtime, info.agent);
-          const model = `${providerID}/${modelID}`;
-          const variant = resolveTuiVariantForModel(agentName, model);
-          if (runtime.sidebarEnabled) {
-            recordTuiAgentModel(
-              {
-                agentName,
-                model,
-                variant: variant ?? null,
-              },
-              (info?.sessionID &&
-                sessionMetadata.getDirectory(info.sessionID)) ??
-                ctx.directory,
+        if (eventSessionID) {
+          if (taskActivityTracker) {
+            applyActivityEvent(
+              taskActivityTracker,
+              event,
+              Date.now(),
+              eventSessionID,
             );
           }
+          if (
+            event.type === 'session.status' &&
+            (statusType === 'busy' || statusType === 'retry')
+          ) {
+            sessionMetadata.markOrchestratorActive(eventSessionID);
+            const agentName = sessionMetadata.getAgent(eventSessionID);
+            if (agentName) {
+              pendingTuiBusySessions.delete(eventSessionID);
+              markTuiAgentActive(eventSessionID, agentName, statusType);
+            } else {
+              pendingTuiBusySessions.set(eventSessionID, statusType);
+            }
+          } else if (
+            event.type === 'session.idle' ||
+            (event.type === 'session.status' &&
+              (statusType === 'idle' ||
+                statusType === 'completed' ||
+                statusType === 'stopped' ||
+                statusType === 'error' ||
+                statusType === 'failed')) ||
+            event.type === 'session.deleted' ||
+            event.type === 'session.error'
+          ) {
+            pendingTuiBusySessions.delete(eventSessionID);
+            sessionMetadata.markOrchestratorIdle(eventSessionID);
+            markTuiAgentInactive(eventSessionID);
+          }
         }
-      }
 
-      if (event.type === 'session.created') {
-        const createdSessionId = event.properties?.info?.id;
-        const createdSessionDir = event.properties?.info?.directory;
-        const createdSessionParent = (
-          event.properties as { info?: { parentID?: unknown } } | undefined
-        )?.info?.parentID;
-        // v2 hands over the raw envelope before its mapped shapes: without
-        // `info`, take the session and the host creation time from it.
-        const info = event.properties?.info;
-        const freshID = info
-          ? info.id
-          : (event.data?.sessionID ?? event.properties?.sessionID);
-        const createdAt = info ? info.time?.created : event.created;
-        if (typeof freshID === 'string' && typeof createdAt === 'number') {
-          backgroundJobBoard?.noteSessionCreated(freshID, createdAt);
-        }
-        if (
-          runtime.sidebarEnabled &&
-          createdSessionId &&
-          typeof createdSessionParent === 'string'
-        ) {
-          // Persist the child→parent link so any process can resolve the
-          // conversation root, surviving restarts and revives (#1147).
-          recordTuiSessionParent(
-            createdSessionId,
-            createdSessionParent,
-            createdSessionDir ?? ctx.directory,
-          );
-        }
-        if (createdSessionId && createdSessionDir) {
-          sessionMetadata.setDirectory(createdSessionId, createdSessionDir);
-        }
-      }
-
-      // Resolve identity before task error bookkeeping, but replay afterwards:
-      // prompt admission may synchronously emit a busy event.
-      await foregroundFallback?.preflightEvent(input.event);
-
-      // Invalidate task continuations before the instance-disposed cleanup
-      // (the former multiplexer event handling moved to the client process
-      // with the pane lifecycle; the server never touches panes).
-      await taskSessionManagerHook?.event(
-        input as {
-          event: {
-            type: string;
-            properties?: { info?: { id?: string }; sessionID?: string };
-          };
-        },
-      );
-      if (event.type === 'server.instance.disposed') {
-        clearTuiActivities();
-      }
-
-      await orchestratorWakeScheduler?.event(
-        input as {
-          event: {
-            type: string;
-            properties?: {
-              info?: { id?: string };
-              sessionID?: string;
-              status?: { type?: string };
-            };
-          };
-        },
-      );
-
-      // Runtime model fallback for foreground agents (rate-limit detection)
-      await foregroundFallback?.handleEvent(input.event);
-
-      // Handle auto-update checking; the checker only exists when its
-      // disabled_hooks entry is absent.
-      await autoUpdateChecker?.event(input);
-
-      await interviewManager?.handleEvent(
-        input as {
-          event: { type: string; properties?: Record<string, unknown> };
-        },
-      );
-
-      const companionProperties = event.properties;
-      const companionData = (input.event as { data?: Record<string, unknown> })
-        .data;
-      const companionRequestId =
-        typeof companionProperties?.id === 'string'
-          ? companionProperties.id
-          : typeof companionProperties?.requestID === 'string'
-            ? companionProperties.requestID
-            : typeof companionData?.id === 'string'
-              ? companionData.id
-              : typeof companionData?.requestID === 'string'
-                ? companionData.requestID
+        if (event.type === 'message.updated') {
+          const info = event.properties?.info;
+          const providerID =
+            typeof info?.providerID === 'string'
+              ? info.providerID
+              : typeof info?.model?.providerID === 'string'
+                ? info.model.providerID
                 : undefined;
-
-      if (
-        event.type === 'permission.asked' ||
-        event.type === 'question.asked'
-      ) {
-        companionManager.onWaitingInput(companionRequestId);
-      }
-
-      if (
-        event.type === 'permission.replied' ||
-        event.type === 'question.replied' ||
-        event.type === 'question.rejected'
-      ) {
-        companionManager.onInputResolved();
-      }
-
-      const companionStatus = normalizeCompanionSessionStatus(
-        event.type,
-        statusType,
-      );
-      if (eventSessionID && companionStatus) {
-        const job = backgroundJobBoard?.get(eventSessionID);
-        companionManager.onSessionStatus({
-          sessionId: eventSessionID,
-          agent: sessionMetadata.getAgent(eventSessionID),
-          status: companionStatus,
-          jobFinished: job !== undefined && job.state !== 'running',
-        });
-      }
-
-      if (input.event.type === 'session.deleted') {
-        const props = input.event.properties as
-          | { info?: { id?: string }; sessionID?: string }
-          | undefined;
-        const sessionID = props?.info?.id || props?.sessionID;
-
-        if (sessionID) {
-          sessionLifecycle?.dispatchSessionDeleted(sessionID);
+          const modelID =
+            typeof info?.modelID === 'string'
+              ? info.modelID
+              : typeof info?.model?.modelID === 'string'
+                ? info.model.modelID
+                : undefined;
+          // Track each session's current model so background task admission
+          // can resolve the model a model-less subagent will inherit.
+          if (typeof info?.sessionID === 'string' && providerID && modelID) {
+            const model = `${providerID}/${modelID}`;
+            // Accounting/fallback follows the model actually executing.
+            // External selection tracking does not: a synthetic wake's
+            // message.updated must not poison Plan/Build metadata (#1079).
+            const internalAdmission =
+              (typeof info.id === 'string' &&
+                isInternalAdmission(info.sessionID, info.id)) ||
+              (typeof info.parentID === 'string' &&
+                isInternalAdmission(info.sessionID, info.parentID));
+            if (!internalAdmission) {
+              sessionMetadata.setModel(info.sessionID, model);
+              companionManager?.onSessionModelChanged({
+                sessionId: info.sessionID,
+                model,
+              });
+            }
+            // Managed background-task sessions are identified by their session
+            // ID. If the model serving one changed (fallback re-prompt, runtime
+            // switch), migrate the admission accounting so provider/model caps
+            // keep tracking the model actually in use. No-op for other
+            // sessions and idempotent when the model is unchanged.
+            backgroundTaskConcurrency?.migrateTask(info.sessionID, model);
+          }
+          if (typeof info?.agent === 'string' && providerID && modelID) {
+            const agentName = resolveRuntimeAgentName(runtime, info.agent);
+            const model = `${providerID}/${modelID}`;
+            const variant = resolveTuiVariantForModel(agentName, model);
+            if (runtime.sidebarEnabled) {
+              recordTuiAgentModel(
+                {
+                  agentName,
+                  model,
+                  variant: variant ?? null,
+                },
+                (info?.sessionID &&
+                  sessionMetadata.getDirectory(info.sessionID)) ??
+                  ctx.directory,
+              );
+            }
+          }
         }
-        companionManager.onSessionDeleted(sessionID);
-        if (sessionID) {
-          v1InternalSelectionOverrides.delete(sessionID);
-          sessionMetadata.delete(sessionID);
+
+        if (event.type === 'session.created') {
+          const createdSessionId = event.properties?.info?.id;
+          const createdSessionDir = event.properties?.info?.directory;
+          const createdSessionParent = (
+            event.properties as { info?: { parentID?: unknown } } | undefined
+          )?.info?.parentID;
+          // v2 hands over the raw envelope before its mapped shapes: without
+          // `info`, take the session and the host creation time from it.
+          const info = event.properties?.info;
+          const freshID = info
+            ? info.id
+            : (event.data?.sessionID ?? event.properties?.sessionID);
+          const createdAt = info ? info.time?.created : event.created;
+          if (typeof freshID === 'string' && typeof createdAt === 'number') {
+            backgroundJobBoard?.noteSessionCreated(freshID, createdAt);
+          }
+          if (
+            runtime.sidebarEnabled &&
+            createdSessionId &&
+            typeof createdSessionParent === 'string'
+          ) {
+            // Persist the child→parent link so any process can resolve the
+            // conversation root, surviving restarts and revives (#1147).
+            recordTuiSessionParent(
+              createdSessionId,
+              createdSessionParent,
+              createdSessionDir ?? ctx.directory,
+            );
+          }
+          if (createdSessionId && createdSessionDir) {
+            sessionMetadata.setDirectory(createdSessionId, createdSessionDir);
+          }
         }
-      }
-    },
+
+        // Commit this event's status projection before the fallback can
+        // re-prompt: the re-prompt's busy event commits in its own scope,
+        // and a still-staged "inactive" must not land after it (#1697).
+        flushTuiSnapshotBatch();
+
+        // Resolve identity before task error bookkeeping, but replay afterwards:
+        // prompt admission may synchronously emit a busy event.
+        await foregroundFallback?.preflightEvent(input.event);
+
+        // Invalidate task continuations before the instance-disposed cleanup
+        // (the former multiplexer event handling moved to the client process
+        // with the pane lifecycle; the server never touches panes).
+        await taskSessionManagerHook?.event(
+          input as {
+            event: {
+              type: string;
+              properties?: { info?: { id?: string }; sessionID?: string };
+            };
+          },
+        );
+        if (event.type === 'server.instance.disposed') {
+          clearTuiActivities();
+        }
+
+        await orchestratorWakeScheduler?.event(
+          input as {
+            event: {
+              type: string;
+              properties?: {
+                info?: { id?: string };
+                sessionID?: string;
+                status?: { type?: string };
+              };
+            };
+          },
+        );
+
+        // Runtime model fallback for foreground agents (rate-limit detection).
+        // Same ordering rule as above: commit staged state before re-prompt.
+        flushTuiSnapshotBatch();
+        await foregroundFallback?.handleEvent(input.event);
+
+        // Handle auto-update checking; the checker only exists when its
+        // disabled_hooks entry is absent.
+        await autoUpdateChecker?.event(input);
+
+        await interviewManager?.handleEvent(
+          input as {
+            event: { type: string; properties?: Record<string, unknown> };
+          },
+        );
+
+        const companionProperties = event.properties;
+        const companionData = (
+          input.event as { data?: Record<string, unknown> }
+        ).data;
+        const companionRequestId =
+          typeof companionProperties?.id === 'string'
+            ? companionProperties.id
+            : typeof companionProperties?.requestID === 'string'
+              ? companionProperties.requestID
+              : typeof companionData?.id === 'string'
+                ? companionData.id
+                : typeof companionData?.requestID === 'string'
+                  ? companionData.requestID
+                  : undefined;
+
+        if (
+          event.type === 'permission.asked' ||
+          event.type === 'question.asked'
+        ) {
+          companionManager?.onWaitingInput(companionRequestId);
+        }
+
+        if (
+          event.type === 'permission.replied' ||
+          event.type === 'question.replied' ||
+          event.type === 'question.rejected'
+        ) {
+          companionManager?.onInputResolved();
+        }
+
+        const companionStatus = normalizeCompanionSessionStatus(
+          event.type,
+          statusType,
+        );
+        if (eventSessionID && companionStatus) {
+          const job = backgroundJobBoard?.get(eventSessionID);
+          companionManager?.onSessionStatus({
+            sessionId: eventSessionID,
+            agent: sessionMetadata.getAgent(eventSessionID),
+            status: companionStatus,
+            jobFinished: job !== undefined && job.state !== 'running',
+          });
+        }
+
+        if (input.event.type === 'session.deleted') {
+          const props = input.event.properties as
+            | { info?: { id?: string }; sessionID?: string }
+            | undefined;
+          const sessionID = props?.info?.id || props?.sessionID;
+
+          if (sessionID) {
+            sessionLifecycle?.dispatchSessionDeleted(sessionID);
+          }
+          companionManager?.onSessionDeleted(sessionID);
+          if (sessionID) {
+            v1InternalSelectionOverrides.delete(sessionID);
+            sessionMetadata.delete(sessionID);
+          }
+        }
+      }),
 
     dispose: async () => {
       eventDirectoryScope?.release();
@@ -3145,7 +3263,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // onLoad, and if it fails before that the detached companion would
       // survive until process exit. Idempotent (registerActiveManager's
       // replacement path and the process-exit listener tolerate repeats).
-      companionManager.onExit();
+      companionManager?.onExit();
       // Release only this generation's ownership. The admission runtime
       // defers final scheduler/tracker teardown by one macrotask so an
       // immediate config-update re-init can retain active and queued calls.
@@ -3171,7 +3289,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         input as never,
         output as never,
       );
-      await deepworkGuardHook['tool.execute.before'](
+      await deepworkGuardHook?.['tool.execute.before'](
         input as never,
         output as never,
       );
@@ -3241,7 +3359,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       }
 
       if (commandEnabled('deepwork')) {
-        await deepworkCommandHook.handleCommandExecuteBefore(
+        await deepworkCommandHook?.handleCommandExecuteBefore(
           input as {
             command: string;
             sessionID: string;
@@ -3252,7 +3370,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       }
 
       if (commandEnabled('reflect')) {
-        await reflectCommandHook.handleCommandExecuteBefore(
+        await reflectCommandHook?.handleCommandExecuteBefore(
           input as {
             command: string;
             sessionID: string;
@@ -3263,7 +3381,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       }
 
       if (commandEnabled('loop')) {
-        await loopCommandHook.handleCommandExecuteBefore(
+        await loopCommandHook?.handleCommandExecuteBefore(
           input as {
             command: string;
             sessionID: string;
@@ -3288,6 +3406,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // through the shared apply step, then strip it from the saved/visible
     // text. v2 has no equivalent hook.
     'experimental.text.complete': async (input, output) => {
+      if (!interviewSubmitService) return;
       try {
         output.text = await interviewSubmitService.completeInterviewText(
           input.sessionID,
@@ -3578,7 +3697,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           const pendingStatus = pendingTuiBusySessions.get(input.sessionID);
           pendingTuiBusySessions.delete(input.sessionID);
           markTuiAgentActive(input.sessionID, agent, pendingStatus);
-          companionManager.onSessionStatus({
+          companionManager?.onSessionStatus({
             sessionId: input.sessionID,
             agent,
             status: 'busy',
@@ -3609,7 +3728,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
             input.variant ??
             input.model?.variant ??
             output?.message?.model?.variant;
-          companionManager.onSessionModelChanged({
+          companionManager?.onSessionModelChanged({
             sessionId: input.sessionID,
             model,
             ...(liveVariant ? { variant: liveVariant } : {}),
@@ -3738,13 +3857,16 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       output: { messages: unknown[] },
     ): Promise<void> => {
       const typedOutput = output as { messages: MessageWithParts[] };
-      const sessionID =
-        findLatestUserMessage(typedOutput.messages)?.info.sessionID ??
-        typedOutput.messages.find(isMessageWithParts)?.info.sessionID;
-      if (sessionID && interviewSubmitService.getActiveInterviewId(sessionID)) {
+      let view = createMessageTransformView(typedOutput.messages);
+      const sessionID = view.sessionID;
+      if (
+        sessionID &&
+        interviewSubmitService?.getActiveInterviewId(sessionID)
+      ) {
         // The kickoff is the one deliberate rewrite; later turns must remain
         // byte-stable so each request can reuse the provider cache prefix.
-        collapseInterviewHistory(typedOutput.messages);
+        collapseActiveInterviewHistory?.(typedOutput.messages);
+        view = createMessageTransformView(typedOutput.messages);
       }
       // Claim the mark synchronously: overlapping requests for this session
       // must not both strip reminders after their first asynchronous step.
@@ -3752,13 +3874,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         ? compactingSessionIds.delete(sessionID)
         : false;
 
-      for (const message of typedOutput.messages) {
-        if (!isMessageWithParts(message)) {
-          continue;
-        }
-        if (message.info.role !== 'user') {
-          continue;
-        }
+      for (const message of view.userMessages) {
         for (const part of message.parts) {
           if (part.type !== 'text' || typeof part.text !== 'string') {
             continue;
@@ -3785,9 +3901,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
               sessionMetadata.getModel(sessionID),
           )
         : undefined;
-      const hasImageParts = typedOutput.messages.some(
-        (message) =>
-          isUserMessageWithParts(message) && message.parts.some(isImagePart),
+      const hasImageParts = view.userMessages.some((message) =>
+        message.parts.some((part) => view.imageView(part) !== null),
       );
       const acceptsImages =
         turnModelRef && hasImageParts
@@ -3808,6 +3923,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         disabledAgents: runtime.disabledAgents,
         modelAcceptsImages: acceptsImages,
         log,
+        view,
       });
       if (imageResult) {
         const now = Date.now();
@@ -3838,18 +3954,21 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         await taskSessionManagerHook['experimental.chat.messages.transform'](
           input as never,
           typedOutput as never,
+          view,
         );
       }
       if (phaseReminder) {
         await phaseReminder['experimental.chat.messages.transform'](
           input as never,
           typedOutput as never,
+          view,
         );
       }
       if (councilInject) {
         await councilInject['experimental.chat.messages.transform'](
           input as never,
           typedOutput as never,
+          view,
         );
       }
       await taskSessionManagerHook?.injectBackgroundJobBoard(
@@ -3860,20 +3979,25 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // message — nothing appends after it, so re-entered transforms and the
       // board's own trailing-zone strip stay ordered.
       if (deepworkGoal) {
+        // Board tail stripping/appending may preserve the array length while
+        // replacing a message, so rebuild at this structural seam.
         await deepworkGoal['experimental.chat.messages.transform'](
           input as never,
           typedOutput as never,
+          createMessageTransformView(typedOutput.messages),
         );
       }
       if (compacting) {
-        stripTaggedContent(typedOutput.messages, PHASE_REMINDER_METADATA_KEY);
-        stripTaggedContent(typedOutput.messages, COUNCIL_INJECT_METADATA_KEY);
-        stripTaggedContent(typedOutput.messages, GOAL_POINTER_METADATA_KEY);
+        stripTaggedContents(typedOutput.messages, [
+          PHASE_REMINDER_METADATA_KEY,
+          COUNCIL_INJECT_METADATA_KEY,
+          GOAL_POINTER_METADATA_KEY,
+        ]);
       }
     },
 
     'tool.execute.after': async (input, output) => {
-      await deepworkGuardAfter(input, output);
+      await deepworkGuardAfter?.(input, output);
       await jsonErrorRecoveryAfter(input, output);
       await toolLoopGuard?.['tool.execute.after'](
         input as never,

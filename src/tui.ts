@@ -1,4 +1,5 @@
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type {
   TuiCommand,
   TuiPlugin,
@@ -13,8 +14,12 @@ import {
   DEFAULT_DISABLED_AGENTS,
   SUBAGENT_NAMES,
 } from './config/constants';
-import { loadPluginConfig } from './config/loader';
 import { MultiplexerConfigSchema, type MultiplexerType } from './config/schema';
+import {
+  type PluginConfigSnapshot,
+  readPluginConfigSnapshot,
+} from './config/snapshot';
+import { isCommandEnabled } from './hooks/command-hook-utils';
 import {
   createOnceGate,
   logHostUnsupported,
@@ -23,6 +28,8 @@ import {
 import {
   createTuiPaneWiring,
   initClientLogging,
+  type LoadedPaneConfig,
+  paneConfigOf,
   type TuiPaneWiring,
 } from './multiplexer/client/tui-wiring';
 import {
@@ -45,6 +52,7 @@ import {
 } from './tui-state';
 import { isPluginDisabledByEnv } from './utils/env';
 import { log } from './utils/logger';
+import { findOwnedPackageJson } from './utils/package-root';
 import {
   notifyConfigChanged,
   registerConfigChangeListener,
@@ -124,17 +132,8 @@ type Child =
   | (() => string);
 
 async function readPackageVersion(): Promise<string | undefined> {
-  try {
-    const packageJson = (await Bun.file(
-      new URL('../package.json', import.meta.url),
-    ).json()) as { version?: unknown };
-
-    return typeof packageJson.version === 'string'
-      ? packageJson.version
-      : undefined;
-  } catch {
-    return undefined;
-  }
+  return findOwnedPackageJson(fileURLToPath(import.meta.url), PLUGIN_NAME)
+    ?.version;
 }
 
 function element(
@@ -1823,34 +1822,157 @@ export interface SidebarConfigState {
   presetName?: string;
 }
 
+/**
+ * Every config-derived gate the TUI entry points need, derived from ONE
+ * shared `readPluginConfigSnapshot` read. Replaces the per-concern reads
+ * (`isTuiEnabled`, `isSidebarEnabled`, `disabledCommandsFor`,
+ * `readConfigState`) that each parsed the whole config layer stack
+ * independently.
+ */
+export interface TuiGatesSnapshot extends SidebarConfigState {
+  tuiEnabled: boolean;
+  sidebarEnabled: boolean;
+  disabledCommands: ReadonlySet<string>;
+  disabledHooks: ReadonlySet<string>;
+}
+
+/**
+ * Gates paired with the identity of the shared snapshot they were derived
+ * from. The snapshot fingerprint is the poll-time identity: unchanged ⇒ the
+ * same inputs produced the gates, so a tick re-reads cheaply
+ * (discovery + stats only) and reuses the derived gates. `readFailed` marks
+ * a thrown read (fail-open gates); such an outcome is never adopted as the
+ * new baseline.
+ */
+export interface TuiGatesRead {
+  gates: TuiGatesSnapshot;
+  /** Snapshot identity; empty for a failed/unseeded read. */
+  fingerprint: string;
+  /** Pane-wiring admission config from the same snapshot. */
+  paneConfig: LoadedPaneConfig | undefined;
+  /** True only when the shared read threw (fail-open gates were returned). */
+  readFailed: boolean;
+}
+
+/**
+ * Fail-open defaults for a config read that throws: the TUI and sidebar
+ * survive, and the remaining fields read as though the config layer stack
+ * parsed without any effective value (matching the per-concern reads this
+ * replaces).
+ */
+function failOpenTuiGates(): TuiGatesSnapshot {
+  return {
+    tuiEnabled: true,
+    sidebarEnabled: true,
+    configInvalid: false,
+    compactSidebar: true,
+    multiplexerType: 'none',
+    presetName: undefined,
+    disabledCommands: new Set(),
+    disabledHooks: new Set(),
+  };
+}
+
+/**
+ * Only genuinely broken configs (parse/load/schema failures) mark the
+ * sidebar invalid. Benign missing-preset notices do not, otherwise a config
+ * that loads fine would be shown as "Config invalid".
+ */
+function warningsMakeConfigInvalid(
+  warnings: readonly { kind: string }[],
+): boolean {
+  return warnings.some(
+    (warning) =>
+      warning.kind === 'invalid-json' ||
+      warning.kind === 'invalid-schema' ||
+      warning.kind === 'read-error',
+  );
+}
+
+/** Derive every gate from one snapshot. Pure; no file access. */
+function deriveTuiGates(snapshot: PluginConfigSnapshot): TuiGatesSnapshot {
+  const config = snapshot.config;
+  return {
+    tuiEnabled: config.tui !== false,
+    sidebarEnabled: config.sidebar !== false,
+    configInvalid: warningsMakeConfigInvalid(snapshot.warnings),
+    compactSidebar: config.compactSidebar ?? true,
+    multiplexerType: resolveMultiplexerType(config.multiplexer),
+    ...(typeof config.preset === 'string' && config.preset.length > 0
+      ? { presetName: config.preset }
+      : {}),
+    disabledCommands: new Set(config.disabled_commands ?? []),
+    disabledHooks: new Set(config.disabled_hooks ?? []),
+  };
+}
+
+/** Pane-wiring admission config derived from the same snapshot. */
+function paneConfigFromSnapshot(
+  snapshot: PluginConfigSnapshot,
+): LoadedPaneConfig {
+  return paneConfigOf(
+    snapshot.config,
+    warningsMakeConfigInvalid(snapshot.warnings),
+  );
+}
+
+/**
+ * Gates plus pane-wiring admission, derived from one shared snapshot read.
+ * Fail-open on a thrown read: the TUI and sidebar survive, command gating
+ * fails open, and the result is not adopted as the poll baseline.
+ */
+export function readTuiGates(
+  directory: string,
+  hostFlavor?: string,
+  fresh = false,
+): TuiGatesRead {
+  try {
+    const snapshot = readPluginConfigSnapshot(directory, { hostFlavor, fresh });
+    return {
+      gates: deriveTuiGates(snapshot),
+      fingerprint: snapshot.fingerprint,
+      paneConfig: paneConfigFromSnapshot(snapshot),
+      readFailed: false,
+    };
+  } catch (err) {
+    log('[tui] tui config read failed; keeping TUI and sidebar', String(err));
+    return {
+      gates: failOpenTuiGates(),
+      fingerprint: '',
+      paneConfig: undefined,
+      readFailed: true,
+    };
+  }
+}
+
+/**
+ * Load the TUI gates through the shared cached read. The snapshot module
+ * dedupes unchanged reads (discovery + stats only), so repeated calls cost
+ * one cheap identity revalidation instead of a full layer-stack parse.
+ * Fail-open on a thrown read.
+ */
+export function loadTuiGates(
+  directory: string,
+  hostFlavor?: string,
+): TuiGatesSnapshot {
+  return readTuiGates(directory, hostFlavor).gates;
+}
+
+/** Project the gates onto the sidebar runtime's config-state view. */
+function configStateOfGates(gates: TuiGatesSnapshot): SidebarConfigState {
+  return {
+    configInvalid: gates.configInvalid,
+    compactSidebar: gates.compactSidebar,
+    multiplexerType: gates.multiplexerType,
+    presetName: gates.presetName,
+  };
+}
+
 export function readConfigState(
   directory: string,
   hostFlavor?: string,
 ): SidebarConfigState {
-  let configInvalid = false;
-  const config = loadPluginConfig(directory, {
-    hostFlavor,
-    silent: true,
-    onWarning: (warning) => {
-      // Only genuinely broken configs (parse/load/schema failures) mark the
-      // sidebar invalid. Benign missing-preset notices do not, otherwise a
-      // config that loads fine would be shown as "Config invalid".
-      if (
-        warning.kind === 'invalid-json' ||
-        warning.kind === 'invalid-schema' ||
-        warning.kind === 'read-error'
-      ) {
-        configInvalid = true;
-      }
-    },
-  });
-  const compactSidebar = config.compactSidebar ?? true;
-  const multiplexerType = resolveMultiplexerType(config.multiplexer);
-  const presetName =
-    typeof config.preset === 'string' && config.preset.length > 0
-      ? config.preset
-      : undefined;
-  return { configInvalid, compactSidebar, multiplexerType, presetName };
+  return configStateOfGates(loadTuiGates(directory, hostFlavor));
 }
 
 /**
@@ -2035,7 +2157,12 @@ interface SidebarRuntimeAdapter {
     directory: string,
     sessionID: string,
   ) => Promise<SessionPresetState>;
-  onMultiplexerConfig?: (type: MultiplexerType) => void;
+  /** Reports the effective `multiplexer.type` (and the admission config from
+   * the same read) so the caller can keep the pane wiring in sync. */
+  onMultiplexerConfig?: (
+    type: MultiplexerType,
+    paneConfig?: LoadedPaneConfig,
+  ) => void;
   /** v2 hosts only: the prompt's live selected model while the visible
    * route is a root orchestrator session. Overlays the sidebar's
    * orchestrator row so the picker's choice shows before the first turn
@@ -2043,26 +2170,6 @@ interface SidebarRuntimeAdapter {
   getSelectedRootModel?: () =>
     | { model: string; variant?: string | undefined }
     | undefined;
-}
-
-/**
- * The sidebar master switch (`sidebar: false`, default true). Computed once
- * per setup/`tui()` call from the same plugin config the runtime reads, so
- * a config read failure keeps the sidebar (never silently drops a feature).
- * Pane wiring reads the config itself and is NOT gated by this.
- */
-function isSidebarEnabled(directory: string, hostFlavor?: string): boolean {
-  try {
-    return (
-      loadPluginConfig(directory, {
-        hostFlavor,
-        silent: true,
-      }).sidebar !== false
-    );
-  } catch (err) {
-    log('[tui] sidebar config read failed; keeping sidebar', String(err));
-    return true;
-  }
 }
 
 /** Shape `readTuiSnapshot` returns for an empty/missing state file. */
@@ -2161,19 +2268,30 @@ export function overlaySelectedRootModel(
 }
 
 /** One refresh/animation/interaction lifecycle for both host slot contracts. */
-function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
-  const sidebarEnabled = isSidebarEnabled(
-    adapter.getDirectory(),
-    adapter.hostFlavor,
-  );
+function createSidebarRuntime(
+  adapter: SidebarRuntimeAdapter,
+  initial?: TuiGatesRead,
+) {
   let configDirectory = adapter.getDirectory();
+  let gatesRead = initial ?? readTuiGates(configDirectory, adapter.hostFlavor);
+  const sidebarEnabled = gatesRead.gates.sidebarEnabled;
   let { configInvalid, compactSidebar, multiplexerType, presetName } =
-    readConfigState(configDirectory, adapter.hostFlavor);
-  adapter.onMultiplexerConfig?.(multiplexerType);
-  const applyConfigState = (): boolean => {
+    configStateOfGates(gatesRead.gates);
+  adapter.onMultiplexerConfig?.(multiplexerType, gatesRead.paneConfig);
+  const applyConfigState = (fresh = false): boolean => {
+    const read = readTuiGates(configDirectory, adapter.hostFlavor, fresh);
+    if (read.readFailed) return false;
+    if (
+      !fresh &&
+      read.fingerprint === gatesRead.fingerprint &&
+      read.gates.configInvalid === gatesRead.gates.configInvalid
+    ) {
+      return false;
+    }
+    gatesRead = read;
     const next = retainLastGoodConfigState(
       { configInvalid, compactSidebar, multiplexerType, presetName },
-      readConfigState(configDirectory, adapter.hostFlavor),
+      configStateOfGates(read.gates),
     );
     const changed =
       next.configInvalid !== configInvalid ||
@@ -2185,7 +2303,7 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
       compactSidebar = next.compactSidebar;
       multiplexerType = next.multiplexerType;
       presetName = next.presetName;
-      adapter.onMultiplexerConfig?.(multiplexerType);
+      adapter.onMultiplexerConfig?.(multiplexerType, gatesRead.paneConfig);
     }
     return changed;
   };
@@ -2217,16 +2335,16 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
     let stateChanged = false;
     if (directoryChanged) {
       configDirectory = currentDirectory;
+      gatesRead = readTuiGates(configDirectory, adapter.hostFlavor);
       ({ configInvalid, compactSidebar, multiplexerType, presetName } =
-        readConfigState(configDirectory, adapter.hostFlavor));
-      adapter.onMultiplexerConfig?.(multiplexerType);
+        configStateOfGates(gatesRead.gates));
+      adapter.onMultiplexerConfig?.(multiplexerType, gatesRead.paneConfig);
       // Never carry one project's last-good config state into another.
       bindConfigListener();
       stateChanged = true;
     }
-    // Config-backed rows (preset label, invalid badge, compact mode) are
-    // re-read on EVERY poll — even when the snapshot is unchanged — so
-    // manual config edits surface without waiting for the next write.
+    // Revalidate config identity on every poll; unchanged files reuse the
+    // shared parsed snapshot, while external edits still surface promptly.
     if (!directoryChanged) {
       try {
         stateChanged = applyConfigState();
@@ -2313,7 +2431,7 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
       () => {
         let changed = false;
         try {
-          changed = applyConfigState();
+          changed = applyConfigState(true);
         } catch (err) {
           log('[v2][tui] config state read failed', String(err));
           return { ok: false, reason: String(err) };
@@ -2331,12 +2449,17 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
   bindConfigListener();
   if (sidebarEnabled) scheduleRefresh();
   const rawRefreshMs = Number(process.env.OH_MY_OPENCODE_SLIM_TUI_REFRESH_MS);
-  // Test hook: shrink the 1s sidebar poll. Guarded so a bad value cannot
-  // spin the timer (setInterval clamps non-positive delays to ~1ms).
-  const renderIntervalMs =
-    Number.isFinite(rawRefreshMs) && rawRefreshMs >= 10 ? rawRefreshMs : 1000;
-  // With the sidebar off the poll only re-reads plugin config, which is
-  // still how file edits to `multiplexer.type` reach the pane wiring.
+  // Test hook: shrink/override both poll intervals. Guarded so a bad value
+  // cannot spin the timer (setInterval clamps non-positive delays to ~1ms).
+  const envRefreshMs =
+    Number.isFinite(rawRefreshMs) && rawRefreshMs >= 10
+      ? rawRefreshMs
+      : undefined;
+  // Fast path (sidebar on): the poll drives sidebar rendering (snapshot +
+  // config-backed rows) and stays at 1s. Slow path (sidebar off): the poll
+  // only re-reads plugin config — still how external file edits to
+  // `multiplexer.type` reach the pane wiring, so it stays alive but drops
+  // to 5s.
   const pollConfigOnly = () => {
     try {
       applyConfigState();
@@ -2346,7 +2469,7 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
   };
   const renderTimer = setInterval(
     sidebarEnabled ? scheduleRefresh : pollConfigOnly,
-    renderIntervalMs,
+    sidebarEnabled ? (envRefreshMs ?? 1000) : (envRefreshMs ?? 5000),
   );
   const animationTimer = sidebarEnabled
     ? setInterval(() => {
@@ -2406,6 +2529,7 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
 
   return {
     getDirectory: () => configDirectory,
+    getPaneConfig: () => gatesRead.paneConfig,
     getSnapshot: snapshot,
     setSnapshot,
     dispose: () => {
@@ -2420,8 +2544,20 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
 }
 
 /** V2 slot adapter; `/preset` remains registered by src/v2/tui.ts. */
-async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
+async function setup(
+  ctx: V2TuiContext,
+  initial?: TuiGatesRead,
+): Promise<undefined | (() => void)> {
   if (isPluginDisabledByEnv()) return;
+  const gatesRead =
+    initial ?? readTuiGates(ctx.location?.directory ?? process.cwd(), 'v2');
+  if (!gatesRead.gates.tuiEnabled) {
+    // `tui: false` master switch: register nothing. Reached only when this
+    // internal setup is invoked directly; the composed v2 entry
+    // (src/v2/tui.ts) checks the same switch before calling in.
+    log('[tui] tui disabled by config (tui: false); registering nothing');
+    return;
+  }
   const presetManagerCtx = (directory: string): V2TuiContext => {
     const augmented = Object.create(ctx as object) as V2TuiContext;
     augmented.onConfigChanged = () =>
@@ -2446,6 +2582,7 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
       : null;
   let paneWiring: TuiPaneWiring | null = null;
   let paneWiringSetting: string | null = null;
+  let currentPaneConfig = gatesRead.paneConfig;
   // Set by the setup teardown. A config-triggered rebuild can be waiting on
   // the host or the reachability probe when the TUI closes; this flag makes
   // such a rebuild self-dispose instead of going live after teardown.
@@ -2473,6 +2610,7 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
         const wiring = await createTuiPaneWiring({
           ...paneHost.options,
           client: ctx.client,
+          paneConfig: currentPaneConfig,
         });
         if (paneWiringClosed) {
           await wiring.dispose().catch(() => {
@@ -2524,53 +2662,58 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
     warnV2HostUnsupportedMultiplexer(multiplexerType, hostFailureDetail);
   };
   const version = (await readPackageVersion()) ?? 'dev';
-  const runtime = createSidebarRuntime({
-    version,
-    hostFlavor: 'v2',
-    getDirectory: () => ctx.location?.directory ?? process.cwd(),
-    getVisibleSession: () => resolveRouteSessionId(ctx.ui.router.current()),
-    getSelectedRootModel: () => {
-      const route = ctx.ui.router.current();
-      const sessionID = resolveRouteSessionId(route);
-      return resolveSelectedRootModel({
-        route,
-        sessionInfo: sessionID
-          ? ctx.data?.session?.get?.(sessionID)
-          : undefined,
-        selected: ctx.ui.model?.current?.(),
-      });
+  const runtime = createSidebarRuntime(
+    {
+      version,
+      hostFlavor: 'v2',
+      getDirectory: () => ctx.location?.directory ?? process.cwd(),
+      getVisibleSession: () => resolveRouteSessionId(ctx.ui.router.current()),
+      getSelectedRootModel: () => {
+        const route = ctx.ui.router.current();
+        const sessionID = resolveRouteSessionId(route);
+        return resolveSelectedRootModel({
+          route,
+          sessionInfo: sessionID
+            ? ctx.data?.session?.get?.(sessionID)
+            : undefined,
+          selected: ctx.ui.model?.current?.(),
+        });
+      },
+      client: ctx.client,
+      renderer: ctx.renderer,
+      theme: () => v2ThemeView(ctx.theme),
+      navigate: makeRouteNavigator(ctx.ui.router, 'navigate', true),
+      registerSlot: (render) =>
+        ctx.ui.slot({ append: 'sidebar.content', render }),
+      subscribeConfigChanges: (directory, listener) =>
+        registerConfigChangeListener(directory, listener),
+      onMultiplexerConfig: (type, paneConfig) => {
+        multiplexerType = type;
+        currentPaneConfig = paneConfig;
+        warnPaneUnsupported();
+        void reconcilePaneWiring();
+      },
+      readSessionPreset: (directory, sessionID) =>
+        readSessionPreset(ctx, sessionID, directory),
+      getPresetRow: (directory, presetName, sessionLabel) => {
+        const name = presetName ?? '(none)';
+        if (!canOpenPresetManagerV2(ctx)) return { name, sessionLabel };
+        return {
+          name,
+          sessionLabel,
+          onActivate: () => {
+            const currentDirectory = ctx.location?.directory ?? directory;
+            void openPresetManagerV2(
+              presetManagerCtx(currentDirectory),
+              currentDirectory,
+            );
+          },
+        };
+      },
     },
-    client: ctx.client,
-    renderer: ctx.renderer,
-    theme: () => v2ThemeView(ctx.theme),
-    navigate: makeRouteNavigator(ctx.ui.router, 'navigate', true),
-    registerSlot: (render) =>
-      ctx.ui.slot({ append: 'sidebar.content', render }),
-    subscribeConfigChanges: (directory, listener) =>
-      registerConfigChangeListener(directory, listener),
-    onMultiplexerConfig: (type) => {
-      multiplexerType = type;
-      warnPaneUnsupported();
-      void reconcilePaneWiring();
-    },
-    readSessionPreset: (directory, sessionID) =>
-      readSessionPreset(ctx, sessionID, directory),
-    getPresetRow: (directory, presetName, sessionLabel) => {
-      const name = presetName ?? '(none)';
-      if (!canOpenPresetManagerV2(ctx)) return { name, sessionLabel };
-      return {
-        name,
-        sessionLabel,
-        onActivate: () => {
-          const currentDirectory = ctx.location?.directory ?? directory;
-          void openPresetManagerV2(
-            presetManagerCtx(currentDirectory),
-            currentDirectory,
-          );
-        },
-      };
-    },
-  });
+    gatesRead,
+  );
+  currentPaneConfig = runtime.getPaneConfig();
   // The runtime reports the initial setting synchronously; let the first
   // wiring settle before setup returns.
   await paneWiringSync;
@@ -2663,30 +2806,44 @@ function buildKillAllCommand(
 interface TuiDualContractModule {
   id: string;
   tui: TuiPlugin;
-  setup: (ctx: V2TuiContext) => Promise<undefined | (() => void)>;
+  setup: (
+    ctx: V2TuiContext,
+    initial?: TuiGatesRead,
+  ) => Promise<undefined | (() => void)>;
 }
 
 const plugin: TuiDualContractModule = {
   id: `${PLUGIN_NAME}:tui`,
   tui: async (api, _options, meta) => {
     if (isPluginDisabledByEnv()) return;
+    const gatesRead = readTuiGates(getTuiDirectory(api));
+    if (!gatesRead.gates.tuiEnabled) {
+      // `tui: false` master switch: the TUI entry registers nothing — no
+      // sidebar runtime, no commands, no pane wiring. Server-side features
+      // are untouched.
+      log('[tui] tui disabled by config (tui: false); registering nothing');
+      return;
+    }
 
-    const runtime = createSidebarRuntime({
-      version: meta.version ?? (await readPackageVersion()) ?? 'dev',
-      getDirectory: () => getTuiDirectory(api),
-      getVisibleSession: () => resolveRouteSessionId(api.route.current),
-      client: (api as { client?: unknown }).client,
-      renderer: api.renderer,
-      theme: () => api.theme.current,
-      navigate: makeRouteNavigator(api.route, 'navigate', false),
-      registerSlot: (render) => {
-        api.slots.register({
-          order: resolveSidebarSlotOrder(api.tuiConfig?.plugin, PLUGIN_NAME),
-          slots: { sidebar_content: render },
-        });
-        return undefined;
+    const runtime = createSidebarRuntime(
+      {
+        version: meta.version ?? (await readPackageVersion()) ?? 'dev',
+        getDirectory: () => getTuiDirectory(api),
+        getVisibleSession: () => resolveRouteSessionId(api.route.current),
+        client: (api as { client?: unknown }).client,
+        renderer: api.renderer,
+        theme: () => api.theme.current,
+        navigate: makeRouteNavigator(api.route, 'navigate', false),
+        registerSlot: (render) => {
+          api.slots.register({
+            order: resolveSidebarSlotOrder(api.tuiConfig?.plugin, PLUGIN_NAME),
+            slots: { sidebar_content: render },
+          });
+          return undefined;
+        },
       },
-    });
+      gatesRead,
+    );
     api.lifecycle.onDispose(runtime.dispose);
 
     // `/preset` is a pure TUI slash command (like the built-in `/models`):
@@ -2706,10 +2863,21 @@ const plugin: TuiDualContractModule = {
           runtime.setSnapshot(value);
         },
       };
-      const disposeCommands = api.command.register(() => [
-        buildPresetCommand(api, runtime.getDirectory, snapshotRef),
-        buildKillAllCommand(api, runtime.getDirectory, runtime.getSnapshot),
-      ]);
+      // Both commands follow `disabled_commands` exactly like every other
+      // plugin command: a disabled command is not registered anywhere.
+      const disabledCommands = gatesRead.gates.disabledCommands;
+      const commands: TuiCommand[] = [];
+      if (isCommandEnabled('preset', { disabledCommands })) {
+        commands.push(
+          buildPresetCommand(api, runtime.getDirectory, snapshotRef),
+        );
+      }
+      if (isCommandEnabled('killall', { disabledCommands })) {
+        commands.push(
+          buildKillAllCommand(api, runtime.getDirectory, runtime.getSnapshot),
+        );
+      }
+      const disposeCommands = api.command.register(() => commands);
       api.lifecycle.onDispose(disposeCommands);
     }
 
@@ -2721,6 +2889,7 @@ const plugin: TuiDualContractModule = {
       eventBus: api.event,
       client: (api as { client?: unknown }).client,
       env: process.env,
+      paneConfig: gatesRead.paneConfig,
     });
     api.lifecycle.onDispose(() => paneWiring.dispose());
   },

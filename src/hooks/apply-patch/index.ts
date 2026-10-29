@@ -35,7 +35,9 @@ export function createApplyPatchHook(ctx: PluginInput) {
       input: ToolExecuteBeforeInput,
       output: ToolExecuteBeforeOutput,
     ): Promise<void> => {
-      if (input.tool !== 'apply_patch') {
+      // v1 hosts name the native patch tool `apply_patch`; v2 names it
+      // `patch` (same `{ patchText }` input shape).
+      if (input.tool !== 'apply_patch' && input.tool !== 'patch') {
         return;
       }
 

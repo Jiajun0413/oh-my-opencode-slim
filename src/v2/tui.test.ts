@@ -6,7 +6,7 @@ import { RGBA } from '@opentui/core';
 import { testRender } from '@opentui/solid';
 import { createSignal } from 'solid-js';
 import type { PluginConfig } from '../config';
-import baseTui from '../tui';
+import baseTui, { readTuiGates } from '../tui';
 import {
   recordTuiAgentActivity,
   recordTuiAgentModels,
@@ -1004,6 +1004,63 @@ describe('v2 tui preset plugin', () => {
       cleanup?.();
     });
 
+    test('disabled_commands killall/subagent remove their keymap commands', async () => {
+      writeUserConfig({ disabled_commands: ['killall', 'subagent'] });
+      const stub = makeSetupCtx();
+      let cleanup: (() => void) | undefined;
+      try {
+        cleanup = (await tui2Plugin.setup(
+          stub.ctx as unknown as V2TuiPluginContext,
+        )) as (() => void) | undefined;
+
+        stub.renderAppSlot();
+
+        expect(stub.layers[0]?.commands.map((command) => command.id)).toEqual([
+          'omo.preset',
+        ]);
+      } finally {
+        cleanup?.();
+      }
+    });
+
+    test('default enabled commands stay registered (preset, killall, subagent)', async () => {
+      // An explicit empty user config stops the search before the machine's
+      // real default config dir, so the defaults here are deterministic.
+      writeUserConfig({});
+      const stub = makeSetupCtx();
+      let cleanup: (() => void) | undefined;
+      try {
+        cleanup = (await tui2Plugin.setup(
+          stub.ctx as unknown as V2TuiPluginContext,
+        )) as (() => void) | undefined;
+
+        stub.renderAppSlot();
+
+        expect(stub.layers[0]?.commands.map((command) => command.id)).toEqual([
+          'omo.preset',
+          'omo.kill_all',
+          'omo.open_subagent',
+        ]);
+      } finally {
+        cleanup?.();
+      }
+    });
+
+    test('setup registers nothing when the tui master switch is false', async () => {
+      writeUserConfig({ tui: false });
+      const stub = makeSetupCtx();
+
+      const cleanup = await tui2Plugin.setup(
+        stub.ctx as unknown as V2TuiPluginContext,
+      );
+
+      // No sidebar slot, no app/preset slot, no keymap layer, no disposer:
+      // the TUI entry registers nothing at all.
+      expect(stub.slotClaims).toHaveLength(0);
+      expect(stub.layers).toHaveLength(0);
+      expect(cleanup).toBeUndefined();
+    });
+
     test('renders agent labels and models in categorical colors and the brand in the interactive hue', async () => {
       const stub = makeSetupCtx();
       writeUserConfig(makeConfig() as unknown as Record<string, unknown>);
@@ -1611,6 +1668,16 @@ describe('v2 tui preset plugin', () => {
           configPath,
           JSON.stringify({ multiplexer: { type: 'tmux' } }),
         );
+        // Drive the real config notification instead of waiting on a guessed
+        // poll interval (the sidebar-off interval is intentionally 5s).
+        const notified = await notifyConfigChanged(
+          projectDir,
+          'pane-enable-test',
+        );
+        expect(notified.ok).toBe(true);
+        const input = readTuiGates(projectDir, 'v2');
+        expect(input.gates.multiplexerType).toBe('tmux');
+        expect(input.paneConfig?.invalid).toBe(false);
         await waitFor(() => subscriptions.size > 0);
         expect([...subscriptions.keys()].sort()).toEqual(expectedEvents);
       } finally {
@@ -1678,6 +1745,11 @@ describe('v2 tui preset plugin', () => {
           configPath,
           JSON.stringify({ multiplexer: { type: 'none' } }),
         );
+        const notified = await notifyConfigChanged(
+          projectDir,
+          'pane-disable-test',
+        );
+        expect(notified.ok).toBe(true);
         await waitFor(() => unsubscribed.length >= expectedEvents.length);
         expect([...unsubscribed].sort()).toEqual(expectedEvents);
       } finally {
@@ -1687,6 +1759,9 @@ describe('v2 tui preset plugin', () => {
     });
 
     test('disposes the pane wiring on hot reload with the sidebar disabled', async () => {
+      // Keep this poll-driven config reload fast without depending on the
+      // production 5s sidebar-off interval.
+      process.env.OH_MY_OPENCODE_SLIM_TUI_REFRESH_MS = '25';
       const stub = makeSetupCtx();
       const projectConfigDir = path.join(projectDir, '.opencode');
       fs.mkdirSync(projectConfigDir, { recursive: true });
@@ -1743,6 +1818,11 @@ describe('v2 tui preset plugin', () => {
           configPath,
           JSON.stringify({ sidebar: false, multiplexer: { type: 'none' } }),
         );
+        const notified = await notifyConfigChanged(
+          projectDir,
+          'pane-disable-test',
+        );
+        expect(notified.ok).toBe(true);
         await waitFor(() => unsubscribed.length >= expectedEvents.length);
         expect([...unsubscribed].sort()).toEqual(expectedEvents);
       } finally {
@@ -1814,6 +1894,11 @@ describe('v2 tui preset plugin', () => {
           configPath,
           JSON.stringify({ multiplexer: { type: 'tmux' } }),
         );
+        const notified = await notifyConfigChanged(
+          projectDir,
+          'pane-rebuild-test',
+        );
+        expect(notified.ok).toBe(true);
         await waitFor(() => infoCalls >= 1);
         cleanup();
         cleanup = undefined;

@@ -60,7 +60,7 @@ OpenCode Core → Plugin Initialization (index.ts)
 
 ### Plugin Initialization Flow (index.ts)
 
-1. **Config Loading**: `loadPluginConfig()` reads and validates plugin configuration; `RuntimeConfig` singleton seeded and host config captured
+1. **Config Loading**: `readPluginConfigSnapshot()` shares validated source outcomes across setup; `RuntimeConfig` is seeded from an isolated snapshot and host config captured before mutation
 2. **Agent Creation**: `createAgents()` instantiates agent definitions (incl. dynamic councillors) with prompts and permissions
 3. **Agent Configuration**: `getAgentConfigs()` merges defaults with user overrides and runtime presets
 4. **Tool Registration**: Tools are created conditionally based on config (task_cancel, task_revive, task_status, wait_for_user, webfetch, AST-grep, acp_run)
@@ -106,8 +106,10 @@ lifecycle lives in the TUI entry's dependency graph (`multiplexer/client/`).
    - `recordTuiAgentActivity()`: Tracks active agents by session so concurrent
      runs of the same agent remain visible until all runs finish
    - `clearTuiAgentActivities()`: Removes stale activity during startup
-3. **Atomic Writes**: Cross-process file locking serializes each read → mutate →
-   atomic rename transaction, with dead-owner and aged-lock recovery
+3. **Atomic Writes**: Cross-process file locking serializes read → mutate →
+   atomic rename transactions. `withTuiSnapshotBatch` coalesces recorders and
+   Board projections within one native event; standalone calls remain immediate.
+   A shared stat-key cache preserves reader isolation and parent insertion order.
 4. **Error Handling**: All operations are best-effort; failures don't crash plugin
 5. **Instance Cleanup**: On shutdown, each plugin instance removes only sessions
    it marked active, preserving activity owned by other running instances

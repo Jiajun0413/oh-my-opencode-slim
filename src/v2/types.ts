@@ -215,6 +215,14 @@ export type V2SessionPresetRpcHandlers = {
   ) => Promise<z.input<(typeof sessionPresetRpc.methods)[Name]['output']>>;
 };
 
+/** Native v2 event subscribe options (host `shared-events.SubscribeOptions`
+ * subset): filter by event type names; `server.connected` always passes and
+ * must not be listed. The mirror uses `string` element types — the pinned
+ * name union is enforced against the host surface in `mirror-conformance.ts`. */
+export interface V2EventSubscribeOptions {
+  readonly types?: ReadonlyArray<string>;
+}
+
 export interface V2Context {
   readonly rpc?: {
     readonly register: (
@@ -362,7 +370,14 @@ export interface V2Context {
     switchAgent?(input: Record<string, unknown>): Promise<unknown>;
   };
   event: {
-    subscribe(): AsyncIterable<Record<string, unknown>>;
+    /** v2 event stream. Optional native `types` filter (host
+     * `shared-events` contract): the union is built once per setup
+     * (`buildV2EventSubscriptionTypes`) and frozen — never changed per
+     * request. Unknown/unlisted types are filtered by the host;
+     * `server.connected` passes automatically. */
+    subscribe(
+      options?: V2EventSubscribeOptions,
+    ): AsyncIterable<Record<string, unknown>>;
   };
   permission?: {
     reply(input: {

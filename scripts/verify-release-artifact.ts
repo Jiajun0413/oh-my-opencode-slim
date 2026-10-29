@@ -11,6 +11,7 @@ import {
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { verifyPackagedImportClosure } from './package-imports';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
@@ -30,6 +31,7 @@ const packagedRequiredFiles = [
   'dist/index.d.ts',
   'dist/server/index.js',
   'dist/tui.js',
+  'dist/tui2.js',
   'dist/tui.d.ts',
   'dist/cli/index.js',
   'dist/marketplace-contract/index.js',
@@ -155,6 +157,7 @@ function packArtifact() {
     }
   }
 
+  verifyPackagedImportClosure(repoRoot, packagedFiles);
   return path.join(repoRoot, tarball);
 }
 

@@ -1,7 +1,7 @@
 /// <reference types="bun-types" />
 
 import { describe, expect, test } from 'bun:test';
-import { stripJsonComments } from './config-manager';
+import { stripJsonComments } from '../config/jsonc';
 
 describe('config-manager (barrel)', () => {
   describe('stripJsonComments', () => {

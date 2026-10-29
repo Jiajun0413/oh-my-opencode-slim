@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { MarketplacePackageIdSchema } from '../marketplace/schemas';
+import { MarketplacePackageIdSchema } from '../marketplace/id-schema';
 import {
   AGENT_THEME_COLORS,
   DEFAULT_CHILD_INPUT_WAKE_KINDS,
@@ -1003,12 +1003,20 @@ export const DISABLED_COMMANDS_VALUES = [
   'reflect',
   'loop',
   'preset',
+  'killall',
+  'subagent',
 ] as const;
 
 export const RawPluginConfigSchema = z
   .object({
     preset: z.string().optional(),
     setDefaultAgent: z.boolean().optional(),
+    tui: z
+      .boolean()
+      .optional()
+      .describe(
+        'Master switch for all OMOS TUI surfaces (sidebar, /preset, /killall, /subagent, update notice). When false, the TUI entry registers nothing; server-side features are untouched. Defaults to true.',
+      ),
     compactSidebar: z
       .boolean()
       .optional()
@@ -1102,7 +1110,7 @@ export const RawPluginConfigSchema = z
       .describe(
         'Hook names to disable completely. Valid values: ' +
           DISABLED_HOOKS_VALUES.join(', ') +
-          '. "phase-reminder" is not registered, so orchestrator phase reminders are never injected; "foreground-fallback" marks the fallback manager inert: it is still constructed but never triggers automatic intervention, same effect as fallback.enabled = false; "chat-headers" is not registered, so the Copilot x-initiator header is never stamped (v1 chat.headers and the v2 model.request bridge); "cache-monitor" stops the prompt-cache bust watchdog, so cache warnings are never logged; the on-demand tool guards ("json-error-recovery", "tool-loop-guard", "search-path-guard", "absolute-path-rescue", "apply-patch") stop intercepting tool calls entirely, so malformed output, repeated identical calls, and invalid or guessed paths surface raw to the model; "council-inject" is not registered, so the keyword-triggered Council Mode injection is never appended to orchestrator messages; "auto-update-checker" stops both update checking and automatic installation (a stronger switch than autoUpdate, which only controls installation). Unknown values are stripped with a warning when the config loads. A value consisting only of unknown names is treated as unset, so a lower config layer\'s list still applies.',
+          '. "phase-reminder" is not registered, so orchestrator phase reminders are never injected; "foreground-fallback" prevents the fallback manager from being constructed at all and never triggers automatic intervention, same effect as fallback.enabled = false; "chat-headers" is not registered, so the Copilot x-initiator header is never stamped (v1 chat.headers and the v2 model.request bridge); "cache-monitor" stops the prompt-cache bust watchdog, so cache warnings are never logged; the on-demand tool guards ("json-error-recovery", "tool-loop-guard", "search-path-guard", "absolute-path-rescue", "apply-patch" — v1 apply_patch / v2 patch) stop intercepting tool calls entirely, so malformed output, repeated identical calls, and invalid or guessed paths surface raw to the model; "deepwork-guard" prevents the receipt/claim guard from being constructed; "council-inject" is not registered, so the keyword-triggered Council Mode injection is never appended to orchestrator messages; "auto-update-checker" stops both update checking and automatic installation (a stronger switch than autoUpdate, which only controls installation). Unknown values are stripped with a warning when the config loads. A value consisting only of unknown names is treated as unset, so a lower config layer\'s list still applies.',
       ),
     disabled_commands: z
       .array(z.enum(DISABLED_COMMANDS_VALUES))

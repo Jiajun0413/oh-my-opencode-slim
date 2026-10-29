@@ -733,7 +733,7 @@ describe('interview turn lifecycle', () => {
     });
     await harness.service.handleEvent({
       event: {
-        type: 'session.next.text.ended',
+        type: 'session.text.ended',
         properties: { sessionID: 'ses-submit' },
       },
     });

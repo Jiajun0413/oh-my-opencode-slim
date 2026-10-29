@@ -243,22 +243,67 @@ function readServerUrls(info: unknown): string[] {
  * Resolves the base URL the wiring reflects. Remote mode trusts the argv
  * `--server` value (the parent connected with exactly it); shared mode reads
  * the running service's own addresses through the authenticated client.
+ * Keeps the direct public path (no seed capture) used by callers/tests that
+ * only need the URL.
  */
 export async function resolveV2BaseUrl(
   detection: V2HostModeDetection,
   client: V2ClientLike | undefined,
 ): Promise<string | undefined> {
-  if (detection.mode === 'remote') return detection.serverUrl;
-  if (detection.mode !== 'shared') return undefined;
-  const info = await readServerInfo(client);
-  return readServerUrls(info)[0];
+  const result = await resolveV2BaseUrlWithInfo(detection, client);
+  return result.baseUrl;
 }
 
-/** Authenticated liveness probe: `server.info()` answers on the live client. */
+/** Outcome of a base-URL resolution carrying the response that produced it. */
+interface V2BaseUrlResolution {
+  baseUrl: string | undefined;
+  /**
+   * The `server.info()` response backing `baseUrl` when shared mode read one.
+   * The wiring seeds its first liveness probe from it so the startup
+   * resolution and the startup probe are not two separate `server.info()`
+   * calls; remote mode resolves from argv and reads nothing.
+   */
+  info: unknown;
+}
+
+/**
+ * Same resolution as `resolveV2BaseUrl` plus the `server.info()` response
+ * that produced the shared-mode URL, so the caller can hand the response to
+ * the first probe instead of re-reading it.
+ */
+async function resolveV2BaseUrlWithInfo(
+  detection: V2HostModeDetection,
+  client: V2ClientLike | undefined,
+): Promise<V2BaseUrlResolution> {
+  if (detection.mode === 'remote') {
+    return { baseUrl: detection.serverUrl, info: undefined };
+  }
+  if (detection.mode !== 'shared') {
+    return { baseUrl: undefined, info: undefined };
+  }
+  const info = await readServerInfo(client);
+  return { baseUrl: readServerUrls(info)[0], info };
+}
+
+/**
+ * Authenticated liveness probe: `server.info()` answers on the live client.
+ * `seedInfo` is the `server.info()` response an earlier resolution already
+ * obtained: the first probe call consumes it once (a fetch that just
+ * succeeded proves the host reachable), every later probe re-reads fresh so
+ * a host that dies is detected on the next probe.
+ */
 export function createV2HostProbe(
   client: V2ClientLike | undefined,
+  seedInfo?: unknown,
 ): () => Promise<boolean> {
-  return async () => (await readServerInfo(client)) !== undefined;
+  let seed = seedInfo;
+  return async () => {
+    if (seed !== undefined) {
+      seed = undefined;
+      return true;
+    }
+    return (await readServerInfo(client)) !== undefined;
+  };
 }
 
 const V2_LIST_PAGE = 200;
@@ -453,7 +498,9 @@ export async function buildV2PaneWiringOptions(
     return { mode, options: null };
   }
   const client = ctx.client as V2ClientLike | undefined;
-  const baseUrl = await resolveV2BaseUrl(mode, client);
+  // One `server.info()` at startup: the base-URL resolution reads it, and its
+  // response seeds the wiring's first liveness probe. Later probes re-read.
+  const { baseUrl, info } = await resolveV2BaseUrlWithInfo(mode, client);
   if (baseUrl === undefined) {
     return {
       mode: { mode: 'invalid', reason: 'server URL unavailable' },
@@ -469,7 +516,7 @@ export async function buildV2PaneWiringOptions(
       getDirectory: () => ctx.location?.directory ?? process.cwd(),
       getDisplayedSessionId: () => resolveV2DisplayedSession(ctx),
       baseUrl,
-      probeHost: createV2HostProbe(client),
+      probeHost: createV2HostProbe(client, info),
       statusReader: createV2StatusReader(client),
       sessionListReader: createV2SessionListReader(client),
       sessionEvents: (handler) => subscribeV2SessionEvents(ctx.data, handler),

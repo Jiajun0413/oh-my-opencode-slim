@@ -1,6 +1,10 @@
 import type { AgentConfig as SDKAgentConfig } from '@opencode-ai/sdk/v2';
 import { getSkillPermissionsForAgent } from '../cli/skills';
-import { AGENT_ALIASES, loadAgentPrompt } from '../config';
+import {
+  AGENT_ALIASES,
+  type AgentOverrideConfig,
+  loadAgentPrompt,
+} from '../config';
 import { parseList } from '../config/agent-mcps';
 import { resolvePreset } from '../config/presets';
 import type { HostConfigSnapshot, RuntimeConfig } from '../config/runtime';
@@ -8,16 +12,13 @@ import { hostLegacyAgent } from '../config/runtime';
 import { applyOrchestratorModelConfig } from '../config/strip-orchestrator-model';
 import { lookupWithAliases } from '../config/utils';
 import type { MarketplaceActivationStore } from '../marketplace/activation';
-import {
-  ambiguousMcpNamespaces,
-  resolveMarketplaceActivation,
-} from '../marketplace/activation';
-import {
-  createMarketplaceAgentDefinitions,
-  type MarketplaceAgentMetadata,
-} from '../marketplace/agent-definitions';
+import { MARKETPLACE_TOOL_NAMES } from '../marketplace/capabilities';
 import { marketplaceConfigFingerprint } from '../marketplace/config-identity';
-import { MARKETPLACE_TOOL_NAMES } from '../marketplace/schemas';
+import { ambiguousMcpNamespaces } from '../marketplace/mcp-namespaces';
+import type {
+  MarketplaceAgentMetadata,
+  MarketplaceRegistryImplementation,
+} from '../marketplace/registry-runtime';
 import { normalizeAgentName } from '../utils/agent-variant';
 import { adaptPermissions, v1PermKeyToV2 } from '../v2/adapters';
 import {
@@ -115,6 +116,8 @@ export interface RegistryBuildOptions {
   >;
   readonly onHostModelSelected?: (agentName: string) => void;
   readonly marketplace?: {
+    /** Loaded only after the existing marketplace activation gate. */
+    readonly implementation: MarketplaceRegistryImplementation;
     readonly selectedPackageIds: readonly string[];
     readonly store: MarketplaceActivationStore;
     readonly pluginVersion: string;
@@ -878,6 +881,29 @@ function presetForAgent(
   return lookupWithAliases(preset, name);
 }
 
+/**
+ * Pass-local mirror of `RuntimeConfig.combinedModelInheritanceSource` over a
+ * hoisted merged-override record: the `inheritModelFrom` source of an agent
+ * whose configured model is a non-empty array chain, or undefined when its
+ * model is fully static. The runtime getter stays authoritative everywhere
+ * else; the registry's per-definition projection reads the pass-hoisted
+ * record so `agents()` is not re-derived once per agent.
+ */
+function combinedModelInheritanceSource(
+  overrides: Record<string, AgentOverrideConfig>,
+  name: string,
+): 'session' | 'orchestrator' | undefined {
+  const override = lookupWithAliases(overrides, name);
+  if (
+    !Array.isArray(override?.model) ||
+    override.model.length === 0 ||
+    override.inheritModelFrom === undefined
+  ) {
+    return undefined;
+  }
+  return override.inheritModelFrom;
+}
+
 /** Finalize existing agents from the actual, pre-mutation host config. */
 export function buildResolvedAgentRegistry(
   runtime: RuntimeConfig,
@@ -899,6 +925,14 @@ export function buildResolvedAgentRegistry(
   > = {};
   const hostFlavor = options.hostFlavor;
   const pluginMcps = clone(options.pluginMcps ?? {});
+  // Pass-local derived inputs: the merged plugin-layer overrides and the
+  // configured model arrays are pure derivations of the frozen plugin config
+  // that cannot change during a single build, so every projection below
+  // reads these hoisted copies instead of re-deriving per agent. The
+  // marketplace-defaults flavor (`agents(marketplaceSkillDefaults)`) stays a
+  // separate derivation for package capability folds.
+  const runtimeAgentOverrides = runtime.agents();
+  const modelArrays = runtime.modelArrays;
   let definitions = options.definitions
     ? clone(options.definitions)
     : createAgents(runtime, {
@@ -936,16 +970,17 @@ export function buildResolvedAgentRegistry(
       ...Object.keys(pluginMcps),
     ]);
     for (const disabled of runtime.disabledMcps) mcpNames.delete(disabled);
-    const plan = resolveMarketplaceActivation({
-      selectedPackageIds: options.marketplace.selectedPackageIds,
-      store: options.marketplace.store,
-      pluginVersion: options.marketplace.pluginVersion,
-      availableSkillNames: options.marketplace.availableSkillNames,
-      availableMcpNames: [...mcpNames],
-      disabledSkillNames: runtime.disabledSkills,
-      disabledMcpNames: runtime.disabledMcps,
-      reservedAgentNames,
-    });
+    const plan =
+      options.marketplace.implementation.resolveMarketplaceActivation({
+        selectedPackageIds: options.marketplace.selectedPackageIds,
+        store: options.marketplace.store,
+        pluginVersion: options.marketplace.pluginVersion,
+        availableSkillNames: options.marketplace.availableSkillNames,
+        availableMcpNames: [...mcpNames],
+        disabledSkillNames: runtime.disabledSkills,
+        disabledMcpNames: runtime.disabledMcps,
+        reservedAgentNames,
+      });
     marketplacePackages = plan.agents.map((admission) => ({
       id: admission.packageId,
       runtimeName: admission.agentName,
@@ -953,7 +988,10 @@ export function buildResolvedAgentRegistry(
       digest: admission.digest,
       configFingerprint: '',
     }));
-    const constructed = createMarketplaceAgentDefinitions(plan);
+    const constructed =
+      options.marketplace.implementation.createMarketplaceAgentDefinitions(
+        plan,
+      );
     marketplaceSkillDefaults = Object.fromEntries(
       constructed.metadata.map((metadata) => [
         metadata.runtimeName,
@@ -1022,7 +1060,7 @@ export function buildResolvedAgentRegistry(
     }
     const marketplaceAgents = constructed.agents.map((sourceAgent) => {
       const agent = clone(sourceAgent);
-      const owner = runtime.agents()[agent.name];
+      const owner = runtimeAgentOverrides[agent.name];
       const hostOwner = host.agent?.[agent.name];
       const displayName =
         (typeof hostOwner?.displayName === 'string'
@@ -1157,7 +1195,6 @@ export function buildResolvedAgentRegistry(
   );
   const configuredAgents = runtime.agents(marketplaceSkillDefaults);
   const preset = resolvedPreset(runtime);
-  const runtimeAgentOverrides = runtime.agents();
   const overrideFor = (name: string) =>
     lookupWithAliases(runtimeAgentOverrides, name);
   const hostEntries = host.agent ?? {};
@@ -1200,8 +1237,7 @@ export function buildResolvedAgentRegistry(
       });
     }
 
-    const configured =
-      runtime.modelArrays[name] ?? definition._modelArray ?? [];
+    const configured = modelArrays[name] ?? definition._modelArray ?? [];
     if (configured.length === 0 && configuredScalarModel) {
       candidateMap[name] = [
         {
@@ -1218,7 +1254,7 @@ export function buildResolvedAgentRegistry(
       hostModel &&
       configured[0]?.id &&
       hostModel !== configured[0].id &&
-      runtime.combinedModelInheritanceSource(name) === undefined
+      combinedModelInheritanceSource(runtimeAgentOverrides, name) === undefined
     ) {
       options.onHostModelSelected?.(name);
     }
@@ -1343,7 +1379,11 @@ export function buildResolvedAgentRegistry(
 
   appendMarketplaceRouting(finalAgentConfig, definitions, marketplaceMetadata);
 
-  applyModelInheritanceToConfig(finalAgentConfig, runtime);
+  applyModelInheritanceToConfig(
+    finalAgentConfig,
+    runtime,
+    runtimeAgentOverrides,
+  );
 
   for (const definition of definitions) {
     const name = definition.name;

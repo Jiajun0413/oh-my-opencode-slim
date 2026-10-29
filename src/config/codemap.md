@@ -37,6 +37,19 @@ The config system follows a layered architecture:
 | `loadRawPluginConfigFromPath` | Shared layer validation for runtime and preset management, preserving editable preset syntax | loader.ts |
 | `RuntimeConfig` | Per-directory runtime config singleton with derived getters, host-config snapshot, and preset/model overrides | runtime.ts |
 
+## Shared Runtime Reads
+
+`snapshot.ts` owns a bounded merged-config cache keyed by the selected source
+paths, their device/inode/mtime/ctime/size fields and referenced `{env:NAME}`
+values. Setup and TUI readers reuse `{config,warnings,paths,fingerprint}`;
+`fresh` covers a known write that timestamp granularity cannot distinguish.
+Read failures are not cached. Preset editors keep their own raw/validated
+reads; uncached `loadPluginConfig` stays available.
+
+Shared JSONC parsing, locked atomic editing and path lookup live in `jsonc.ts`,
+`json-file.ts` and `paths.ts`, not the CLI. The full Marketplace manifest is not
+an eager config dependency: package-ID validation comes from `id-schema.ts`.
+
 ## Flow
 
 ### Configuration Loading Pipeline

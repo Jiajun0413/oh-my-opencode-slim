@@ -1332,9 +1332,24 @@ export class BackgroundJobBoard {
     taskIDOrAlias: string,
   ): BackgroundJobRecord | undefined {
     const value = taskIDOrAlias.trim();
-    return this.list(parentSessionID).find(
-      (job) => job.taskID === value || job.alias === value,
-    );
+    // Full task IDs are the map keys: one lookup replaces the sorted
+    // scan's copy and sort. The direct hit does NOT shadow alias
+    // matches — a trusted historical alias (restore/adopt) is not
+    // provably disjoint from another record's task ID, so both compete
+    // in the same scan.
+    const byID = this.jobs.get(value);
+    // Former list() winner preserved: find over the parent's records in
+    // launchedAt-ascending (stable) order — smallest launchedAt, ties
+    // broken by map insertion order, which a strict less-than keeps.
+    let winner: BackgroundJobRecord | undefined;
+    for (const job of this.jobs.values()) {
+      if (job.parentSessionID !== parentSessionID) continue;
+      if (job !== byID && job.alias !== value) continue;
+      if (winner === undefined || job.launchedAt < winner.launchedAt) {
+        winner = job;
+      }
+    }
+    return winner;
   }
 
   resolveReusable(
@@ -1470,16 +1485,31 @@ export class BackgroundJobBoard {
 
   hasRunning(parentSessionID: string): boolean {
     // A placeholder is not delegated work: it must neither gate a human
-    // wait nor justify a recovery wake on its own.
-    return this.list(parentSessionID).some(
-      (job) => !job.provisional && job.state === 'running',
-    );
+    // wait nor justify a recovery wake on its own. Direct iteration: the
+    // answer is a boolean, never a launch-ordered list.
+    for (const job of this.jobs.values()) {
+      if (
+        job.parentSessionID === parentSessionID &&
+        !job.provisional &&
+        job.state === 'running'
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
 
   hasTerminalUnreconciled(parentSessionID: string): boolean {
-    return this.list(parentSessionID).some(
-      (job) => !job.provisional && job.terminalUnreconciled,
-    );
+    for (const job of this.jobs.values()) {
+      if (
+        job.parentSessionID === parentSessionID &&
+        !job.provisional &&
+        job.terminalUnreconciled
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /** Attributing evidence — the owning call's output or a cross-board
@@ -1529,31 +1559,35 @@ export class BackgroundJobBoard {
     return promoted;
   }
 
-  /** Sessions the sidebar may surface as navigation destinations: canonical
-   *  terminal or stopped. Independent of parent acknowledgment: such a child
-   *  is history even while still unreconciled. */
-  private listSidebarHistory(parent?: string): BackgroundJobRecord[] {
-    return this.list(parent).filter(isSidebarHistory);
-  }
-
-  /** Accessible terminal and stopped sessions, grouped for TUI navigation. */
-  sidebarHistoryByParentAgent() {
+  /** Accessible terminal and stopped sessions, grouped for TUI navigation.
+   * Pass a `board.list()` snapshot to reuse one sorted read for both this
+   * grouping and a caller's own pass over the same records. */
+  sidebarHistoryByParentAgent(
+    records: readonly BackgroundJobRecord[] = this.list(),
+  ) {
     const byParent = new Map<string, Map<string, ReusableSessionSelection[]>>();
-    for (const job of this.listSidebarHistory()) {
+    for (const job of records) {
+      if (!isSidebarHistory(job)) continue;
       let byAgent = byParent.get(job.parentSessionID);
       if (!byAgent) {
         byAgent = new Map<string, ReusableSessionSelection[]>();
         byParent.set(job.parentSessionID, byAgent);
       }
+      const terminalState =
+        job.state === 'stopped'
+          ? ('stopped' as const)
+          : (job.terminalState ?? terminalStateOf(job.state) ?? 'completed');
       const sessions = byAgent.get(job.agent) ?? [];
       sessions.push({
         taskID: job.taskID,
         alias: job.alias,
-        terminalState:
-          job.state === 'stopped'
-            ? 'stopped'
-            : (job.terminalState ?? terminalStateOf(job.state) ?? 'completed'),
-        completedAt: job.completedAt,
+        terminalState,
+        // Omit absent timestamps: a `completedAt: undefined` key would
+        // make the projected payload diverge from its parsed on-disk
+        // shape under structural equality.
+        ...(job.completedAt !== undefined
+          ? { completedAt: job.completedAt }
+          : {}),
         lastUsedAt: job.lastUsedAt,
       });
       byAgent.set(job.agent, sessions);
@@ -1765,9 +1799,18 @@ export class BackgroundJobBoard {
     const requestedAlias = input.alias?.trim();
     let alias = taskID;
     if (requestedAlias && requestedAlias !== taskID) {
-      const taken = this.list(parentSessionID).some(
-        (job) => job.alias === requestedAlias,
-      );
+      // Historical-alias availability is a boolean over the parent's
+      // records: direct iteration, no launch-ordered list.
+      let taken = false;
+      for (const job of this.jobs.values()) {
+        if (
+          job.parentSessionID === parentSessionID &&
+          job.alias === requestedAlias
+        ) {
+          taken = true;
+          break;
+        }
+      }
       if (!taken) {
         this.noteTrustedAlias(parentSessionID, agent, requestedAlias);
         alias = requestedAlias;
