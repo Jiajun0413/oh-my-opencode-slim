@@ -111,6 +111,45 @@ After abort settles, verification has its own time budget. The v2 session-info
 read uses only the remaining budget: timeout leaves the task uncertain and
 releases the lease without confirming cancellation or consuming late evidence.
 
+`task_message` (v1 only) does not interrupt the current generation. It retains
+its per-task message lease when the local timeout expires but the write
+transport is still pending. `noReply: true` prevents starting a turn, not
+mutating the transcript: a delayed update, including its captured
+agent/model/variant, could otherwise alter the context of a reused generation.
+A timeout does not prove that the message was not delivered.
+
+Until the write settles, the lease excludes further messages, cancellation via
+`task_cancel`, same-session revival/reuse, and lease-protected terminal
+notifications for that taskID. If the write never settles, this control-plane
+exclusion persists indefinitely; no automatic recovery is promised. It does not
+stop the child from executing or block other taskIDs, and results can still arrive
+through other observation/result paths. Settlement, whether success or failure,
+releases the token. There is no TTL or `session.abort` rollback for this write.
+
+This is local exclusion among operations following the board's lease protocol,
+not isolation from external actions or an exactly-once delivery guarantee.
+Removing a job with `board.drop` or `clearParent` does not retire its lease:
+`liveLeases` is independent of `jobs`, so deleting the record does not guarantee
+recovery of the taskID's exclusion. The model-identity lookup is a separate read:
+its timeout signals cancellation of the lookup and releases the lease even if that read never
+settles, because no message write has started.
+
+`task_message` pins the newest valid user or assistant model/variant in the
+bounded transcript, skipping compaction summaries; the session's saved
+selection can predate a hook rewrite. No valid identity means no message is
+sent. The write sends a real, non-synthetic `noReply` prompt in the same child
+session: no wake, no new run, no interrupt, and no agent/model/variant switch.
+The host assigns the message id; the plugin records the id the host returns
+as the generation's amendment boundary (a response without one records no
+boundary). Queue consumption is not confirmed:
+`Message queued for … without launching or resuming it.`
+
+A success response confirms only transport acceptance, not consumption: the host
+admitted the input, with no proof the child read it. Consumption timing is
+host-dependent; a single step's multiple
+tool calls are not individually interleavable. Host errors are not retried
+with weaker semantics.
+
 `task_revive` resumes a retained session with a new instruction. A cancelled,
 errored, or stopped retained session may be revived immediately once its
 retained state has been verified safe. Acknowledgement controls parent and
@@ -348,11 +387,9 @@ modified) never counts toward a block — and responds:
 The count is confirmed in `tool.execute.after`, so overlapping parallel
 calls cannot inflate it before their results are known.
 
-Exempt from the entire guard: `task`, `task_cancel`, and `task_revive` —
-they legitimately re-issue identical calls while a background task runs.
-`task_message` is **not** exempt: repeating the identical deposit is a
-degenerate re-send, so it warns like other tools. `task_status` is warn-only
-(never hard-blocked), so a repeated
+Exempt from the entire guard: `task`, `task_cancel`, `task_message`, and
+`task_revive` — they legitimately re-issue identical calls while a background
+task runs. `task_status` is warn-only (never hard-blocked), so a repeated
 status read cannot deadlock result retrieval. The wait tools (`wait_for_user`,
 `wait_for_background_tasks`) run a stricter per-turn counter of their own: the
 second repeat warns, and the guard refuses further repeats in that turn.

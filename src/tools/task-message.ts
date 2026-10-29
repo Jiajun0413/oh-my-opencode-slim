@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import {
   type PluginInput,
   type ToolDefinition,
@@ -163,14 +162,20 @@ export function createTaskMessageTool(options: {
           );
         }
 
-        // The plugin chooses the admission id, exactly like a queued revive:
-        // the run keeps its generation, so diagnostics must recognise this
-        // input as a same-generation amendment rather than a later run.
-        const messageID = `msg_omos_message_${randomUUID().replaceAll('-', '')}`;
+        // The v1 host assigns the admission id: its ids are `msg_` + an
+        // ascending hex timestamp, and the run loop orders turns by id
+        // string, so a plugin-chosen id would sort after every host id and
+        // stay the "latest user" forever. With noReply the host returns the
+        // stored user message, whose id becomes this generation's amendment
+        // boundary.
         // Commit runs INSIDE the transport operation so a late success (host
         // accepts after our deadline) still stamps its boundary; the tool's
         // return stays a timeout rejection (no retry, no duplicate prompt).
-        const commitAccepted = (terminalRevision: number): boolean => {
+        const commitAccepted = (
+          terminalRevision: number,
+          messageID: string | undefined,
+        ): boolean => {
+          if (messageID === undefined) return false;
           if (options.isDisposed?.() === true) return false;
           const latest = options.backgroundJobBoard.get(lease.taskID);
           return (
@@ -199,7 +204,6 @@ export function createTaskMessageTool(options: {
               agent: currentJob.agent,
               model: selection.model,
               variant: selection.variant ?? 'default',
-              messageID,
               noReply: true,
               parts: [{ type: 'text', text: args.message.trim() }],
             } as Parameters<typeof prompt>[0]['body'];
@@ -210,7 +214,12 @@ export function createTaskMessageTool(options: {
             });
             assertSuccessfulMessageResponse(response);
             assertMessageLease(options.backgroundJobBoard, lease, requested);
-            return { committed: commitAccepted(terminalRevision) };
+            return {
+              committed: commitAccepted(
+                terminalRevision,
+                hostAdmittedMessageID(response),
+              ),
+            };
           },
           remainingTimeoutMs,
         );
@@ -289,6 +298,14 @@ function assertSuccessfulMessageResponse(response: unknown): void {
   throw new Error(
     `Task message transport failed: ${errorText(response.error)}`,
   );
+}
+
+/** The id of the user message the v1 host stored for a noReply prompt. */
+function hostAdmittedMessageID(response: unknown): string | undefined {
+  if (!isRecord(response) || !isRecord(response.data)) return undefined;
+  const info = response.data.info;
+  if (!isRecord(info) || typeof info.id !== 'string') return undefined;
+  return info.id.length > 0 ? info.id : undefined;
 }
 
 function errorText(error: unknown): string {

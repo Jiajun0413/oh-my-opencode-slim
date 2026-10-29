@@ -23,8 +23,16 @@ function registerRunningChild(
   });
 }
 
+/** A real v1 id: `msg_` + ascending hex timestamp, assigned by the host. */
+const HOST_MESSAGE_ID = 'msg_019a2b3c4d5eAbCdEfGhIjKlMn';
+
+/** What the v1 host returns for a noReply prompt: the stored user message. */
+function hostAccepted() {
+  return { data: { info: { id: HOST_MESSAGE_ID, role: 'user' }, parts: [] } };
+}
+
 function makePrompt(): ReturnType<typeof mock> {
-  return mock(async () => ({}));
+  return mock(async () => hostAccepted());
 }
 
 /** Deterministic drain: late settlement runs only microtasks, never timers. */
@@ -96,16 +104,46 @@ describe('task_message', () => {
         agent: 'fixer',
         model: { providerID: 'openai', modelID: 'gpt-6' },
         variant: 'default',
-        messageID: expect.stringMatching(/^msg_omos_message_[0-9a-f]{32}$/),
         noReply: true,
         parts: [{ type: 'text', text: 'Please continue.' }],
       },
       throwOnError: true,
     });
-    // The same id becomes the generation's excerpt boundary.
+    // The host-assigned id becomes the generation's excerpt boundary.
     expect(board.get('ses_child1')?.amendmentInputMessageID).toBe(
-      prompt.mock.calls[0]?.[0].body.messageID as string,
+      HOST_MESSAGE_ID,
     );
+  });
+
+  test('never chooses the v1 admission id; records the host-assigned one', async () => {
+    // v1 orders turns by id string (`msg_` + hex timestamp); a plugin-chosen
+    // id would sort after every host id and keep the child loop running.
+    const board = new BackgroundJobBoard();
+    registerRunningChild(board, 'ses_child1', 'parent-1', 'msg_open');
+    const hostID = 'msg_019a2b3c4d5fZyXwVuTsRqPoNm';
+    const prompt = mock(async () => ({
+      data: { info: { id: hostID, role: 'user' }, parts: [] },
+    }));
+    client = { session: makeSession(prompt) };
+
+    await expect(send(board, 'Amend.')).resolves.toContain('queued');
+
+    const body = prompt.mock.calls[0]?.[0].body as Record<string, unknown>;
+    expect(body).not.toHaveProperty('messageID');
+    expect(board.get('ses_child1')?.amendmentInputMessageID).toBe(hostID);
+  });
+
+  test('records no amendment boundary when the host returns no message id', async () => {
+    const board = new BackgroundJobBoard();
+    registerRunningChild(board);
+    const prompt = mock(async () => ({}));
+    client = { session: makeSession(prompt) };
+
+    await expect(send(board, 'Amend.')).resolves.toContain(
+      'no amendment boundary was recorded',
+    );
+    expect(prompt.mock.calls[0]?.[0].body).not.toHaveProperty('messageID');
+    expect(board.get('ses_child1')?.amendmentInputMessageID).toBeUndefined();
   });
 
   test('uses only the noReply transport and permits repeated updates', async () => {
@@ -187,7 +225,6 @@ describe('task_message', () => {
       agent: 'fixer',
       model: { providerID: 'openai', modelID: 'gpt-6' },
       variant: 'medium',
-      messageID: expect.stringMatching(/^msg_omos_message_[0-9a-f]{32}$/),
       noReply: true,
       parts: [{ type: 'text', text: 'Continue with the fix.' }],
     });
@@ -231,7 +268,6 @@ describe('task_message', () => {
       agent: 'fixer',
       model: { providerID: 'anthropic', modelID: 'claude-sonnet' },
       variant: 'high',
-      messageID: expect.stringMatching(/^msg_omos_message_[0-9a-f]{32}$/),
       noReply: true,
       parts: [{ type: 'text', text: 'Continue with the fix.' }],
     });
@@ -332,7 +368,7 @@ describe('task_message', () => {
     const prompt = mock(
       () =>
         new Promise<unknown>((resolve) => {
-          releasePrompt = () => resolve({});
+          releasePrompt = () => resolve(hostAccepted());
         }),
     );
     client = { session: makeSession(prompt) };
@@ -410,7 +446,7 @@ describe('task_message', () => {
       const prompt = mock((input: { path: { id: string } }) =>
         input.path.id === 'ses_child1'
           ? transport.promise
-          : Promise.resolve({}),
+          : Promise.resolve(hostAccepted()),
       );
       client = { session: makeSession(prompt) };
       const acquire = spyOn(ProductionBoard.prototype, 'acquireLease');
@@ -480,7 +516,7 @@ describe('task_message', () => {
       const beforeSettlement = { ...board.get(lease.taskID) };
       if (settlement === 'reject')
         transport.reject(new Error('late transport failure'));
-      else transport.resolve({});
+      else transport.resolve(hostAccepted());
       await drainMicrotasks();
       expect(retirements()).toHaveLength(1);
       expect(board.validateLease(lease)).toBe(false);
@@ -492,9 +528,7 @@ describe('task_message', () => {
         // must survive the timeout so diagnostics can attribute the tail.
         expect(board.get(lease.taskID)).toEqual({
           ...beforeSettlement,
-          amendmentInputMessageID: expect.stringMatching(
-            /^msg_omos_message_[0-9a-f]{32}$/,
-          ),
+          amendmentInputMessageID: HOST_MESSAGE_ID,
         });
       }
 
@@ -555,14 +589,14 @@ describe('task_message', () => {
         now: 200,
       });
       if (ended?.state !== 'error') throw new Error('expected terminal');
-      return {};
+      return hostAccepted();
     });
     client = { session: makeSession(prompt) };
 
     await expect(send(board, 'Continue.')).resolves.toContain('queued');
 
     const stamped = board.get('ses_child1');
-    const messageID = prompt.mock.calls[0]?.[0].body.messageID as string;
+    const messageID = HOST_MESSAGE_ID;
     expect(stamped).toMatchObject({
       state: 'error',
       terminalRevision: run.terminalRevision + 1,
@@ -605,11 +639,11 @@ describe('task_message', () => {
       }
 
       // The host accepted the deposit; only now does the response resolve.
-      transport.resolve({});
+      transport.resolve(hostAccepted());
       await drainMicrotasks();
 
       const stamped = board.get('ses_child1');
-      const messageID = prompt.mock.calls[0]?.[0].body.messageID as string;
+      const messageID = HOST_MESSAGE_ID;
       if (outcome === 'reopened + 2') {
         // The reopened run is not the captured one: no stale boundary.
         expect(stamped?.amendmentInputMessageID).toBeUndefined();
@@ -676,13 +710,13 @@ describe('task_message', () => {
         resultSummary: 'no terminal result',
         now: 200,
       });
-      return {};
+      return hostAccepted();
     });
     client = { session: makeSession(prompt) };
 
     await expect(send(board, 'Continue.')).resolves.toContain('queued');
 
-    const messageID = prompt.mock.calls[0]?.[0].body.messageID as string;
+    const messageID = HOST_MESSAGE_ID;
     expect(board.get('ses_child1')).toMatchObject({
       state: 'stopped',
       terminalRevision: run.terminalRevision + 1,
@@ -699,7 +733,7 @@ describe('task_message', () => {
     client = { session: makeSession(prompt) };
 
     await send(board, 'Continue.');
-    const messageID = prompt.mock.calls[0]?.[0].body.messageID as string;
+    const messageID = HOST_MESSAGE_ID;
     expect(board.get('ses_child1')?.amendmentInputMessageID).toBe(messageID);
 
     // A cancellation lands after the accepted deposit: the recorded same-run
@@ -739,7 +773,7 @@ describe('task_message', () => {
       if (ended?.state !== 'error') throw new Error('expected terminal');
       const reopened = board.markRunningFromLiveSession('ses_child1', 300);
       if (reopened?.state !== 'running') throw new Error('expected reopen');
-      return {};
+      return hostAccepted();
     });
     client = { session: makeSession(prompt) };
 
@@ -771,7 +805,7 @@ describe('task_message', () => {
     registerRunningChild(board);
     const prompt = mock(async () => {
       board.drop('ses_child1');
-      return {};
+      return hostAccepted();
     });
     client = { session: makeSession(prompt) };
 
@@ -788,7 +822,7 @@ describe('task_message', () => {
     let disposed = false;
     const prompt = mock(async () => {
       disposed = true;
-      return {};
+      return hostAccepted();
     });
     client = { session: makeSession(prompt) };
     const tool = createTaskMessageTool({
@@ -843,9 +877,7 @@ describe('task_message', () => {
     const dispatched = board.get('ses_child1');
     expect(dispatched?.state).toBe('running');
     expect(dispatched?.terminalRevision).toBe(run.terminalRevision + 2);
-    expect(dispatched?.amendmentInputMessageID).toBe(
-      prompt.mock.calls[0]?.[0].body.messageID as string,
-    );
+    expect(dispatched?.amendmentInputMessageID).toBe(HOST_MESSAGE_ID);
   });
 
   test('rejects terminal and cancelling tasks', async () => {

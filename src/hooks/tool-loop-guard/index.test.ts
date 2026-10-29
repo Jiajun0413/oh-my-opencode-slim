@@ -313,10 +313,11 @@ describe('tool-loop-guard', () => {
     expect(completedOutput3.output).toContain(LOOP_GUARD_WARNING);
   });
 
-  test('task and task lifecycle/control tools (cancel, revive) remain exempt', async () => {
+  test('task and task lifecycle/control tools (cancel, message, revive) remain exempt', async () => {
     const exemptTools = [
       { tool: 'task', args: { subagent_type: 'explorer', prompt: 'find x' } },
       { tool: 'task_cancel', args: { task_id: 'child-1' } },
+      { tool: 'task_message', args: { task_id: 'child-1', message: 'hello' } },
       { tool: 'task_revive', args: { task_id: 'child-1' } },
     ];
 
