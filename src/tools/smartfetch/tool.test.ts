@@ -271,9 +271,12 @@ describe('smartfetch/tool', () => {
   });
 
   test('SF-06: honors the HTML meta charset after MIME promotion unless HTTP declares one', async () => {
+    // Shift_JIS rather than a single-byte Cyrillic charset: Bun's
+    // TextDecoder does not support windows-1251, so the meta charset would
+    // be unusable there regardless of MIME promotion.
     const html = Buffer.concat([
-      Buffer.from('<html><head><meta charset="windows-1251"></head><body><p>'),
-      Buffer.from([0xcf, 0xf0, 0xe8, 0xe2, 0xe5, 0xf2]),
+      Buffer.from('<html><head><meta charset="shift_jis"></head><body><p>'),
+      Buffer.from([0x93, 0xfa, 0x96, 0x7b]),
       Buffer.from('</p></body></html>'),
     ]);
     globalThis.fetch = mock(
@@ -293,13 +296,13 @@ describe('smartfetch/tool', () => {
         { url: 'https://example.com/promoted', format: 'text' },
         createExecutionContext(),
       ),
-    ).toContain('Привет');
+    ).toContain('日本');
     expect(
       await webfetch.execute(
         { url: 'https://example.com/explicit', format: 'text' },
         createExecutionContext(),
       ),
-    ).toContain('Ïðèâåò');
+    ).toContain('“ú–{');
   });
 
   test('no-llms docs pages keep per-format Accept and representations', async () => {

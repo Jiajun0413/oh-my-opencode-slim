@@ -3282,6 +3282,10 @@ describe('ForegroundFallbackManager spent allowance (issue #966)', () => {
       },
     });
     jest.advanceTimersByTime(6_000);
+    // Bun's advanceTimersByTime drops the pinned system time and Date.now()
+    // jumps to the real clock, which would expire the 30-minute provider
+    // marks. Re-pin the clock to the advanced fake time.
+    jest.setSystemTime(1_006_000);
     await manager.handleEvent(failed(sid, 'p2/c', SPENT, 'after-recovery'));
     // p1 is no longer exhausted, only down (activeFallback keeps abandoned
     // providers), so the bounded sticky retry may use p1 again instead of
