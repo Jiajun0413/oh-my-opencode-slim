@@ -1132,6 +1132,15 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         // is genuinely in flight: without this, `defaultConcurrency` such
         // tasks wedge every later background launch on `await ticket.ready`.
         onGiveUp: (taskID) => backgroundTaskConcurrency?.releaseTask(taskID),
+        // The give-up path is not the only way a slot leaks. The terminal
+        // outcome listener below returns early whenever the board record it
+        // is handed no longer matches `get()` (generation, revision, or a
+        // state still reading `running`), and a skipped release wedges
+        // `defaultConcurrency` launches for the life of the process: the
+        // queue then parks every later background call on `await ticket.ready`
+        // with no child session created. Release on every publication.
+        onTerminal: (record) =>
+          backgroundTaskConcurrency?.releaseTask(record.taskID),
       });
       backgroundJobSupervisor = new BackgroundJobSupervisor({
         backgroundJobBoard,

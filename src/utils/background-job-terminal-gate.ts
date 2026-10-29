@@ -402,6 +402,13 @@ export function createBackgroundJobTerminalGate(options: {
    * that cannot read terminal evidence leaks one resource per such task.
    */
   onGiveUp?: (taskID: string, generation: number) => void;
+  /**
+   * Called once per publication, after the board record is committed: the
+   * task's admission slot (and anything else it still holds) can be released
+   * here. Unlike the board's terminal-outcome listeners this fires for every
+   * publication, including commits whose record no longer matches the board.
+   */
+  onTerminal?: (record: BackgroundJobRecord) => void;
   graceMs?: number;
   readTimeoutMs?: number;
   maxEvidenceRetries?: number;
@@ -716,6 +723,7 @@ export function createBackgroundJobTerminalGate(options: {
     if (value.timer) clearTimer(value.timer);
     value.timer = undefined;
     value.candidate = undefined;
+    options.onTerminal?.(record);
     // Log-only corroboration: when a window-attributed host outcome is in
     // hand for this episode, compare it with the state being published and
     // log bounded-evidence disagreements. Same contract as
