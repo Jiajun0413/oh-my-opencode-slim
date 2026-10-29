@@ -8,6 +8,10 @@ import { createInterviewService } from '../interview/service';
 import type { InterviewMessage } from '../interview/types';
 import { isRecord } from '../utils/guards';
 import { log } from '../utils/logger';
+import {
+  type OpencodeClient,
+  resolveSessionAgent,
+} from '../utils/prompt-agent';
 import { createSessionListShim, resolveV2Directory } from './client-shim';
 import { createSessionSubmit, userTextFromContent } from './session-submit';
 import type {
@@ -134,9 +138,20 @@ export function createV2InterviewBridge(
       }
     },
     continue: async (sessionID, text) => {
-      // Best-effort switch to the orchestrator agent, then a flat prompt.
+      // Keep the session's live agent so a declared primary's interview is
+      // not re-homed to the orchestrator (same resolution rule as the v1
+      // runtime: session identity probe, orchestrator when unknown).
+      const probeClient = {
+        session: {
+          get: (args: { path: { id: string } }) =>
+            methods.get?.({ sessionID: args.path.id }),
+        },
+      } as unknown as OpencodeClient;
+      const agent =
+        (await resolveSessionAgent(probeClient, sessionID)) ?? 'orchestrator';
+      // Best-effort switch to the session's agent, then a flat prompt.
       try {
-        await methods.switchAgent?.({ sessionID, agent: 'orchestrator' });
+        await methods.switchAgent?.({ sessionID, agent });
       } catch (err) {
         log('[v2][interview] switchAgent failed (best-effort)', {
           sessionID,
