@@ -130,6 +130,38 @@ describe('readPluginConfigSnapshot', () => {
     expect(readPluginConfigSnapshot(projectDir).config.sidebar).toBe(false);
   });
 
+  test('a failed environment scan is not cached', () => {
+    process.env.OMOS_TEST_MODEL = 'provider/one';
+    const target = writeUserConfig({
+      agents: { oracle: { model: '{env:OMOS_TEST_MODEL}' } },
+    });
+    const original = fs.readFileSync;
+    let reads = 0;
+    const spy = spyOn(fs, 'readFileSync').mockImplementation(((
+      file: fs.PathLike,
+      ...rest: unknown[]
+    ) => {
+      // The loader's read succeeds; the snapshot's own env scan fails once.
+      if (file === target && ++reads === 2) {
+        throw Object.assign(new Error('EIO'), { code: 'EIO' });
+      }
+      return (original as (...args: unknown[]) => string).call(
+        fs,
+        file,
+        ...rest,
+      );
+    }) as typeof fs.readFileSync);
+    spies.push(spy);
+
+    expect(
+      readPluginConfigSnapshot(projectDir).config.agents?.oracle?.model,
+    ).toBe('provider/one');
+    process.env.OMOS_TEST_MODEL = 'provider/two';
+    expect(
+      readPluginConfigSnapshot(projectDir).config.agents?.oracle?.model,
+    ).toBe('provider/two');
+  });
+
   test('referenced environment values invalidate the cached config', () => {
     process.env.OMOS_TEST_MODEL = 'provider/one';
     writeUserConfig({ agents: { oracle: { model: '{env:OMOS_TEST_MODEL}' } } });

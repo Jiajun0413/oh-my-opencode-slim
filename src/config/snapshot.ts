@@ -104,8 +104,10 @@ function statSignature(files: readonly string[]): string | null {
 function readSourceState(files: readonly string[]): {
   envNames: string[];
   contentHash: string;
+  complete: boolean;
 } {
   const names = new Set<string>();
+  let complete = true;
   const content = createHash('sha256');
   for (const file of files) {
     try {
@@ -114,14 +116,17 @@ function readSourceState(files: readonly string[]): {
       for (const match of text.matchAll(ENV_REFERENCE_PATTERN)) {
         if (match[1]) names.add(match[1]);
       }
-    } catch {
-      // The loader reports the read failure; env tracking stays best-effort.
+    } catch (error) {
+      // An absent file is stable; any other failure means the env names
+      // read here may be incomplete, so the result must not be cached.
+      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') complete = false;
       content.update(`${file}\u0000<unreadable>\u0000`);
     }
   }
   return {
     envNames: [...new Set(['OH_MY_OPENCODE_SLIM_PRESET', ...names])].sort(),
     contentHash: content.digest('hex'),
+    complete,
   };
 }
 
@@ -174,7 +179,11 @@ export function readPluginConfigSnapshot(
   });
   const sourceState =
     stats === null
-      ? { envNames: ['OH_MY_OPENCODE_SLIM_PRESET'], contentHash: '' }
+      ? {
+          envNames: ['OH_MY_OPENCODE_SLIM_PRESET'],
+          contentHash: '',
+          complete: false,
+        }
       : readSourceState(files);
   const envSig = envSignature(sourceState.envNames);
   const signature =
@@ -198,6 +207,7 @@ export function readPluginConfigSnapshot(
 
   if (
     signature !== null &&
+    sourceState.complete &&
     signature ===
       `${statSignature(files)}\u0000${envSig}\u0000${sourceState.contentHash}` &&
     !warnings.some((warning) => warning.kind === 'read-error')
