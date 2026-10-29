@@ -1126,6 +1126,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           )
             backgroundJobSupervisor?.onLaunch(record);
         },
+        // A task the gate gives up on stays `running` on the board forever
+        // (its termination can never be confirmed on hosts that cannot read
+        // terminal evidence). Keep its admission slot only for as long as it
+        // is genuinely in flight: without this, `defaultConcurrency` such
+        // tasks wedge every later background launch on `await ticket.ready`.
+        onGiveUp: (taskID) => backgroundTaskConcurrency?.releaseTask(taskID),
       });
       backgroundJobSupervisor = new BackgroundJobSupervisor({
         backgroundJobBoard,

@@ -2031,6 +2031,53 @@ describe('terminal gate observability (INFO logs)', () => {
       capture.restore();
     }
   });
+
+  test('a final give-up frees the admission slot the task holds', async () => {
+    // The wedge this pins: an unconfirmable task keeps its slot, so a later
+    // launch waits on `await ticket.ready` forever. Releasing at give-up is
+    // what lets the queue move again.
+    const scheduler = new BackgroundTaskConcurrency({
+      defaultConcurrency: 1,
+      providerConcurrency: {},
+      modelConcurrency: {},
+    });
+    const first = scheduler.acquire({ model: 'openai/fast' });
+    await first.ready;
+    first.bind('ses_child');
+    const queued = scheduler.acquire({ model: 'openai/fast' });
+    let granted = false;
+    void queued.ready.then(() => {
+      granted = true;
+    });
+    await Promise.resolve();
+    expect(granted).toBe(false);
+
+    const h = harness({
+      maxEvidenceRetries: 0,
+      readTerminalEvidence: async () => undefined,
+      onGiveUp: (taskID) => scheduler.releaseTask(taskID),
+    });
+    await h.gate.reconcile(h.run);
+    await Promise.resolve();
+    expect(granted).toBe(true);
+  });
+
+  test('final give-up releases whatever the task holds, exactly once', async () => {
+    const giveUps: Array<{ taskID: string; generation: number }> = [];
+    const h = harness({
+      maxEvidenceRetries: 0,
+      readTerminalEvidence: async () => undefined,
+      onGiveUp: (taskID, generation) => giveUps.push({ taskID, generation }),
+    });
+    await h.gate.reconcile(h.run);
+    expect(giveUps).toEqual([
+      { taskID: h.run.taskID, generation: h.run.generation },
+    ]);
+    // The record stays `running` on the board, so it is reconciled again; the
+    // release must not repeat (a second release would free another task's slot).
+    await h.gate.reconcile(h.run);
+    expect(giveUps).toHaveLength(1);
+  });
 });
 
 describe('outcome corroboration (log-only mirror)', () => {
@@ -2435,9 +2482,14 @@ describe('evidence re-arm behavior (#1561)', () => {
   test('T3: exhaustion stays indeterminate and logs each line once', async () => {
     const capture = captureLogs();
     try {
+      const giveUps: string[] = [];
       const h = shimHarness({
         hideOutcomeForReads: 1_000,
-        gateOptions: { evidenceRearmMs: 5, maxEvidenceRearms: 3 },
+        gateOptions: {
+          evidenceRearmMs: 5,
+          maxEvidenceRearms: 3,
+          onGiveUp: (taskID: string) => giveUps.push(taskID),
+        },
       });
       h.observe('busy', false, 100);
       h.advance(100);
@@ -2477,6 +2529,8 @@ describe('evidence re-arm behavior (#1561)', () => {
         rearms: 3,
         maxEvidenceRearms: 3,
       });
+      // Arm budget gone: this is the point of no return, so it releases once.
+      expect(giveUps).toEqual([h.run.taskID]);
       expect(h.timers.pending()).toBe(0);
     } finally {
       capture.restore();
