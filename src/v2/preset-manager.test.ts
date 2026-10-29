@@ -249,6 +249,63 @@ const BALANCED_SAVE_APPLY_TRAIL = [
 ];
 
 describe('preset apply scopes', () => {
+  test('current-session markers and selection are independent of the global default', async () => {
+    for (const boundName of ['cheap', 'balanced', 'removed']) {
+      env.writeUserConfig(SWITCH);
+      const stub = makeStub();
+      stub.ctx.getSessionID = () => 'root-1';
+      stub.ctx.client = {
+        rpc: () => ({
+          read: async () => ({
+            sessionID: 'root-1',
+            status: 'bound',
+            presetName: boundName,
+            affects: 'future-children-only',
+          }),
+        }),
+      };
+      await openPresetManagerV2(stub.ctx, env.projectDir);
+      const list = stub.selectCalls[0];
+      expect(list.title).toContain(`current session: ${boundName}`);
+      expect(list.placeholder).toBe('Choose a preset');
+      expect(
+        list.options.find((option) => option.value === 'balanced')?.title,
+      ).toBe(
+        `balanced${boundName === 'balanced' ? ' (current session)' : ''} (default)`,
+      );
+      expect(
+        list.options.find((option) => option.value === 'cheap')?.title,
+      ).toBe(`cheap${boundName === 'cheap' ? ' (current session)' : ''}`);
+      expect(list.current).toBe(
+        boundName === 'removed' ? undefined : boundName,
+      );
+      if (boundName === 'removed') {
+        expect(list.title).toContain('(definition unavailable)');
+        expect(list.title).not.toContain('Not bound');
+      }
+    }
+  });
+
+  test('an absent bound definition remains visible even with no configured presets', async () => {
+    env.writeUserConfig({});
+    const stub = makeStub();
+    stub.ctx.getSessionID = () => 'root-1';
+    stub.ctx.client = {
+      rpc: () => ({
+        read: async () => ({
+          sessionID: 'root-1',
+          status: 'bound',
+          presetName: 'removed',
+          affects: 'future-children-only',
+        }),
+      }),
+    };
+    await openPresetManagerV2(stub.ctx, env.projectDir);
+    expect(stub.selectCalls[0].title).toContain('current session: removed');
+    expect(stub.selectCalls[0].current).toBeUndefined();
+    expect(stub.promptCalls).toHaveLength(0);
+  });
+
   test('same-name session reapply uses the server and leaves user config untouched', async () => {
     env.writeUserConfig(SWITCH);
     const before = fs.readFileSync(env.userConfigPath, 'utf-8');
@@ -287,19 +344,10 @@ describe('preset apply scopes', () => {
         options: { location: { directory: env.projectDir } },
       },
     ]);
-    expect(stub.selectCalls[0].placeholder).toContain(
-      'Session team snapshot: balanced',
-    );
-    expect(stub.selectCalls[0].placeholder).toContain(
-      'Same name does not imply the same definition',
-    );
-    expect(stub.confirmCalls[0].message).toContain('Inference only');
-    expectToast(
-      stub,
-      'success',
-      'future children',
-      'Root model, existing children and global default unchanged',
-    );
+    expect(stub.selectCalls[0].title).toContain('current session: balanced');
+    expect(stub.confirmCalls[0].message).toContain('future children');
+    expectToast(stub, 'success', '"balanced" applied.');
+    expect(lastMessage(stub)).not.toContain('unchanged');
     expect(fs.readFileSync(env.userConfigPath, 'utf-8')).toBe(before);
     expect(stub.reloadCalls()).toBe(0);
   });
@@ -372,7 +420,7 @@ describe('preset apply scopes', () => {
         }),
       };
       await openPresetManagerV2(stub.ctx, env.projectDir);
-      expectToast(stub, 'warning', reason, 'Global default unchanged');
+      expectToast(stub, 'warning', reason, 'Reopen Presets');
       expect(lastToast(stub)?.title).toBe('Preset not applied');
       expect(readUserConfig()).toEqual(SWITCH);
       expect(stub.reloadCalls()).toBe(0);
@@ -421,7 +469,7 @@ describe('preset apply scopes', () => {
       'warning',
       'Definition saved',
       'Session preset storage write failed',
-      'Global default unchanged',
+      'Reopen Presets',
     );
   });
 });

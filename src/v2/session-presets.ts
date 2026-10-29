@@ -71,6 +71,11 @@ export type SessionPresetState = {
   status: 'bound' | 'unbound';
   presetName: string | null;
   affects: 'future-children-only';
+  team?: {
+    agentModels: Record<string, string>;
+    agentVariants: Record<string, string>;
+    inheritance: Record<string, 'session' | 'orchestrator'>;
+  };
 };
 /** Per-call execution intent is separate from the inherited team bundle. */
 export type SessionTeamAdmission = {
@@ -226,7 +231,7 @@ export function createSessionPresets(options: {
   async function ensure(
     id: string,
     signal?: AbortSignal,
-    explicitModel = false,
+    explicitModel?: boolean,
   ) {
     check(signal);
     if (!available) return undefined;
@@ -240,7 +245,7 @@ export function createSessionPresets(options: {
         if (existing.parentID !== parentID)
           throw new Error('Session preset parent identity mismatch');
         if (
-          explicitModel &&
+          explicitModel === true &&
           (!existing.explicitModel || !existing.preserveModel)
         ) {
           return write(
@@ -248,6 +253,13 @@ export function createSessionPresets(options: {
             { ...existing, explicitModel: true, preserveModel: true },
             signal,
           );
+        }
+        if (
+          explicitModel === false &&
+          (existing.explicitModel || existing.preserveModel)
+        ) {
+          const { preserveModel: _preserve, ...rest } = existing;
+          return write(id, { ...rest, explicitModel: false }, signal);
         }
         return existing;
       }
@@ -315,6 +327,30 @@ export function createSessionPresets(options: {
     status: record ? 'bound' : 'unbound',
     presetName: record?.bundle.presetName ?? null,
     affects: 'future-children-only',
+    ...(record
+      ? {
+          team: {
+            agentModels: Object.fromEntries(
+              Object.entries(record.bundle.profiles).map(([agent, profile]) => [
+                agent,
+                profile.model
+                  ? `${profile.model.providerID}/${profile.model.id}`
+                  : profile.sidebarModel,
+              ]),
+            ),
+            agentVariants: Object.fromEntries(
+              Object.entries(record.bundle.profiles).flatMap(
+                ([agent, profile]) => {
+                  const variant =
+                    profile.model?.variant ?? profile.sidebarVariant;
+                  return variant === undefined ? [] : [[agent, variant]];
+                },
+              ),
+            ),
+            inheritance: { ...record.bundle.inheritance },
+          },
+        }
+      : {}),
   });
   return {
     available,

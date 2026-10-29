@@ -175,6 +175,10 @@
                       "type": "string",
                       "minLength": 1
                     },
+                    "primary": {
+                      "description": "When true, treat this custom agent as a primary orchestrator: SDK mode `primary` plus the orchestration tool and permission set. Built-in agents are unaffected.",
+                      "type": "boolean"
+                    },
                     "permission": {
                       "anyOf": [
                         {
@@ -420,6 +424,10 @@
                         "type": "string",
                         "minLength": 1
                       },
+                      "primary": {
+                        "description": "When true, treat this custom agent as a primary orchestrator: SDK mode `primary` plus the orchestration tool and permission set. Built-in agents are unaffected.",
+                        "type": "boolean"
+                      },
                       "permission": {
                         "anyOf": [
                           {
@@ -596,6 +604,10 @@
                 "description": {
                   "type": "string",
                   "minLength": 1
+                },
+                "primary": {
+                  "description": "When true, treat this custom agent as a primary orchestrator: SDK mode `primary` plus the orchestration tool and permission set. Built-in agents are unaffected.",
+                  "type": "boolean"
                 },
                 "permission": {
                   "anyOf": [
@@ -803,6 +815,10 @@
                         "type": "string",
                         "minLength": 1
                       },
+                      "primary": {
+                        "description": "When true, treat this custom agent as a primary orchestrator: SDK mode `primary` plus the orchestration tool and permission set. Built-in agents are unaffected.",
+                        "type": "boolean"
+                      },
                       "permission": {
                         "anyOf": [
                           {
@@ -976,6 +992,10 @@
                 "description": {
                   "type": "string",
                   "minLength": 1
+                },
+                "primary": {
+                  "description": "When true, treat this custom agent as a primary orchestrator: SDK mode `primary` plus the orchestration tool and permission set. Built-in agents are unaffected.",
+                  "type": "boolean"
                 },
                 "permission": {
                   "anyOf": [
@@ -1156,6 +1176,10 @@
           "description": {
             "type": "string",
             "minLength": 1
+          },
+          "primary": {
+            "description": "When true, treat this custom agent as a primary orchestrator: SDK mode `primary` plus the orchestration tool and permission set. Built-in agents are unaffected.",
+            "type": "boolean"
           },
           "permission": {
             "anyOf": [

@@ -15,6 +15,18 @@ export function quoteShellArg(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+/**
+ * Quotes one argument for the shell that will interpret the command.
+ * PowerShell escapes an embedded apostrophe by doubling it inside a
+ * single-quoted string (`'O''Brien'`); the POSIX `'\''` form is not readable
+ * to it.
+ */
+function quoteForShell(value: string, shell?: PaneShell): string {
+  return shell === 'powershell'
+    ? `'${value.replace(/'/g, "''")}'`
+    : quoteShellArg(value);
+}
+
 /** Normalize Windows backslashes to / so sh -lc (MSYS2/Git Bash) doesn't treat them as escape chars. */
 export function normalizePathForShell(directory: string): string {
   return process.platform === 'win32'
@@ -22,11 +34,18 @@ export function normalizePathForShell(directory: string): string {
     : directory;
 }
 
-/** Quote an executable for sh -lc: bare fallback stays bare, Windows
- * backslashes become / so MSYS2/Git Bash single quotes don't preserve them. */
-function formatExecutableForShell(executable: string): string {
+export type PaneShell = 'posix' | 'powershell';
+
+/** Quote an executable for the pane shell: bare fallback stays bare, Windows
+ * backslashes become / for MSYS2/Git Bash; PowerShell needs the call operator. */
+function formatExecutableForShell(
+  executable: string,
+  shell?: PaneShell,
+): string {
   if (executable === 'opencode') return executable;
-  return quoteShellArg(normalizePathForShell(executable));
+  const normalized = normalizePathForShell(executable);
+  const quoted = quoteForShell(normalized, shell);
+  return shell === 'powershell' ? `& ${quoted}` : quoted;
 }
 
 export function buildOpencodeAttachCommand(
@@ -37,16 +56,17 @@ export function buildOpencodeAttachCommand(
   // (zellij `sh -lc`, tmux server PATH) may not have `opencode` on PATH
   // (e.g. linuxbrew installs), #514.
   executable = resolveOpencodeExecutable(),
+  shell?: PaneShell,
 ): string {
   const attachDir = normalizePathForShell(directory);
   return [
-    formatExecutableForShell(executable),
+    formatExecutableForShell(executable, shell),
     'attach',
-    quoteShellArg(serverUrl),
+    quoteForShell(serverUrl, shell),
     '--session',
-    quoteShellArg(sessionId),
+    quoteForShell(sessionId, shell),
     '--dir',
-    quoteShellArg(attachDir),
+    quoteForShell(attachDir, shell),
   ].join(' ');
 }
 
@@ -65,6 +85,7 @@ export type ViewerCommandOptions = Pick<
   /** Absolute host binary; defaults to the resolved host binary (falls
    back to bare `opencode`). */
   executable?: string;
+  shell?: PaneShell;
 };
 
 /**
@@ -100,17 +121,22 @@ export function buildViewCommand(
       serverUrl,
       directory,
       executable,
+      options.shell,
     );
     return mini ? `${attach} --mini` : attach;
   }
   const viewDir = normalizePathForShell(directory);
   return [
-    formatExecutableForShell(executable),
+    formatExecutableForShell(executable, options.shell),
     ...(mini ? ['mini'] : []),
-    ...(flavor === 'v2-remote' ? ['--server', quoteShellArg(serverUrl)] : []),
+    ...(flavor === 'v2-remote'
+      ? ['--server', quoteForShell(serverUrl, options.shell)]
+      : []),
     '--session',
-    quoteShellArg(sessionId),
-    ...(viewerNeedsPaneCwd(options) ? [] : [quoteShellArg(viewDir)]),
+    quoteForShell(sessionId, options.shell),
+    ...(viewerNeedsPaneCwd(options)
+      ? []
+      : [quoteForShell(viewDir, options.shell)]),
   ].join(' ');
 }
 

@@ -53,9 +53,12 @@ import {
   canOpenPresetManagerV2,
   openPresetManagerV2,
   readSessionPreset,
+  sessionPresetLabel,
   type V2PresetManagerContext,
   type V2PresetUiSurface,
 } from './v2/preset-manager';
+import type { SessionPresetState } from './v2/preset-rpc';
+import { createTeamDisplayIdentity } from './v2/team-display';
 
 const PLUGIN_NAME = 'oh-my-opencode-slim';
 const CONFIG_WARNING_COLOR = 'orange';
@@ -917,6 +920,10 @@ interface AgentRowTheme {
   accent: unknown;
   text: unknown;
   textMuted: unknown;
+  agentColors?: readonly unknown[];
+  primary?: unknown;
+  secondary?: unknown;
+  info?: unknown;
   background?: unknown;
   backgroundElement?: unknown;
   success?: unknown;
@@ -926,6 +933,22 @@ interface AgentRowTheme {
 
 const STATUS_ACTIVE_COLOR = '#22c55e';
 const STATUS_RETRY_COLOR = '#f59e0b';
+
+function agentColor(agentName: string, theme: AgentRowTheme): unknown {
+  const categorical = theme.agentColors?.filter((color) => color !== undefined);
+  const palette = categorical?.length
+    ? categorical
+    : [theme.primary, theme.secondary, theme.accent, theme.info].filter(
+        (color) => color !== undefined,
+      );
+  if (palette.length === 0) return theme.textMuted;
+
+  let hash = 0;
+  for (let index = 0; index < agentName.length; index += 1) {
+    hash = (hash * 31 + agentName.charCodeAt(index)) >>> 0;
+  }
+  return palette[hash % palette.length];
+}
 
 function hasPrimarySelection(hasSelectedText?: () => boolean): boolean {
   try {
@@ -1122,6 +1145,7 @@ function statusDot(
 
 interface AgentRowOptions {
   label: string;
+  agentName: string;
   model: string;
   modelName?: string;
   variant?: string;
@@ -1138,6 +1162,7 @@ interface AgentRowOptions {
 }
 
 function agentHeaderCells({
+  agentName,
   label,
   active,
   now,
@@ -1147,11 +1172,12 @@ function agentHeaderCells({
   annotation,
   hasHistory,
 }: AgentRowOptions): JSX.Element[] {
+  const color = agentColor(agentName, theme);
   return [
     statusDot(active, hasHistory, now, theme),
     text(
       {
-        fg: theme.textMuted,
+        fg: color,
         wrapMode: 'none',
         truncate: true,
         flexShrink: 1,
@@ -1269,7 +1295,7 @@ function compactAgentRow(options: AgentRowOptions): JSX.Element {
       box({ flexDirection: 'row', flexGrow: 1, shouldFill: false }),
       text(
         {
-          fg: theme.textMuted,
+          fg: agentColor(options.agentName, theme),
           wrapMode: 'none',
           truncate: true,
           flexShrink: 1,
@@ -1416,6 +1442,77 @@ export function getContrastForeground(
   return RGBA.fromInts(255, 255, 255);
 }
 
+/** Window-local projection; never writes the directory-wide snapshot. */
+export function projectSidebarTeam(
+  snapshot: TuiSnapshot,
+  state?: SessionPresetState,
+): TuiSnapshot {
+  // Older backends omit team; retain their existing sidebar behavior.
+  const team = state?.team;
+  if (!team) return snapshot;
+  const { canonicalName, projectValues } = createTeamDisplayIdentity(
+    snapshot.agentDisplayNames,
+  );
+  const models = projectValues(team.agentModels);
+  const variants = projectValues(team.agentVariants);
+  const inherited = projectValues(team.inheritance);
+  // Applying a team preset does not change the main agent's live model.
+  const rootModel = projectValues(snapshot.agentModels).orchestrator;
+  const rootVariant = projectValues(snapshot.agentVariants).orchestrator;
+  if (rootVariant === undefined) delete variants.orchestrator;
+  else variants.orchestrator = rootVariant;
+  const names = new Set(
+    [
+      ...getSidebarAgentNames(snapshot),
+      ...Object.keys(team.agentModels),
+      ...Object.keys(team.inheritance),
+    ].map(canonicalName),
+  );
+  if (rootModel === undefined) names.delete('orchestrator');
+  return {
+    ...snapshot,
+    agentModels: Object.fromEntries(
+      [...names].map((name) => [
+        name,
+        name === 'orchestrator'
+          ? (rootModel ?? 'Unknown')
+          : inherited[name]
+            ? `Inherits ${inherited[name]}`
+            : (models[name] ?? 'Unknown'),
+      ]),
+    ),
+    agentVariants: variants,
+    activeSessions: Object.fromEntries(
+      Object.entries(snapshot.activeSessions).map(([sessionID, name]) => [
+        sessionID,
+        canonicalName(name),
+      ]),
+    ),
+    reusableByAgent: Object.fromEntries(
+      Object.entries(snapshot.reusableByAgent).map(([parentID, byAgent]) => {
+        const canonical = new Map<string, (typeof byAgent)[string]>();
+        for (const [name, entries] of Object.entries(byAgent)) {
+          const key = canonicalName(name);
+          canonical.set(key, [...(canonical.get(key) ?? []), ...entries]);
+        }
+        return [
+          parentID,
+          Object.fromEntries(
+            [...canonical].map(([name, entries]) => [
+              name,
+              // Activity readers expect running entries before history.
+              entries.sort(
+                (a, b) =>
+                  Number(b.running === true) - Number(a.running === true),
+              ),
+            ]),
+          ),
+        ];
+      }),
+    ),
+  };
+}
+
 export function renderSidebar(
   snapshot: TuiSnapshot,
   version: string,
@@ -1429,6 +1526,10 @@ export function renderSidebar(
     success?: unknown;
     warning?: unknown;
     hover?: unknown;
+    agentColors?: readonly unknown[];
+    primary?: unknown;
+    secondary?: unknown;
+    info?: unknown;
   },
   configInvalid: boolean,
   compactSidebar: boolean,
@@ -1439,11 +1540,16 @@ export function renderSidebar(
   modelNames?: ReadonlyMap<string, string>,
 ): JSX.Element {
   const configStatusRow = buildConfigStatusRow(configInvalid, theme);
+  const presetHoverBackground = resolveHoverBackground({
+    background: theme.background,
+    text: theme.text,
+    hover: theme.hover,
+  });
   const presetRowEl = presetRow
     ? buildPresetRow(
         presetRow,
         theme,
-        resolveHoverBackground(theme),
+        presetHoverBackground,
         interaction?.hasSelectedText,
       )
     : null;
@@ -1473,7 +1579,7 @@ export function renderSidebar(
     },
     [
       box({ flexDirection: 'row', alignItems: 'center' }, [
-        text({ fg: theme.textMuted, width: 2 }, [sidebarOpen ? '▼ ' : '▶ ']),
+        text({ fg: theme.text, width: 2 }, [sidebarOpen ? '▼ ' : '▶ ']),
         box({ paddingRight: 1, backgroundColor: theme.accent }, [
           text(
             {
@@ -1569,6 +1675,7 @@ export function renderSidebar(
               // agent ID so models, activity, expansion and history keep
               // resolving.
               label: snapshot.agentDisplayNames?.[agentName] || agentName,
+              agentName,
               model,
               modelName: modelNames?.get(model),
               variant,
@@ -1636,7 +1743,7 @@ function resolveMultiplexerType(value: unknown): MultiplexerType {
  * (same hover/click decoration); without one it is a muted, informational
  * line — capability detection happens in the v2 setup, never here.
  */
-function buildPresetRow(
+export function buildPresetRow(
   presetRow: SidebarPresetRow,
   theme: { text: unknown; textMuted: unknown },
   hoverBackground: unknown,
@@ -1684,6 +1791,10 @@ function buildPresetRow(
         ]);
   if (!clickable) return content;
   return decorateInteractiveRow(content, {
+    // Sidebar rows sit on backgroundElement, so using that color as the
+    // hover fill leaves this row visually unchanged. Use the normal hover
+    // color when the host provides one, otherwise derive a visible fill from
+    // the page background and text colors.
     hoverBackground,
     onActivate: presetRow.onActivate,
     hasSelectedText,
@@ -1809,10 +1920,28 @@ export function resolveSidebarSlotOrder(
 // declared locally because the pinned @opencode-ai/plugin dep ships v1
 // types only.
 interface V2TuiThemeTokens {
-  text: { default: unknown; subdued: unknown };
-  background: { default: unknown };
-  border: { default: unknown };
-  /** Optional semantic tokens; v2 hosts may omit them. */
+  categorical?: readonly Record<
+    100 | 200 | 300 | 400 | 500 | 600 | 700 | 800 | 900,
+    unknown
+  >[];
+  hue?: {
+    interactive: Record<
+      100 | 200 | 300 | 400 | 500 | 600 | 700 | 800 | 900,
+      unknown
+    >;
+  };
+  text: {
+    base?: unknown;
+    muted?: unknown;
+    default?: unknown;
+    subdued?: unknown;
+    feedback?: {
+      success?: { base: unknown };
+      warning?: { base: unknown };
+    };
+  };
+  background: { base?: unknown; default?: unknown; raised?: { base: unknown } };
+  border: { base?: unknown; default?: unknown };
   success?: unknown;
   warning?: unknown;
 }
@@ -1857,22 +1986,29 @@ interface V2TuiContext extends V2PresetManagerContext {
 
 /** Map v2 theme tokens onto the flat shape `renderSidebar` consumes (v2 has no `accent` token). */
 function v2ThemeView(theme: V2TuiThemeTokens): {
-  accent: undefined;
+  accent: unknown;
   background: unknown;
+  backgroundElement: unknown;
   borderActive: unknown;
   text: unknown;
   textMuted: unknown;
   success?: unknown;
   warning?: unknown;
+  agentColors: readonly unknown[];
 } {
   return {
-    accent: undefined,
-    background: theme.background.default,
-    borderActive: theme.border.default,
-    text: theme.text.default,
-    textMuted: theme.text.subdued,
-    ...(theme.success !== undefined ? { success: theme.success } : {}),
-    ...(theme.warning !== undefined ? { warning: theme.warning } : {}),
+    accent: theme.hue?.interactive[200],
+    background: theme.background.base ?? theme.background.default,
+    backgroundElement:
+      theme.background.raised?.base ??
+      theme.background.base ??
+      theme.background.default,
+    borderActive: theme.border.base ?? theme.border.default,
+    text: theme.text.base ?? theme.text.default,
+    textMuted: theme.text.muted ?? theme.text.subdued,
+    success: theme.text.feedback?.success?.base ?? theme.success,
+    warning: theme.text.feedback?.warning?.base ?? theme.warning,
+    agentColors: theme.categorical?.map((scale) => scale[500]) ?? [],
   };
 }
 
@@ -1895,7 +2031,10 @@ interface SidebarRuntimeAdapter {
     presetName?: string,
     sessionLabel?: string,
   ) => SidebarPresetRow | undefined;
-  readSessionPreset?: (directory: string, sessionID: string) => Promise<string>;
+  readSessionPreset?: (
+    directory: string,
+    sessionID: string,
+  ) => Promise<SessionPresetState>;
   onMultiplexerConfig?: (type: MultiplexerType) => void;
   /** v2 hosts only: the prompt's live selected model while the visible
    * route is a root orchestrator session. Overlays the sidebar's
@@ -2058,6 +2197,7 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
     directory: string;
     sessionID: string;
     label: string;
+    state?: SessionPresetState;
   }>();
   let disposed = false;
   let unregisterConfigListener = () => {};
@@ -2118,11 +2258,13 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
     }
     if (adapter.readSessionPreset && currentSession) {
       let label: string;
+      let state: SessionPresetState | undefined;
       try {
-        label = await adapter.readSessionPreset(
+        state = await adapter.readSessionPreset(
           currentDirectory,
           currentSession,
         );
+        label = sessionPresetLabel(state);
       } catch {
         label = 'Unavailable';
       }
@@ -2136,12 +2278,14 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
       if (
         previous?.directory !== currentDirectory ||
         previous?.sessionID !== currentSession ||
-        previous?.label !== label
+        previous?.label !== label ||
+        JSON.stringify(previous?.state) !== JSON.stringify(state)
       ) {
         setSessionPreset({
           directory: currentDirectory,
           sessionID: currentSession,
           label,
+          state,
         });
         stateChanged = true;
       }
@@ -2222,12 +2366,14 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
           const visible = adapter.getVisibleSession();
           const currentSnapshot = snapshot();
           const projection = sessionPreset();
+          const isCurrentProjection =
+            projection?.directory === adapter.getDirectory() &&
+            projection.sessionID === visible;
           const sessionLabel = !adapter.readSessionPreset
             ? undefined
             : visible === undefined
               ? 'No session displayed'
-              : projection?.directory === adapter.getDirectory() &&
-                  projection.sessionID === visible
+              : isCurrentProjection
                 ? projection.label
                 : 'Loading…';
           interaction.syncScope(
@@ -2237,7 +2383,13 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
               : resolveTuiSnapshotRoot(currentSnapshot, visible),
           );
           return renderSidebar(
-            currentSnapshot,
+            overlaySelectedRootModel(
+              projectSidebarTeam(
+                currentSnapshot,
+                isCurrentProjection ? projection.state : undefined,
+              ),
+              adapter.getSelectedRootModel?.(),
+            ),
             adapter.version,
             adapter.theme(),
             configInvalid,
@@ -2401,12 +2553,8 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
       warnPaneUnsupported();
       void reconcilePaneWiring();
     },
-    readSessionPreset: async (directory, sessionID) => {
-      const state = await readSessionPreset(ctx, sessionID, directory);
-      return state.status === 'bound'
-        ? (state.presetName ?? '(no named preset)')
-        : 'Not bound';
-    },
+    readSessionPreset: (directory, sessionID) =>
+      readSessionPreset(ctx, sessionID, directory),
     getPresetRow: (directory, presetName, sessionLabel) => {
       const name = presetName ?? '(none)';
       if (!canOpenPresetManagerV2(ctx)) return { name, sessionLabel };

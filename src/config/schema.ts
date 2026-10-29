@@ -107,6 +107,12 @@ export const AgentOverrideConfigSchema = z
       'Agent display color as #RRGGBB or an OpenCode theme color',
     ),
     description: z.string().min(1).optional(),
+    primary: z
+      .boolean()
+      .optional()
+      .describe(
+        'When true, treat this custom agent as a primary orchestrator: SDK mode `primary` plus the orchestration tool and permission set. Built-in agents are unaffected.',
+      ),
     permission: PermissionConfigSchema.optional(), // tool-level permission rules enforced by the SDK
   })
   .strict();
