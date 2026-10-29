@@ -771,17 +771,7 @@ export class CompanionManager {
 
   onLoad(): void {
     if (this.config?.enabled !== true) {
-      CompanionManager.disposeActiveManagers(this.id);
-      try {
-        if (!existsSync(stateFilePath())) return;
-        writeState((state) => {
-          state.sessions = state.sessions.filter(
-            (s) => s.session_id !== this.id,
-          );
-        });
-      } catch (err) {
-        log('[companion] status update failed', String(err));
-      }
+      pruneDisabledCompanionSession(this.id);
       return;
     }
     this.restorePresetRequestFence();
@@ -835,7 +825,7 @@ export class CompanionManager {
     activeManagers.delete(this);
   }
 
-  private static disposeActiveManagers(sessionId?: string): void {
+  static disposeActiveManagers(sessionId?: string): void {
     for (const manager of [...activeManagers]) {
       if (sessionId && manager.id !== sessionId) continue;
       manager.onExit();
@@ -1208,5 +1198,22 @@ export class CompanionManager {
     } finally {
       releasePidFileLock?.();
     }
+  }
+}
+
+/**
+ * Disabled-companion startup cleanup: stop any manager this process still
+ * runs for the session (live config flip) and drop the session's stale
+ * entry from the shared state file. Never creates the state file.
+ */
+export function pruneDisabledCompanionSession(sessionId: string): void {
+  CompanionManager.disposeActiveManagers(sessionId);
+  try {
+    if (!existsSync(stateFilePath())) return;
+    writeState((state) => {
+      state.sessions = state.sessions.filter((s) => s.session_id !== sessionId);
+    });
+  } catch (err) {
+    log('[companion] status update failed', String(err));
   }
 }

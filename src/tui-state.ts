@@ -666,37 +666,54 @@ export async function withTuiSnapshotBatch<T>(
   });
 }
 
-function drainTuiSnapshotBatch(batch: TuiSnapshotBatch): void {
+/**
+ * Commit everything the open scope staged so far, keeping the scope open.
+ * Call before awaiting work that can emit another native event (a
+ * fallback re-prompt's busy status): that event commits in its own scope,
+ * and an older staged write must not land after it and overwrite it.
+ */
+export function flushTuiSnapshotBatch(): void {
+  const batch = tuiSnapshotBatch.getStore();
+  if (batch?.open) commitTuiSnapshotBatch(batch);
+}
+
+function commitTuiSnapshotBatch(batch: TuiSnapshotBatch): void {
   // Run the deferred projections while the scope is still open: each
   // publishes by staging, so every section lands in the same per-project
   // update below — one physical write including the recorder updates.
+  const projections = [...batch.projections.values()];
+  batch.projections.clear();
+  for (const project of projections) {
+    try {
+      project();
+    } catch {
+      // Best-effort: one projection must not prevent other commits.
+    }
+  }
+  const mutations = [...batch.mutations];
+  batch.mutations.clear();
+  for (const [projectDir, pending] of mutations) {
+    let applied = false;
+    try {
+      applied = updateSnapshot(projectDir, (snapshot) => {
+        for (const { mutator } of pending) mutator(snapshot);
+      });
+    } catch {
+      // A failed projection is not a committed ownership update.
+    }
+    for (const { onCommit } of pending) {
+      try {
+        onCommit?.(applied);
+      } catch {
+        // Isolate each best-effort observer from the remaining commits.
+      }
+    }
+  }
+}
+
+function drainTuiSnapshotBatch(batch: TuiSnapshotBatch): void {
   try {
-    const projections = [...batch.projections.values()];
-    batch.projections.clear();
-    for (const project of projections) {
-      try {
-        project();
-      } catch {
-        // Best-effort: one projection must not prevent other commits.
-      }
-    }
-    for (const [projectDir, pending] of batch.mutations) {
-      let applied = false;
-      try {
-        applied = updateSnapshot(projectDir, (snapshot) => {
-          for (const { mutator } of pending) mutator(snapshot);
-        });
-      } catch {
-        // A failed projection is not a committed ownership update.
-      }
-      for (const { onCommit } of pending) {
-        try {
-          onCommit?.(applied);
-        } catch {
-          // Isolate each best-effort observer from the remaining commits.
-        }
-      }
-    }
+    commitTuiSnapshotBatch(batch);
   } finally {
     batch.open = false;
     batch.projections.clear();

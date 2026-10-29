@@ -7,11 +7,15 @@ import {
   spyOn,
   test,
 } from 'bun:test';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { CompanionManager, stateFilePath } from './companion/manager';
+import {
+  CompanionManager,
+  companionSessionIdForDirectory,
+  stateFilePath,
+} from './companion/manager';
 import * as hookFactories from './hooks';
 import * as handoffFactories from './hooks/task-session-manager/fallback-observation-transfer';
 import { OhMyOpenCodeLite as plugin } from './index';
@@ -184,6 +188,42 @@ describe('plugin feature gates through exported hooks', () => {
     }
   });
 
+  test('v2 fallback disabled at startup can still be enabled live', async () => {
+    await configure({
+      backgroundJobs: { enabled: false },
+      fallback: { enabled: false, maxRetries: 0 },
+      agents: {
+        orchestrator: { model: ['openai/gpt-b', 'openai/gpt-c'] },
+      },
+    });
+    let hooks: PluginHooks | undefined;
+    try {
+      hooks = await createHooks('v2');
+      const sessionID = 'ses_live_enabled_retry';
+      // A live config refresh pins the refreshed bundle with fallback on.
+      hooks['v2.pinSessionChains']?.(
+        sessionID,
+        { orchestrator: ['openai/gpt-b', 'openai/gpt-c'] },
+        true,
+      );
+      const switchModel = mock(async () => ({}));
+      const retry = {
+        sessionID,
+        agent: 'orchestrator',
+        model: { providerID: 'openai', id: 'gpt-b' },
+        error: { message: 'Rate limit exceeded' },
+        decision: { retry: true, delay: 2_000 },
+      };
+      await hooks['v2.session.retry']?.(retry as never, switchModel as never);
+      expect(switchModel).toHaveBeenCalledWith(sessionID, {
+        providerID: 'openai',
+        id: 'gpt-c',
+      });
+    } finally {
+      await hooks?.dispose?.();
+    }
+  });
+
   test('v1 interview disabled keeps request transforms inert', async () => {
     await configure({
       backgroundJobs: { enabled: false },
@@ -275,6 +315,34 @@ describe('plugin feature gates through exported hooks', () => {
     } finally {
       await hooks?.dispose?.();
       onLoadSpy.mockRestore();
+    }
+  });
+
+  test('companion cold gate: disabled companion still prunes its stale session', async () => {
+    await configure({});
+    const ownID = companionSessionIdForDirectory(projectDir);
+    const file = stateFilePath();
+    await Bun.write(
+      file,
+      JSON.stringify({
+        version: 1,
+        sessions: [
+          { session_id: ownID, pid: process.pid },
+          { session_id: 'other-session', pid: process.pid },
+        ],
+      }),
+    );
+    let hooks: PluginHooks | undefined;
+    try {
+      hooks = await createHooks('v2');
+      const state = JSON.parse(readFileSync(file, 'utf8')) as {
+        sessions: Array<{ session_id: string }>;
+      };
+      expect(state.sessions.map((s) => s.session_id)).toEqual([
+        'other-session',
+      ]);
+    } finally {
+      await hooks?.dispose?.();
     }
   });
 

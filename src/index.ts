@@ -128,6 +128,7 @@ import {
   clearTuiAgentActivities,
   clearTuiSessionAlias,
   collectAgentDisplayNames,
+  flushTuiSnapshotBatch,
   readTuiSnapshot,
   recordTuiAgentActivity,
   recordTuiAgentModel,
@@ -1700,7 +1701,15 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     const fallbackUserEnabled =
       runtime.fallback.enabled !== false &&
       !runtime.disabledHooks.has('foreground-fallback');
-    fallbackRetryHookEnabled = fallbackUserEnabled;
+    // v2 can enable fallback per session through a live config refresh
+    // (pinned bundle `fallbackEnabled`), so keep the manager and its retry
+    // hook unless the hook itself is disabled; it stays cheap while every
+    // path is off (handleEvent early-returns).
+    const fallbackManagerNeeded =
+      fallbackUserEnabled ||
+      (hostFlavor === 'v2' &&
+        !runtime.disabledHooks.has('foreground-fallback'));
+    fallbackRetryHookEnabled = fallbackManagerNeeded;
     const fallbackEnabled = fallbackUserEnabled && hostFlavor !== 'v2';
     const v2RetryEnabled = fallbackUserEnabled;
     if (fallbackUserEnabled && hostFlavor === 'v2') {
@@ -1714,7 +1723,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // registry finalize and every successful profile refresh. The manager
     // aliases this record; see publishChainGeneration.
     foregroundFallbackChains = runtime.modelArrays;
-    foregroundFallback = fallbackUserEnabled
+    foregroundFallback = fallbackManagerNeeded
       ? new ForegroundFallbackManager(
           foregroundFallbackChains,
           fallbackEnabled,
@@ -1994,7 +2003,17 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     }
   }
 
-  companionManager?.onLoad();
+  if (companionManager) {
+    companionManager.onLoad();
+  } else {
+    // Disabled: no manager, but still prune this session's stale entry
+    // (and any manager a previous enabled load left running).
+    const { companionSessionIdForDirectory, pruneDisabledCompanionSession } =
+      await import('./companion/manager');
+    pruneDisabledCompanionSession(
+      companionSessionIdForDirectory(ctx.directory),
+    );
+  }
 
   function resolveTuiVariantForModel(
     agentName: string,
@@ -3083,6 +3102,11 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           }
         }
 
+        // Commit this event's status projection before the fallback can
+        // re-prompt: the re-prompt's busy event commits in its own scope,
+        // and a still-staged "inactive" must not land after it (#1697).
+        flushTuiSnapshotBatch();
+
         // Resolve identity before task error bookkeeping, but replay afterwards:
         // prompt admission may synchronously emit a busy event.
         await foregroundFallback?.preflightEvent(input.event);
@@ -3115,7 +3139,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           },
         );
 
-        // Runtime model fallback for foreground agents (rate-limit detection)
+        // Runtime model fallback for foreground agents (rate-limit detection).
+        // Same ordering rule as above: commit staged state before re-prompt.
+        flushTuiSnapshotBatch();
         await foregroundFallback?.handleEvent(input.event);
 
         // Handle auto-update checking; the checker only exists when its

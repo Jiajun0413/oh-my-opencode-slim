@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import {
   clearTuiAgentActivities,
   clearTuiSessionAlias,
+  flushTuiSnapshotBatch,
   getTuiStatePath,
   readTuiSnapshot,
   readTuiSnapshotAsync,
@@ -1264,6 +1265,36 @@ describe('withTuiSnapshotBatch (native event fan-out scope)', () => {
     const snapshot = readTuiSnapshot(tempDir);
     expect(snapshot.agentModels.explorer).toBe(LUNA.model);
     expect(snapshot.agentModels.builder).toBe('foreign-model');
+  });
+
+  test('a flushed status is not overwritten after a later scope commits', async () => {
+    // session.error stages "inactive", then awaits the fallback re-prompt
+    // whose busy event commits "active" in its own scope. Without the
+    // flush the outer scope's drain would land last and show it idle.
+    let releaseReprompt: () => void = () => {};
+    const reprompt = new Promise<void>((resolve) => {
+      releaseReprompt = resolve;
+    });
+    recordTuiAgentActivity(
+      { sessionID: 's1', agentName: 'oracle', active: true },
+      tempDir,
+    );
+    const errorEvent = withTuiSnapshotBatch(async () => {
+      recordTuiAgentActivity({ sessionID: 's1', active: false }, tempDir);
+      flushTuiSnapshotBatch();
+      await reprompt;
+    });
+    expect(readTuiSnapshot(tempDir).activeSessions.s1).toBeUndefined();
+    await withTuiSnapshotBatch(async () => {
+      recordTuiAgentActivity(
+        { sessionID: 's1', agentName: 'oracle', active: true },
+        tempDir,
+      );
+    });
+    releaseReprompt();
+    await errorEvent;
+
+    expect(readTuiSnapshot(tempDir).activeSessions.s1).toBe('oracle');
   });
 
   test('a continuation after the closed scope records immediately', async () => {
