@@ -231,7 +231,7 @@ export function createSessionPresets(options: {
   async function ensure(
     id: string,
     signal?: AbortSignal,
-    explicitModel = false,
+    explicitModel?: boolean,
   ) {
     check(signal);
     if (!available) return undefined;
@@ -245,7 +245,7 @@ export function createSessionPresets(options: {
         if (existing.parentID !== parentID)
           throw new Error('Session preset parent identity mismatch');
         if (
-          explicitModel &&
+          explicitModel === true &&
           (!existing.explicitModel || !existing.preserveModel)
         ) {
           return write(
@@ -253,6 +253,13 @@ export function createSessionPresets(options: {
             { ...existing, explicitModel: true, preserveModel: true },
             signal,
           );
+        }
+        if (
+          explicitModel === false &&
+          (existing.explicitModel || existing.preserveModel)
+        ) {
+          const { preserveModel: _preserve, ...rest } = existing;
+          return write(id, { ...rest, explicitModel: false }, signal);
         }
         return existing;
       }

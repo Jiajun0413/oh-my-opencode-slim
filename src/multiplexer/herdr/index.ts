@@ -10,6 +10,9 @@
  *
  * Environment detection: Herdr injects `HERDR_PANE_ID` into every pane it
  * manages; it is the client's anchor and is required for any pane command.
+ *
+ * Windows: the pane shell is PowerShell, so the viewer command position
+ * carries the call operator.
  */
 
 import type { MultiplexerLayout } from '../../config/schema';
@@ -21,6 +24,7 @@ import {
   findBinary,
   gracefulClosePane,
   normalizePathForShell,
+  type PaneShell,
   redactViewerSecretArgs,
 } from '../shared';
 import type { Multiplexer, PaneResult, PaneSpawnOptions } from '../types';
@@ -266,13 +270,16 @@ export class HerdrMultiplexer implements Multiplexer {
         stderr: 'ignore',
       }).exited;
 
-      // 3. Run opencode attach in the new pane
-      const opencodeCmd = buildViewCommand(
-        sessionId,
-        serverUrl,
-        attachDir,
-        options,
-      );
+      // 3. Run opencode attach in the new pane. `pane run` types the text into
+      //    the pane's own shell.
+      //    shortcut: a non-PowerShell `default_shell` is not covered, upgrade
+      //    when herdr exposes the pane's shell.
+      const shell: PaneShell =
+        process.platform === 'win32' ? 'powershell' : 'posix';
+      const opencodeCmd = buildViewCommand(sessionId, serverUrl, attachDir, {
+        ...options,
+        shell,
+      });
 
       const runProc = crossSpawn([herdr, 'pane', 'run', paneId, opencodeCmd], {
         stdout: 'pipe',

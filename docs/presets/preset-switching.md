@@ -20,19 +20,20 @@ the built-in `/models`, so it triggers no LLM turn.
 > argument.
 >
 > On v2 hosts, typing `/preset` + Enter opens the same three-level manager,
-> and the sidebar's preset row opens it on click. Applying a preset asks you
-> to choose **Current session** or **Global default**. `/preset <name>` keeps
-> its configuration-writing fast path: it changes the global default, not
-> the current session's binding.
+> and the sidebar's preset row opens it on click. Applying a preset from the
+> manager asks you to choose **Current session** or **Global default**.
+> `/preset <name>` is the fast path for the first choice: it binds the preset
+> to the session on screen, so it is equivalent to Manager → Current session
+> without the dialogs. It never writes the global default.
 >
 > Non-TUI clients (OpenChamber, SDK consumers, ACP hosts) get a server-side
-> `/preset <name>` command. No argument lists the available presets; a name
-> writes the global default (the same on-disk result as the TUI fast path); an
-> unknown name reports the valid options. It is apply-only — create, edit and
-> delete stay in the TUI manager — and the client reports the result without a
-> model turn, so the running session keeps its existing models and the change
-> applies on the next conversation or reload. Listing `preset` in
-> `disabled_commands` removes both the TUI entry and the server command.
+> `/preset <name>` command with the same meaning. No argument lists the
+> available presets; a name binds the invoking session; an unknown name reports
+> the valid options. It is apply-only — create, edit and delete stay in the TUI
+> manager — and the client reports the result without a model turn, so no turn
+> or context is spent and the binding applies to that session's next
+> delegation. Listing `preset` in `disabled_commands` removes both the TUI
+> entry and the server command.
 
 ## Reading the current team
 
@@ -57,7 +58,8 @@ the existing session creates later.
 | Action | What is saved | Who uses the change |
 |--------|---------------|---------------------|
 | Manager → Current session | The session's inference snapshot in OpenCode's plugin storage | New delegations from that session after the switch |
-| Manager → Global default, or `/preset <name>` | The selected preset in the user configuration | Sessions that first bind after the configuration refresh, subject to project and environment overrides |
+| `/preset <name>` (TUI fast path or server-side) | The same session snapshot, for the session the command runs in | New delegations from that session after the switch |
+| Manager → Global default | The selected preset in the user configuration | Sessions that first bind after the configuration refresh, subject to project and environment overrides |
 | Edit the user configuration's `preset` | The global default | Future bindings that inherit the global default |
 | Edit a project configuration's `preset` | That project's default | Future bindings in that project |
 | Edit a preset definition or its `extends` base; manager → Save | The shared preset definition | Future bindings, or a session that explicitly reapplies the preset |
@@ -65,7 +67,8 @@ the existing session creates later.
 **Manual configuration edits do not update existing session snapshots.**
 This includes edits to the same preset name. To use its updated definition in
 an existing work session, open `/preset`, select that preset, and apply it to
-**Current session**. Reloading OpenCode does not reset a saved binding.
+**Current session** — or run `/preset <name>` in that session. Reloading
+OpenCode does not reset a saved binding.
 
 **Save & Apply** asks for the application scope before saving the definition
 and applying it. A session-only application does not change the selected
@@ -109,9 +112,11 @@ plugin cannot reconstruct that child's original team after restart. It treats
 that child as unbound; it does not claim to recover its prior configuration.
 Unreadable or corrupt stored records are errors, not unbound-session fallbacks.
 
-Session isolation requires the host's plugin storage and session identity APIs.
-Reduced hosts without these APIs retain the previous execution behavior and
-cannot apply a session-only preset; they do not report a persistent binding.
+Session isolation uses the host's plugin storage and session identity APIs
+(`ctx.storage`, `ctx.session.get`). Both are required members of the v2 plugin
+contract, so every v2 host can apply a session-only preset; the runtime probe
+remains as a guard, and a host that genuinely omitted them fails the apply with
+explicit errors instead of silently writing the default.
 
 User and project configuration files are still watched, including `.json`
 and `.jsonc` candidates created after startup. A successful configuration

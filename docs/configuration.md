@@ -360,9 +360,10 @@ On v2, `/preset` opens a manager with two application scopes:
   without changing the configuration file's selected preset. It affects
   future delegations, not already-created children or the main session's
   native model selection.
-- **Global default** writes the user configuration. `/preset <name>` retains
-  this configuration-writing behavior. It affects sessions that first bind
-  after the refresh, subject to project and environment overrides.
+- **Global default** writes the user configuration. It affects sessions that
+  first bind after the refresh, subject to project and environment overrides.
+  `/preset <name>` does not touch it: the command applies the preset to the
+  session it runs in, like the manager's Current session action.
 
 Each work session binds its resolved inference settings before its first
 managed prompt. New children inherit their direct parent's snapshot,

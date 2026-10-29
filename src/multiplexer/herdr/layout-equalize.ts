@@ -20,6 +20,9 @@
  *
  * The socket protocol is one request per connection: write one
  * `{"id","method","params"}\n` line, read one line back, close.
+ *
+ * Windows: herdr binds its socket as the named pipe `\\.\pipe\<path>`, so the
+ * plain file path is not connectable there — `herdrSocketEndpoint` maps it.
  */
 
 import { createConnection } from 'node:net';
@@ -217,6 +220,17 @@ function describeHerdrError(error: unknown): string {
   return String(error);
 }
 
+/**
+ * The endpoint to connect to for a herdr socket path. On Windows herdr binds
+ * the named pipe `\\.\pipe\<path>`, so the plain file path refuses the
+ * connection; on POSIX the path is the socket itself.
+ */
+export function herdrSocketEndpoint(socketPath: string): string {
+  return process.platform === 'win32'
+    ? `\\\\.\\pipe\\${socketPath}`
+    : socketPath;
+}
+
 /** One request per socket connection; resolves with the response `result`. */
 function sendHerdrRequest(
   socketPath: string,
@@ -225,7 +239,7 @@ function sendHerdrRequest(
   timeoutMs: number,
 ): Promise<unknown> {
   return new Promise((resolve, reject) => {
-    const socket = createConnection(socketPath);
+    const socket = createConnection(herdrSocketEndpoint(socketPath));
     let buffer = '';
     let settled = false;
 

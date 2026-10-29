@@ -1298,6 +1298,24 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "BoysGameStudio",
+      "name": "Alan Liu",
+      "avatar_url": "https://avatars.githubusercontent.com/u/15364305?v=4",
+      "profile": "https://github.com/BoysGameStudio",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "niheaven",
+      "name": "Hsiao-nan Cheung",
+      "avatar_url": "https://avatars.githubusercontent.com/u/5832170?v=4",
+      "profile": "https://github.com/niheaven",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "commitConvention": "angular"

@@ -2810,7 +2810,15 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
               });
               return;
             }
-            draft.add(createPresetCommand(directory));
+            draft.add(
+              createPresetCommand({
+                directory,
+                applyToSession: (sessionID: string, presetName: string) =>
+                  sessionPresets.apply(sessionID, presetName),
+                readSessionPreset: (sessionID: string) =>
+                  sessionPresets.readState(sessionID),
+              }),
+            );
           });
           disposers.push(() => reg.dispose());
         }
@@ -3075,8 +3083,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
             const binding = await sessionPresets.ensure(event.sessionID);
             // A resumed, already-profiled child may acquire an explicit
             // per-call model. Re-pin its execution policy on every admission.
-            if (binding?.parentID && binding.explicitModel)
-              pinBoundSessionChains(event.sessionID);
+            if (binding?.parentID) pinBoundSessionChains(event.sessionID);
             await sessionProfileBridge.ensureSessionProfile(event.sessionID);
             await bridge.handlePrompt(event);
           });

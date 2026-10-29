@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { EqualizeAgentPanesOptions } from './layout-equalize';
 
 type SpawnResult = {
@@ -59,6 +62,46 @@ function commands(): string[][] {
   return crossSpawnMock.mock.calls.map((call) => call[0] as string[]);
 }
 
+const originalPlatform = process.platform;
+
+async function spawnRunCommand(platform: NodeJS.Platform): Promise<string> {
+  Object.defineProperty(process, 'platform', {
+    value: platform,
+    configurable: true,
+  });
+  // A faked win32 platform makes findBinary probe `where`; answer it too.
+  crossSpawnMock.mockImplementation((command: string[]) => {
+    if (command[0] === 'which' || command[0] === 'where') {
+      return createSpawnResult(0, '/usr/bin/herdr\n');
+    }
+    if (command.includes('split')) {
+      return createSpawnResult(0, `${createSplitResponse('w1:p2')}\n`);
+    }
+    return createSpawnResult();
+  });
+  const { HerdrMultiplexer } = await importFreshHerdr();
+  const dir = mkdtempSync(join(tmpdir(), 'omos-pane-'));
+  const bin = join(dir, 'opencode.exe');
+  writeFileSync(bin, '');
+  const originalBin = process.env.OPENCODE_BIN;
+  process.env.OPENCODE_BIN = bin;
+  try {
+    const herdr = new HerdrMultiplexer('main-vertical', 60);
+    await herdr.spawnPane(
+      'session-1',
+      'Herdr worker',
+      'http://localhost:4096',
+      '/repo',
+    );
+    const run = commands().find((command) => command.includes('run'));
+    return run?.at(-1) ?? '';
+  } finally {
+    if (originalBin === undefined) delete process.env.OPENCODE_BIN;
+    else process.env.OPENCODE_BIN = originalBin;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 function createEqualizer() {
   return mock(
     async (_opts: EqualizeAgentPanesOptions): Promise<boolean> => true,
@@ -93,6 +136,7 @@ describe('HerdrMultiplexer', () => {
   });
 
   afterEach(() => {
+    Object.defineProperty(process, 'platform', { value: originalPlatform });
     process.env.HERDR_ENV = originalHerdrEnv;
     process.env.HERDR_PANE_ID = originalHerdrPaneId;
     if (originalHerdrBinPath === undefined) {
@@ -203,6 +247,14 @@ describe('HerdrMultiplexer', () => {
       'w1:p2',
       "opencode attach 'http://localhost:4096' --session 'session-1' --dir '/repo'",
     ]);
+  });
+
+  test('a Windows pane gets PowerShell command-position quoting', async () => {
+    expect(await spawnRunCommand('win32')).toStartWith("& '");
+  });
+
+  test('a POSIX pane keeps the POSIX command-position quoting', async () => {
+    expect(await spawnRunCommand('linux')).toStartWith("'");
   });
 
   test('pane split carries the v2 remote secret; pane run never does', async () => {
