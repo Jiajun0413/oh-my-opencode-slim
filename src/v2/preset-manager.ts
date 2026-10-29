@@ -214,8 +214,10 @@ export interface V2PresetRpcCallOptions {
   readonly signal?: AbortSignal;
 }
 
-/** Only the server owns session bindings. Never infer them from local config. */
-function sessionPresetClient(ctx: V2PresetManagerContext) {
+/** Only the server owns session bindings. Never infer them from local config.
+ * Exported for the `/preset <name>` fast path, which binds the visible
+ * session without the manager UI. */
+export function sessionPresetClient(ctx: V2PresetManagerContext) {
   const client = ctx.client as
     | {
         rpc?: (contract: typeof sessionPresetRpc) => {
