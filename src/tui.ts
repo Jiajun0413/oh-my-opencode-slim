@@ -917,6 +917,10 @@ interface AgentRowTheme {
   accent: unknown;
   text: unknown;
   textMuted: unknown;
+  agentColors?: readonly unknown[];
+  primary?: unknown;
+  secondary?: unknown;
+  info?: unknown;
   background?: unknown;
   backgroundElement?: unknown;
   success?: unknown;
@@ -926,6 +930,22 @@ interface AgentRowTheme {
 
 const STATUS_ACTIVE_COLOR = '#22c55e';
 const STATUS_RETRY_COLOR = '#f59e0b';
+
+function agentColor(agentName: string, theme: AgentRowTheme): unknown {
+  const categorical = theme.agentColors?.filter((color) => color !== undefined);
+  const palette = categorical?.length
+    ? categorical
+    : [theme.primary, theme.secondary, theme.accent, theme.info].filter(
+        (color) => color !== undefined,
+      );
+  if (palette.length === 0) return theme.textMuted;
+
+  let hash = 0;
+  for (let index = 0; index < agentName.length; index += 1) {
+    hash = (hash * 31 + agentName.charCodeAt(index)) >>> 0;
+  }
+  return palette[hash % palette.length];
+}
 
 function hasPrimarySelection(hasSelectedText?: () => boolean): boolean {
   try {
@@ -1122,6 +1142,7 @@ function statusDot(
 
 interface AgentRowOptions {
   label: string;
+  agentName: string;
   model: string;
   modelName?: string;
   variant?: string;
@@ -1138,6 +1159,7 @@ interface AgentRowOptions {
 }
 
 function agentHeaderCells({
+  agentName,
   label,
   active,
   now,
@@ -1147,11 +1169,12 @@ function agentHeaderCells({
   annotation,
   hasHistory,
 }: AgentRowOptions): JSX.Element[] {
+  const color = agentColor(agentName, theme);
   return [
     statusDot(active, hasHistory, now, theme),
     text(
       {
-        fg: theme.textMuted,
+        fg: color,
         wrapMode: 'none',
         truncate: true,
         flexShrink: 1,
@@ -1269,7 +1292,7 @@ function compactAgentRow(options: AgentRowOptions): JSX.Element {
       box({ flexDirection: 'row', flexGrow: 1, shouldFill: false }),
       text(
         {
-          fg: theme.textMuted,
+          fg: agentColor(options.agentName, theme),
           wrapMode: 'none',
           truncate: true,
           flexShrink: 1,
@@ -1429,6 +1452,10 @@ export function renderSidebar(
     success?: unknown;
     warning?: unknown;
     hover?: unknown;
+    agentColors?: readonly unknown[];
+    primary?: unknown;
+    secondary?: unknown;
+    info?: unknown;
   },
   configInvalid: boolean,
   compactSidebar: boolean,
@@ -1439,11 +1466,16 @@ export function renderSidebar(
   modelNames?: ReadonlyMap<string, string>,
 ): JSX.Element {
   const configStatusRow = buildConfigStatusRow(configInvalid, theme);
+  const presetHoverBackground = resolveHoverBackground({
+    background: theme.background,
+    text: theme.text,
+    hover: theme.hover,
+  });
   const presetRowEl = presetRow
     ? buildPresetRow(
         presetRow,
         theme,
-        resolveHoverBackground(theme),
+        presetHoverBackground,
         interaction?.hasSelectedText,
       )
     : null;
@@ -1473,7 +1505,7 @@ export function renderSidebar(
     },
     [
       box({ flexDirection: 'row', alignItems: 'center' }, [
-        text({ fg: theme.textMuted, width: 2 }, [sidebarOpen ? '▼ ' : '▶ ']),
+        text({ fg: theme.text, width: 2 }, [sidebarOpen ? '▼ ' : '▶ ']),
         box({ paddingRight: 1, backgroundColor: theme.accent }, [
           text(
             {
@@ -1569,6 +1601,7 @@ export function renderSidebar(
               // agent ID so models, activity, expansion and history keep
               // resolving.
               label: snapshot.agentDisplayNames?.[agentName] || agentName,
+              agentName,
               model,
               modelName: modelNames?.get(model),
               variant,
@@ -1636,7 +1669,7 @@ function resolveMultiplexerType(value: unknown): MultiplexerType {
  * (same hover/click decoration); without one it is a muted, informational
  * line — capability detection happens in the v2 setup, never here.
  */
-function buildPresetRow(
+export function buildPresetRow(
   presetRow: SidebarPresetRow,
   theme: { text: unknown; textMuted: unknown },
   hoverBackground: unknown,
@@ -1684,6 +1717,10 @@ function buildPresetRow(
         ]);
   if (!clickable) return content;
   return decorateInteractiveRow(content, {
+    // Sidebar rows sit on backgroundElement, so using that color as the
+    // hover fill leaves this row visually unchanged. Use the normal hover
+    // color when the host provides one, otherwise derive a visible fill from
+    // the page background and text colors.
     hoverBackground,
     onActivate: presetRow.onActivate,
     hasSelectedText,
@@ -1809,10 +1846,28 @@ export function resolveSidebarSlotOrder(
 // declared locally because the pinned @opencode-ai/plugin dep ships v1
 // types only.
 interface V2TuiThemeTokens {
-  text: { default: unknown; subdued: unknown };
-  background: { default: unknown };
-  border: { default: unknown };
-  /** Optional semantic tokens; v2 hosts may omit them. */
+  categorical?: readonly Record<
+    100 | 200 | 300 | 400 | 500 | 600 | 700 | 800 | 900,
+    unknown
+  >[];
+  hue?: {
+    interactive: Record<
+      100 | 200 | 300 | 400 | 500 | 600 | 700 | 800 | 900,
+      unknown
+    >;
+  };
+  text: {
+    base?: unknown;
+    muted?: unknown;
+    default?: unknown;
+    subdued?: unknown;
+    feedback?: {
+      success?: { base: unknown };
+      warning?: { base: unknown };
+    };
+  };
+  background: { base?: unknown; default?: unknown; raised?: { base: unknown } };
+  border: { base?: unknown; default?: unknown };
   success?: unknown;
   warning?: unknown;
 }
@@ -1857,22 +1912,29 @@ interface V2TuiContext extends V2PresetManagerContext {
 
 /** Map v2 theme tokens onto the flat shape `renderSidebar` consumes (v2 has no `accent` token). */
 function v2ThemeView(theme: V2TuiThemeTokens): {
-  accent: undefined;
+  accent: unknown;
   background: unknown;
+  backgroundElement: unknown;
   borderActive: unknown;
   text: unknown;
   textMuted: unknown;
   success?: unknown;
   warning?: unknown;
+  agentColors: readonly unknown[];
 } {
   return {
-    accent: undefined,
-    background: theme.background.default,
-    borderActive: theme.border.default,
-    text: theme.text.default,
-    textMuted: theme.text.subdued,
-    ...(theme.success !== undefined ? { success: theme.success } : {}),
-    ...(theme.warning !== undefined ? { warning: theme.warning } : {}),
+    accent: theme.hue?.interactive[200],
+    background: theme.background.base ?? theme.background.default,
+    backgroundElement:
+      theme.background.raised?.base ??
+      theme.background.base ??
+      theme.background.default,
+    borderActive: theme.border.base ?? theme.border.default,
+    text: theme.text.base ?? theme.text.default,
+    textMuted: theme.text.muted ?? theme.text.subdued,
+    success: theme.text.feedback?.success?.base ?? theme.success,
+    warning: theme.text.feedback?.warning?.base ?? theme.warning,
+    agentColors: theme.categorical?.map((scale) => scale[500]) ?? [],
   };
 }
 

@@ -9,6 +9,7 @@ import sidebarFrameGolden from './sidebar-frame-golden.json';
 import type { ModelNamesCache } from './tui';
 import {
   applyRemoteAgentModels,
+  buildPresetRow,
   compareAliasNumeric,
   createSerializedRefresh,
   createSidebarInteraction,
@@ -2275,6 +2276,16 @@ describe('clickable sidebar sessions', () => {
           .captureCharFrame()
           .split('\n')
           .find((line) => line.includes('OMO-Slim')) ?? '';
+      const openHeaderIndex = setup
+        .captureCharFrame()
+        .split('\n')
+        .findIndex((line) => line.includes('OMO-Slim'));
+      expect(
+        setup
+          .captureSpans()
+          .lines[openHeaderIndex]?.spans.find((span) => span.text.includes('▼'))
+          ?.fg.toInts(),
+      ).toEqual([255, 255, 255, 255]);
       expect(openHeader.indexOf('▼')).toBeGreaterThanOrEqual(0);
       expect(openHeader.indexOf('▼')).toBeLessThan(
         openHeader.indexOf('OMO-Slim'),
@@ -2324,6 +2335,59 @@ describe('clickable sidebar sessions', () => {
       for (const dispose of mounted?.disposers ?? []) dispose();
       restoreDataHome();
       fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('preset snapshot row shows hover contrast, restores it, and activates', async () => {
+    let activations = 0;
+    const hover = resolveHoverBackground({
+      background: '#111111',
+      text: '#ffffff',
+    });
+    const setup = await testRender(
+      () =>
+        buildPresetRow(
+          {
+            name: 'custom',
+            sessionLabel: 'team',
+            onActivate: () => activations++,
+          },
+          { text: '#ffffff', textMuted: '#aaaaaa' },
+          hover,
+        ),
+      { width: 48, height: 6 },
+    );
+
+    try {
+      await setup.renderOnce();
+      const frame = () => setup.captureCharFrame().split('\n');
+      const line = frame().findIndex((row) => row.includes('Default'));
+      const snapshotLine = frame().findIndex((row) =>
+        row.includes('Session team snapshot: team'),
+      );
+      expect(line).toBeGreaterThanOrEqual(0);
+      expect(snapshotLine).toBeGreaterThan(line);
+      const backgrounds = (row: number) =>
+        setup.captureSpans().lines[row]?.spans.map((span) => span.bg.toInts());
+      const before = backgrounds(line);
+      const snapshotBefore = backgrounds(snapshotLine);
+      expect(before?.length).toBeGreaterThan(0);
+
+      const col = frame()[line]?.indexOf('custom') ?? -1;
+      await setup.mockMouse.moveTo(col + 1, line);
+      await setup.renderOnce();
+      const hovered = backgrounds(line);
+      expect(hovered).not.toEqual(before);
+      expect(backgrounds(snapshotLine)).not.toEqual(snapshotBefore);
+
+      await setup.mockMouse.moveTo(0, 5);
+      await setup.renderOnce();
+      expect(backgrounds(line)).toEqual(before);
+      expect(backgrounds(snapshotLine)).toEqual(snapshotBefore);
+      await setup.mockMouse.click(col + 1, line);
+      expect(activations).toBe(1);
+    } finally {
+      setup.renderer.destroy();
     }
   });
 
