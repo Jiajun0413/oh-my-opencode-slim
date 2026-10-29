@@ -2704,13 +2704,13 @@ describe('isFailoverError', () => {
 });
 
 // hasDeterministic4xx status-code boundary (issue #1710): pins when a 4xx
-// is deterministic (permanent, no failover) vs transient. Probe message
+// is deterministic (reproduces on every replay) vs transient. Probe message
 // 'upstream error overload' matches only the transient path (no digits for
 // DETERMINISTIC_4XX_PATTERN, no provider pattern; keep it that way), so
 // the statusCode clauses decide; 400/499 also sit outside
-// PROVIDER_STATUS_CODES. 429/500 rows would be vacuous (re-admitted by
-// PROVIDER_STATUS_CODES regardless), so mutants differing only at those
-// inputs (e.g. `<= 500`, `!== 429` -> true) are equivalent, left unpinned.
+// PROVIDER_STATUS_CODES. No 429/500 rows: those inputs fail over through
+// other paths whatever the clauses say (transient wording, or
+// PROVIDER_STATUS_CODES once a clause flips) — nothing observable there.
 
 describe('hasDeterministic4xx status-code boundary (issue #1710)', () => {
   const transientText = 'upstream error overload';
