@@ -110,7 +110,6 @@ describe('plugin feature gates through exported hooks', () => {
         hooks = await createHooks(flavor);
         for (const name of [
           'task_status',
-          'task_message',
           'task_reply',
           'task_cancel',
           'task_revive',

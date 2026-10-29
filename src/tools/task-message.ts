@@ -13,14 +13,7 @@ import { isRecord } from '../utils/guards';
 import { getClient } from '../utils/opencode-client';
 import { OperationTimeoutError, withTimeout } from '../utils/session';
 import {
-  type DelegationWording,
-  delegationWording,
-  V2_RESUME_CALL,
-  v2ResumeCall,
-} from '../v2/delegation';
-import {
   type CanonicalTaskResolver,
-  idParamFor,
   readTaskRef,
   recentTaskHandles,
   resolveTaskRecord,
@@ -51,34 +44,26 @@ export function createTaskMessageTool(options: {
   resolveCanonicalTaskRef?: CanonicalTaskResolver;
   isDisposed?: () => boolean;
 }): Record<'task_message', ToolDefinition> {
-  const idParam = idParamFor(options.input);
-  const hostFlavorAtCreation = (options.input as { hostFlavor?: string })
-    .hostFlavor;
   const task_message = tool({
     description:
       'Queue a bounded message for a live child task without launching, resuming, or interrupting it.',
     args: {
-      ...taskRefArgs(idParam),
+      ...taskRefArgs('task_id'),
       message: z
         .string()
         .trim()
         .min(1)
         .max(MAX_MESSAGE_LENGTH)
         .describe(
-          hostFlavorAtCreation === 'v2'
-            ? `Bounded message (max ${MAX_MESSAGE_LENGTH} chars) for the child task; for longer handoffs, continue the session with ${V2_RESUME_CALL} once it settles`
-            : `Bounded message (max ${MAX_MESSAGE_LENGTH} chars) for the child task; for longer handoffs, continue the session with task_revive once it settles`,
+          `Bounded message (max ${MAX_MESSAGE_LENGTH} chars) for the child task; for longer handoffs, continue the session with task_revive once it settles`,
         ),
     },
     async execute(args, toolContext) {
       const parentSessionID = toolContext?.sessionID;
       if (!parentSessionID) throw new Error('task_message requires sessionID');
 
-      const hostFlavor = (options.input as { hostFlavor?: string }).hostFlavor;
-      const delegation = delegationWording(hostFlavor);
-
-      const requested = readTaskRef(args, idParam);
-      if (!requested) throw new Error(`task_message requires ${idParam}`);
+      const requested = readTaskRef(args, 'task_id');
+      if (!requested) throw new Error('task_message requires task_id');
       const ref = await resolveTaskRecord(options, parentSessionID, requested);
       if (ref.kind === 'disposed') throw new Error(pluginDisposedMessage());
       if (ref.kind === 'refused')
@@ -102,9 +87,8 @@ export function createTaskMessageTool(options: {
       if (!job) {
         throw unknownTaskRefError(
           identity,
-          delegation.resumeParam,
+          'task_id',
           recentTaskHandles(options.backgroundJobBoard, parentSessionID),
-          hostFlavor,
         );
       }
 
@@ -113,7 +97,6 @@ export function createTaskMessageTool(options: {
         parentSessionID,
         job.taskID,
         job.generation,
-        delegation,
       );
 
       const lease = options.backgroundJobBoard.acquireLease(
@@ -137,7 +120,6 @@ export function createTaskMessageTool(options: {
             parentSessionID,
             lease.taskID,
             lease.generation,
-            delegation,
           );
         };
         assertCurrentMessage();
@@ -149,32 +131,29 @@ export function createTaskMessageTool(options: {
           options.messageTimeoutMs ?? DEFAULT_MESSAGE_TIMEOUT_MS,
         );
         const deadline = Date.now() + messageTimeoutMs;
+        const lookupController = new AbortController();
         let modelSelection: ContinuationModelSelection | undefined;
-        // v2 prompts inherit persisted session selection; per-call overrides
-        // cannot be represented atomically. Keep the v1 lookup/pin unchanged.
-        if (hostFlavor !== 'v2') {
-          const lookupController = new AbortController();
-          try {
-            modelSelection = await withTimeout(
-              readCurrentChildModel(
-                session,
-                lease.taskID,
-                options.input.directory,
-                lookupController.signal,
-              ),
-              messageTimeoutMs,
-              `Task message model lookup timed out after ${messageTimeoutMs}ms`,
-            );
-          } finally {
-            lookupController.abort();
-          }
-          if (options.isDisposed?.()) throw new Error(pluginDisposedMessage());
-          if (!modelSelection) {
-            throw new Error(
-              `Task ${requested} has no authoritative model identity; refusing message`,
-            );
-          }
+        try {
+          modelSelection = await withTimeout(
+            readCurrentChildModel(
+              session,
+              lease.taskID,
+              options.input.directory,
+              lookupController.signal,
+            ),
+            messageTimeoutMs,
+            `Task message model lookup timed out after ${messageTimeoutMs}ms`,
+          );
+        } finally {
+          lookupController.abort();
         }
+        if (options.isDisposed?.()) throw new Error(pluginDisposedMessage());
+        if (!modelSelection) {
+          throw new Error(
+            `Task ${requested} has no authoritative model identity; refusing message`,
+          );
+        }
+        const selection = modelSelection;
 
         const remainingTimeoutMs = deadline - Date.now();
         if (remainingTimeoutMs <= 0) {
@@ -183,55 +162,71 @@ export function createTaskMessageTool(options: {
           );
         }
 
-        const response = await awaitMessageTransport(
+        // The v1 host assigns the admission id: its ids are `msg_` + an
+        // ascending hex timestamp, and the run loop orders turns by id
+        // string, so a plugin-chosen id would sort after every host id and
+        // stay the "latest user" forever. With noReply the host returns the
+        // stored user message, whose id becomes this generation's amendment
+        // boundary.
+        // Commit runs INSIDE the transport operation so a late success (host
+        // accepts after our deadline) still stamps its boundary; the tool's
+        // return stays a timeout rejection (no retry, no duplicate prompt).
+        const commitAccepted = (
+          terminalRevision: number,
+          messageID: string | undefined,
+        ): boolean => {
+          if (messageID === undefined) return false;
+          if (options.isDisposed?.() === true) return false;
+          const latest = options.backgroundJobBoard.get(lease.taskID);
+          return (
+            latest !== undefined &&
+            latest.parentSessionID === parentSessionID &&
+            options.backgroundJobBoard.noteRunAmendment(
+              lease.taskID,
+              lease.generation,
+              messageID,
+              terminalRevision,
+            )
+          );
+        };
+        const deposit = await awaitMessageTransport(
           options.backgroundJobBoard,
           lease,
-          () => {
+          async () => {
+            // Capture the run the prompt ACTUALLY enters from the validated
+            // current job immediately before session.prompt; there is no
+            // await between this capture and the dispatch below, so a reopen
+            // during the model lookup is either picked up here (the real
+            // live run) or refuses before anything is sent.
             const currentJob = assertCurrentMessage();
-            const expectedAgent = currentJob.agent;
+            const terminalRevision = currentJob.terminalRevision;
             const body = {
-              agent: expectedAgent,
-              ...(modelSelection
-                ? {
-                    model: modelSelection.model,
-                    variant: modelSelection.variant ?? 'default',
-                  }
-                : {}),
+              agent: currentJob.agent,
+              model: selection.model,
+              variant: selection.variant ?? 'default',
               noReply: true,
               parts: [{ type: 'text', text: args.message.trim() }],
             } as Parameters<typeof prompt>[0]['body'];
-            return prompt({
+            const response = await prompt({
               path: { id: lease.taskID },
               body,
               throwOnError: true,
-              ...(hostFlavor === 'v2'
-                ? {
-                    // The shim awaits owning-agent validation. Recheck the
-                    // same authorization at its final, synchronous admission
-                    // boundary rather than after the host has already queued.
-                    beforeSend: () => {
-                      if (assertCurrentMessage().agent !== expectedAgent) {
-                        throw new Error(
-                          `Task ${requested} agent changed while preparing its message; refusing stale message`,
-                        );
-                      }
-                    },
-                  }
-                : {}),
             });
+            assertSuccessfulMessageResponse(response);
+            assertMessageLease(options.backgroundJobBoard, lease, requested);
+            return {
+              committed: commitAccepted(
+                terminalRevision,
+                hostAdmittedMessageID(response),
+              ),
+            };
           },
           remainingTimeoutMs,
         );
-        assertMessageLease(options.backgroundJobBoard, lease, requested);
-        assertSuccessfulMessageResponse(response);
-
-        const latestJob = getCurrentTaskMessageJob(
-          options.backgroundJobBoard,
-          parentSessionID,
-          lease.taskID,
-          lease.generation,
-          delegation,
-        );
+        const latestJob = options.backgroundJobBoard.get(lease.taskID);
+        if (!deposit.committed || !latestJob) {
+          return `Message accepted for ${lease.taskID}; no amendment boundary was recorded.`;
+        }
         return `Message queued for ${latestJob.alias} (${latestJob.taskID}) without launching or resuming it.`;
       } catch (error) {
         keepLeaseUntilSettled =
@@ -305,6 +300,14 @@ function assertSuccessfulMessageResponse(response: unknown): void {
   );
 }
 
+/** The id of the user message the v1 host stored for a noReply prompt. */
+function hostAdmittedMessageID(response: unknown): string | undefined {
+  if (!isRecord(response) || !isRecord(response.data)) return undefined;
+  const info = response.data.info;
+  if (!isRecord(info) || typeof info.id !== 'string') return undefined;
+  return info.id.length > 0 ? info.id : undefined;
+}
+
 function errorText(error: unknown): string {
   if (error instanceof Error) return error.message;
   if (typeof error === 'string') return error;
@@ -373,7 +376,6 @@ function getCurrentTaskMessageJob(
   parentSessionID: string,
   expectedTaskID: string,
   expectedGeneration: number,
-  delegation: DelegationWording,
 ): NonNullable<ReturnType<BackgroundJobBoard['get']>> {
   const current = backgroundJobBoard.get(expectedTaskID);
   if (!current || current.parentSessionID !== parentSessionID) {
@@ -394,11 +396,7 @@ function getCurrentTaskMessageJob(
   if (current.state !== 'running') {
     if (current.state === 'stopped') {
       throw new Error(
-        `Task ${expectedTaskID} stopped without a terminal result. task_message only queues messages for running tasks and does not continue it. ${
-          delegation.tool === 'subagent'
-            ? `Continue the retained session with ${v2ResumeCall(expectedTaskID)}.`
-            : `Use task_revive with ${delegation.resumeParam}: "${expectedTaskID}" to continue the retained session.`
-        }`,
+        `Task ${expectedTaskID} stopped without a terminal result. task_message only queues messages for running tasks and does not continue it. Use task_revive with task_id: "${expectedTaskID}" to continue the retained session.`,
       );
     }
     const terminalState =
@@ -407,11 +405,7 @@ function getCurrentTaskMessageJob(
         : current.state;
     if (['completed', 'error', 'cancelled'].includes(terminalState)) {
       throw new Error(
-        `Task ${expectedTaskID} is terminal (${terminalState}). task_message only queues messages for running tasks and does not continue it. ${
-          delegation.tool === 'subagent'
-            ? `Continue that same session with ${v2ResumeCall(expectedTaskID)}.`
-            : `Continue that same session with task_revive and ${delegation.resumeParam}: "${expectedTaskID}".`
-        }`,
+        `Task ${expectedTaskID} is terminal (${terminalState}). task_message only queues messages for running tasks and does not continue it. Continue that same session with task_revive and task_id: "${expectedTaskID}".`,
       );
     }
     throw new Error(

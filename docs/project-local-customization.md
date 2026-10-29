@@ -72,8 +72,9 @@ The root `agents.*` configuration (defined at the top level of user or project c
 
 On v2, `/preset` → **Current session** resolves the selected preset through the
 same merge — root `agents.*` entries still take precedence — and saves those
-resolved settings for future delegations in that session. **Global default**, or
-`/preset <name>`, changes the default for future session bindings instead.
+resolved settings for future delegations in that session. `/preset <name>` does
+the same for the session on screen; **Global default** (or editing `preset` in
+configuration) changes the default for future session bindings instead.
 
 ---
 
@@ -262,10 +263,10 @@ This applies to **every** prompt you supply:
 A prompt that hard-codes delegation calls is therefore **not portable** between
 v1 and v2 — keep a host-specific version for each.
 
-The control-tool names (`task_status`, `task_message`,
-`task_reply`, `task_revive`, `task_cancel`) are identical on both hosts. On v2
+The control-tool names (`task_status`,
+`task_reply`, `task_cancel`) are identical on both hosts. On v2
 they take `sessionID` and also accept `task_id` as a deprecated alias (never
-emitted).
+emitted). `task_revive` and `task_message` are v1-only.
 
 ---
 

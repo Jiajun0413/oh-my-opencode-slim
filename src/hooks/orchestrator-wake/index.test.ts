@@ -2109,7 +2109,7 @@ describe('orchestrator wake scheduler', () => {
     expect(promptAsync).toHaveBeenCalledTimes(2);
     expect(getWakeProgress('p1').stopped).toBe(true);
 
-    // task_message-style noReply nudge with an operator-looking text part.
+    // A noReply nudge with an operator-looking text part.
     scheduler.observeChatMessage(
       { sessionID: 'p1', messageID: 'nudge-1', noReply: true },
       {

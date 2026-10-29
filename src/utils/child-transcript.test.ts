@@ -35,6 +35,130 @@ describe('diagnostic excerpts', () => {
     expect(result.truncated).toBe('none');
   });
 
+  test('an anchored run can excerpt without assistant creation timestamps', () => {
+    const result = diagnosticExcerptOf(
+      {
+        data: [
+          { info: { id: 'msg_input', role: 'user' }, parts: [] },
+          {
+            info: { role: 'assistant' },
+            parts: [{ type: 'text', text: 'anchored partial evidence' }],
+          },
+        ],
+      },
+      { inputMessageID: 'msg_input', runStartedAt: 100 },
+    );
+    expect(result).toHaveProperty('text', 'anchored partial evidence');
+  });
+
+  test('a late-registered anchored run keeps output that predates its registration', () => {
+    const transcript = {
+      data: [
+        {
+          info: { id: 'msg_input', role: 'user', time: { created: 10 } },
+          parts: [],
+        },
+        {
+          info: { role: 'assistant', time: { created: 20 } },
+          parts: [{ type: 'text', text: 'failed partial output' }],
+        },
+      ],
+    };
+    // A resumed foreground child can finish before the plugin registers the
+    // generation. The recorded input, not the registration clock, proves the
+    // excerpt boundary.
+    const anchored = diagnosticExcerptOf(transcript, {
+      inputMessageID: 'msg_input',
+      runStartedAt: 100,
+      completedAt: 200,
+    });
+    expect(anchored).toMatchObject({
+      text: 'failed partial output',
+      truncated: 'none',
+    });
+    // Without a recorded input id the timestamp fence still refuses.
+    expect(
+      diagnosticExcerptOf(transcript, { runStartedAt: 100, completedAt: 200 }),
+    ).toEqual({
+      unavailable: 'no assistant evidence at or after the tracked run start',
+    });
+  });
+
+  test('an anchored run refuses a newer input even within the old publication window', () => {
+    const result = diagnosticExcerptOf(
+      {
+        data: [
+          {
+            info: { id: 'msg_old', role: 'user', time: { created: 10 } },
+            parts: [],
+          },
+          {
+            info: { id: 'msg_new', role: 'user', time: { created: 20 } },
+            parts: [],
+          },
+          {
+            info: { role: 'assistant', time: { created: 30 } },
+            parts: [{ type: 'text', text: 'NEW RUN' }],
+          },
+        ],
+      },
+      { inputMessageID: 'msg_old', runStartedAt: 10, completedAt: 40 },
+    );
+    expect(result).toEqual({
+      unavailable:
+        'latest input is not this run’s recorded input; a later run owns the tail',
+    });
+  });
+
+  test('a recorded same-generation amendment is a legal excerpt boundary', () => {
+    const result = diagnosticExcerptOf(
+      {
+        data: [
+          {
+            info: { id: 'msg_open', role: 'user', time: { created: 10 } },
+            parts: [],
+          },
+          {
+            info: { id: 'msg_amend', role: 'user', time: { created: 20 } },
+            parts: [],
+          },
+          {
+            info: { role: 'assistant', time: { created: 30 } },
+            parts: [{ type: 'text', text: 'AMENDED RUN' }],
+          },
+        ],
+      },
+      {
+        inputMessageID: 'msg_open',
+        amendmentMessageID: 'msg_amend',
+        runStartedAt: 10,
+        completedAt: 40,
+      },
+    );
+    if ('unavailable' in result) throw new Error(result.unavailable);
+    expect(result.text).toContain('AMENDED RUN');
+  });
+
+  test('an anchored run refuses a boundary without a verifiable message id', () => {
+    expect(
+      diagnosticExcerptOf(
+        {
+          data: [
+            { info: { role: 'user' }, parts: [] },
+            {
+              info: { role: 'assistant' },
+              parts: [{ type: 'text', text: 'UNKNOWN' }],
+            },
+          ],
+        },
+        { inputMessageID: 'msg_missing' },
+      ),
+    ).toEqual({
+      unavailable:
+        'recorded run input is outside the diagnostic message window',
+    });
+  });
+
   test.each(['tool', 'assistant'])(
     'a %s error clipped to whitespace still reports truncation',
     (kind) => {

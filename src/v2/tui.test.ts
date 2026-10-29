@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { RGBA } from '@opentui/core';
 import { testRender } from '@opentui/solid';
 import { createSignal } from 'solid-js';
 import type { PluginConfig } from '../config';
@@ -15,11 +16,7 @@ import {
   notifyConfigChanged,
   registerConfigChangeListener,
 } from './config-change-coordinator';
-import tui2Plugin, {
-  applyPresetByName,
-  runPresetFlow,
-  type V2TuiPluginContext,
-} from './tui';
+import tui2Plugin, { runPresetFlow, type V2TuiPluginContext } from './tui';
 
 function makeConfig(): PluginConfig {
   return {
@@ -86,58 +83,6 @@ describe('v2 tui preset plugin', () => {
     Object.assign(process.env, originalEnv);
     fs.rmSync(configHome, { recursive: true, force: true });
     fs.rmSync(projectDir, { recursive: true, force: true });
-  });
-
-  describe('applyPresetByName', () => {
-    test('persists the preset name and returns a success message', () => {
-      writeUserConfig({
-        presets: {
-          balanced: { orchestrator: { model: 'anthropic/claude-sonnet-4-5' } },
-          cheap: { orchestrator: { model: 'openai/gpt-5-mini' } },
-        },
-      });
-
-      const result = applyPresetByName(projectDir, makeConfig(), 'cheap');
-
-      expect(result.ok).toBe(true);
-      expect(result.presetName).toBe('cheap');
-      expect(result.message).toContain('Saved preset "cheap"');
-      expect(readUserConfig().preset).toBe('cheap');
-    });
-
-    test('reports unknown presets without touching the config file', () => {
-      writeUserConfig({ preset: 'balanced' });
-
-      const result = applyPresetByName(projectDir, makeConfig(), 'nope');
-
-      expect(result.ok).toBe(false);
-      expect(result.message).toContain('not found');
-      expect(result.message).toContain('balanced');
-      expect(readUserConfig()).toEqual({ preset: 'balanced' });
-    });
-
-    test('fails cleanly when project config explicitly sets a different preset', () => {
-      const projectConfigDir = path.join(projectDir, '.opencode');
-      fs.mkdirSync(projectConfigDir, { recursive: true });
-      fs.writeFileSync(
-        path.join(projectConfigDir, 'oh-my-opencode-slim.jsonc'),
-        JSON.stringify({ preset: 'project-preset' }),
-      );
-
-      writeUserConfig({
-        presets: {
-          balanced: { orchestrator: { model: 'anthropic/claude-sonnet-4-5' } },
-          'project-preset': { orchestrator: { model: 'openai/gpt-5' } },
-        },
-      });
-
-      const result = applyPresetByName(projectDir, makeConfig(), 'balanced');
-
-      expect(result.ok).toBe(false);
-      expect(result.message).toContain('project config (.opencode)');
-      expect(result.message).toContain('"project-preset"');
-      expect(readUserConfig().preset).toBeUndefined();
-    });
   });
 
   describe('runPresetFlow', () => {
@@ -237,6 +182,40 @@ describe('v2 tui preset plugin', () => {
       };
     }
 
+    /** Route the stub to a session and answer the session-preset RPC. */
+    function attachSessionRpc(
+      stub: ScriptedCtx,
+      options: { sessionID?: string } = {},
+    ) {
+      const sessionID = options.sessionID ?? 'visible-root';
+      const applies: unknown[] = [];
+      Object.assign(stub.ctx.ui, {
+        router: { current: () => ({ type: 'session', sessionID }) },
+      });
+      Object.assign(stub.ctx, {
+        client: {
+          rpc: () => ({
+            read: async () => ({
+              sessionID,
+              status: 'unbound',
+              presetName: null,
+              affects: 'future-children-only',
+            }),
+            apply: async (input: unknown, applyOptions: unknown) => {
+              applies.push({ input, options: applyOptions });
+              return {
+                sessionID,
+                status: 'bound',
+                presetName: (input as { presetName: string }).presetName,
+                affects: 'future-children-only',
+              };
+            },
+          }),
+        },
+      });
+      return { applies };
+    }
+
     test('opens the manager and applies the selected preset', async () => {
       writeUserConfig({
         preset: 'balanced',
@@ -277,7 +256,7 @@ describe('v2 tui preset plugin', () => {
       expect(stub.selectTitles()[1]).toBe('Preset: cheap');
     });
 
-    test('applies a named preset directly and reports a requested live refresh', async () => {
+    test('applies a named preset to the visible session and leaves the default alone', async () => {
       writeUserConfig({
         preset: 'balanced',
         presets: {
@@ -285,73 +264,121 @@ describe('v2 tui preset plugin', () => {
           cheap: { orchestrator: { model: 'openai/gpt-5-mini' } },
         },
       });
-      const stub = makeStubCtx({ selects: ['cheap'] });
-      const unregister = registerConfigChangeListener(projectDir, () => ({
-        ok: true,
-      }));
-
-      try {
-        await runPresetFlow(stub.ctx, 'cheap');
-
-        expect(stub.selectCalls).toHaveLength(0);
-        expect(stub.toasts).toHaveLength(1);
-        expect(stub.toasts[0]).toContain('Saved preset "cheap"');
-        expect(stub.toasts[0]).toContain('Live refresh requested');
-        expect(stub.toasts[0]).toStartWith(
-          'Saved preset "cheap" to user config.',
-        );
-        expect(stub.toasts[0]).not.toContain('Global default saved');
-        expect(stub.toasts[0]).toContain('bound sessions unchanged');
-        expect(stub.toasts[0]).not.toContain('Reload OpenCode');
-        expect(readUserConfig().preset).toBe('cheap');
-      } finally {
-        unregister();
-      }
-    });
-
-    test('reports honestly when no live refresh listener is registered', async () => {
-      writeUserConfig({
-        presets: { cheap: { orchestrator: { model: 'openai/gpt-5-mini' } } },
-      });
-      const stub = makeStubCtx({ selects: ['cheap'] });
+      const stub = makeStubCtx();
+      const { applies } = attachSessionRpc(stub);
 
       await runPresetFlow(stub.ctx, 'cheap');
 
-      expect(readUserConfig().preset).toBe('cheap');
+      expect(stub.selectCalls).toHaveLength(0);
+      expect(applies).toEqual([
+        {
+          input: { sessionID: 'visible-root', presetName: 'cheap' },
+          options: { location: { directory: projectDir } },
+        },
+      ]);
       expect(stub.toasts).toHaveLength(1);
-      expect(stub.toasts[0]).toStartWith(
-        'Saved preset "cheap" to user config,',
-      );
-      expect(stub.toasts[0]).not.toContain('Global default saved');
-      expect(stub.toasts[0]).toContain('live refresh request failed');
       expect(stub.toasts[0]).toContain(
-        'Reload OpenCode to refresh the default',
+        'Applied preset "cheap" to this session\'s team.',
       );
-      expect(stub.toasts[0]).not.toContain('Live refresh requested');
+      expect(stub.toasts[0]).toContain('global default stay unchanged');
+      expect(readUserConfig().preset).toBe('balanced');
     });
 
-    test('a failed switch never notifies the sidebar listener (label unchanged)', async () => {
-      const projectConfigDir = path.join(projectDir, '.opencode');
-      fs.mkdirSync(projectConfigDir, { recursive: true });
-      fs.writeFileSync(
-        path.join(projectConfigDir, 'oh-my-opencode-slim.jsonc'),
-        JSON.stringify({ preset: 'locked-by-project' }),
+    test('an unknown named preset binds nothing and lists the options', async () => {
+      writeUserConfig({
+        presets: { cheap: { orchestrator: { model: 'openai/gpt-5-mini' } } },
+      });
+      const stub = makeStubCtx();
+      const { applies } = attachSessionRpc(stub);
+
+      await runPresetFlow(stub.ctx, 'nope');
+
+      expect(applies).toEqual([]);
+      expect(stub.toasts).toHaveLength(1);
+      expect(stub.toasts[0]).toContain('Preset "nope" not found.');
+      expect(stub.toasts[0]).toContain('Available presets: cheap');
+    });
+
+    test('a refused session binding surfaces the server reason and writes nothing', async () => {
+      writeUserConfig({
+        preset: 'balanced',
+        presets: { cheap: { orchestrator: { model: 'openai/gpt-5-mini' } } },
+      });
+      const stub = makeStubCtx();
+      Object.assign(stub.ctx.ui, {
+        router: { current: () => ({ type: 'session', sessionID: 'child-1' }) },
+      });
+      Object.assign(stub.ctx, {
+        client: {
+          rpc: () => ({
+            read: async () => ({
+              sessionID: 'child-1',
+              status: 'unbound',
+              presetName: null,
+              affects: 'future-children-only',
+            }),
+            apply: async () => {
+              throw new Error('Cannot apply to an unbound child');
+            },
+          }),
+        },
+      });
+
+      await runPresetFlow(stub.ctx, 'cheap');
+
+      expect(stub.toasts).toEqual([
+        'Preset "cheap" was not applied: Cannot apply to an unbound child',
+      ]);
+      expect(readUserConfig().preset).toBe('balanced');
+    });
+
+    test('a named preset on the home screen applies nothing', async () => {
+      writeUserConfig({
+        presets: { cheap: { orchestrator: { model: 'openai/gpt-5-mini' } } },
+      });
+      const stub = makeStubCtx();
+      Object.assign(stub.ctx.ui, {
+        router: { current: () => ({ type: 'home' }) },
+      });
+
+      await runPresetFlow(stub.ctx, 'cheap');
+
+      expect(stub.toasts).toEqual([
+        'No session is displayed. Open a conversation first. Nothing was applied.',
+      ]);
+      expect(readUserConfig().preset).toBeUndefined();
+    });
+
+    test('a host without session-preset RPC reports it instead of writing a default', async () => {
+      writeUserConfig({
+        presets: { cheap: { orchestrator: { model: 'openai/gpt-5-mini' } } },
+      });
+      const stub = makeStubCtx();
+      Object.assign(stub.ctx.ui, {
+        router: { current: () => ({ type: 'session', sessionID: 'root' }) },
+      });
+
+      await runPresetFlow(stub.ctx, 'cheap');
+
+      expect(stub.toasts).toHaveLength(1);
+      expect(stub.toasts[0]).toContain(
+        'Session presets are unavailable on this server',
       );
+      expect(readUserConfig().preset).toBeUndefined();
+    });
+
+    test('a named preset never writes config, so no config listener fires', async () => {
       writeUserConfig({
         preset: 'old',
-        presets: {
-          cheap: { orchestrator: { model: 'openai/gpt-5-mini' } },
-          'locked-by-project': {
-            orchestrator: { model: 'anthropic/claude-sonnet-4-5' },
-          },
-        },
+        presets: { cheap: { orchestrator: { model: 'openai/gpt-5-mini' } } },
       });
       let notifications = 0;
       const unregister = registerConfigChangeListener(projectDir, () => {
         notifications += 1;
         return { ok: true };
       });
-      const stub = makeStubCtx({ selects: ['cheap'] });
+      const stub = makeStubCtx();
+      attachSessionRpc(stub);
 
       try {
         await runPresetFlow(stub.ctx, 'cheap');
@@ -359,12 +386,8 @@ describe('v2 tui preset plugin', () => {
         unregister();
       }
 
-      // Persistence failed, so the sidebar is never asked to re-read: the
-      // label keeps showing the old preset.
       expect(notifications).toBe(0);
       expect(readUserConfig().preset).toBe('old');
-      expect(stub.toasts).toHaveLength(1);
-      expect(stub.toasts[0]).toContain('project config (.opencode)');
     });
 
     test('cancels silently when the manager is dismissed', async () => {
@@ -436,7 +459,7 @@ describe('v2 tui preset plugin', () => {
           options: { location: { directory: projectDir } },
         },
       ]);
-      expect(stub.toasts[0]).toContain('Session team snapshot: "cheap"');
+      expect(stub.toasts[0]).toContain('"cheap" applied.');
       expect(fs.readFileSync(userConfigPath(), 'utf-8')).toBe(before);
       expect(stub.reloadCalls()).toBe(0);
     });
@@ -474,11 +497,12 @@ describe('v2 tui preset plugin', () => {
       writeUserConfig({
         presets: { cheap: { orchestrator: { model: 'openai/gpt-5-mini' } } },
       });
-      const stub = makeStubCtx({ selects: ['cheap'] }, { withToast: false });
+      const stub = makeStubCtx({}, { withToast: false });
+      const { applies } = attachSessionRpc(stub);
 
       await runPresetFlow(stub.ctx, 'cheap');
 
-      expect(readUserConfig().preset).toBe('cheap');
+      expect(applies).toHaveLength(1);
     });
 
     test('guides when the host exposes no dialogs', async () => {
@@ -554,9 +578,53 @@ describe('v2 tui preset plugin', () => {
         location: { directory: projectDir },
         renderer: { requestRender: () => {} },
         theme: {
-          text: { default: '#f0f0f0', subdued: '#8a8a8a' },
-          background: { default: '#101010' },
-          border: { default: '#3a3a3a' },
+          categorical: [
+            {
+              100: '#001100',
+              200: '#002200',
+              300: '#003300',
+              400: '#004400',
+              500: RGBA.fromInts(210, 80, 90),
+              600: '#006600',
+              700: '#007700',
+              800: '#008800',
+              900: '#009900',
+            },
+            {
+              100: '#110000',
+              200: '#220000',
+              300: '#330000',
+              400: '#440000',
+              500: RGBA.fromInts(80, 170, 100),
+              600: '#660000',
+              700: '#770000',
+              800: '#880000',
+              900: '#990000',
+            },
+          ],
+          hue: {
+            interactive: {
+              100: '#111111',
+              200: RGBA.fromInts(70, 90, 210),
+              300: '#333333',
+              400: '#444444',
+              500: '#555555',
+              600: '#666666',
+              700: '#777777',
+              800: '#888888',
+              900: '#999999',
+            },
+          },
+          text: {
+            base: '#f0f0f0',
+            muted: '#8a8a8a',
+            feedback: {
+              success: { base: '#12ab34' },
+              warning: { base: '#de9b21' },
+            },
+          },
+          background: { base: '#101010', raised: { base: '#202020' } },
+          border: { base: '#3a3a3a' },
         },
         ui: {
           slot: (claim: { append?: string; render?: () => unknown }) => {
@@ -606,6 +674,10 @@ describe('v2 tui preset plugin', () => {
       process.env.XDG_DATA_HOME = path.join(configHome, 'sidebar-data');
       process.env.OPENCODE_LOG_DIR = path.join(configHome, 'logs');
       process.env.OH_MY_OPENCODE_SLIM_TUI_REFRESH_MS = '60000';
+      recordTuiAgentModels(
+        { agentModels: { oracle: 'global/team-b' } },
+        projectDir,
+      );
       const [route, setRoute] = createSignal({
         type: 'session',
         sessionID: 'root-a',
@@ -644,6 +716,11 @@ describe('v2 tui preset plugin', () => {
               status: 'bound',
               presetName: 'server-alpha',
               affects: 'future-children-only',
+              team: {
+                agentModels: { oracle: 'saved/team-a' },
+                agentVariants: {},
+                inheritance: {},
+              },
             };
           },
         }),
@@ -669,10 +746,13 @@ describe('v2 tui preset plugin', () => {
         expect(screen.captureCharFrame()).toContain(
           'Session team snapshot: server-alpha',
         );
+        expect(screen.captureCharFrame()).toContain('team-a');
+        expect(screen.captureCharFrame()).not.toContain('team-b');
 
         setRoute({ type: 'session', sessionID: 'root-b' });
         await screen.renderOnce();
         expect(screen.captureCharFrame()).not.toContain('server-alpha');
+        expect(screen.captureCharFrame()).not.toContain('team-a');
         expect(screen.captureCharFrame()).toContain(
           'Session team snapshot: Loading',
         );
@@ -689,9 +769,15 @@ describe('v2 tui preset plugin', () => {
           status: 'bound',
           presetName: 'late-beta',
           affects: 'future-children-only',
+          team: {
+            agentModels: { oracle: 'saved/late-team' },
+            agentVariants: {},
+            inheritance: {},
+          },
         });
         await screen.renderOnce();
         expect(screen.captureCharFrame()).not.toContain('late-beta');
+        expect(screen.captureCharFrame()).not.toContain('late-team');
         expect(screen.captureCharFrame()).not.toContain('server-alpha');
         expect(requests[1]).toEqual({
           input: { sessionID: 'root-b' },
@@ -718,13 +804,16 @@ describe('v2 tui preset plugin', () => {
     });
 
     test('sidebar overlays the picker selection only on a root orchestrator session', async () => {
-      writeUserConfig(makeConfig() as unknown as Record<string, unknown>);
+      writeUserConfig({ ...makeConfig(), compactSidebar: false });
       process.env.XDG_DATA_HOME = path.join(configHome, 'overlay-data');
       process.env.OPENCODE_LOG_DIR = path.join(configHome, 'logs');
       process.env.OH_MY_OPENCODE_SLIM_TUI_REFRESH_MS = '60000';
       // Static on-disk projection: what the sidebar shows WITHOUT the overlay.
       recordTuiAgentModels(
-        { agentModels: { orchestrator: 'zai-coding-plan/glm-5.3' } },
+        {
+          agentModels: { orchestrator: 'zai-coding-plan/glm-5.3' },
+          agentVariants: { orchestrator: 'medium' },
+        },
         projectDir,
       );
       const [route, setRoute] = createSignal({
@@ -763,9 +852,14 @@ describe('v2 tui preset plugin', () => {
         rpc: () => ({
           read: async (input: { sessionID: string }) => ({
             sessionID: input.sessionID,
-            status: 'unbound',
-            presetName: null,
+            status: 'bound',
+            presetName: 'balanced',
             affects: 'future-children-only',
+            team: {
+              agentModels: { orchestrator: 'saved/preset-root-model' },
+              agentVariants: { orchestrator: 'low' },
+              inheritance: {},
+            },
           }),
         }),
       };
@@ -782,9 +876,11 @@ describe('v2 tui preset plugin', () => {
         nextRoute: unknown,
         expectedModel: string,
         notExpectedModel: string,
+        expectedVariant: string,
       ) => {
         writeUserConfig({
           ...makeConfig(),
+          compactSidebar: false,
           preset,
         } as unknown as Record<string, unknown>);
         setRoute(nextRoute as { type: string; sessionID?: string });
@@ -795,6 +891,8 @@ describe('v2 tui preset plugin', () => {
         });
         const frame = screen?.captureCharFrame() ?? '';
         expect(frame).not.toContain(notExpectedModel);
+        expect(frame).not.toContain('preset-root-model');
+        expect(frame).toMatch(new RegExp(`variant\\s+${expectedVariant}`));
       };
       try {
         cleanup = await tui2Plugin.setup(
@@ -814,6 +912,7 @@ describe('v2 tui preset plugin', () => {
         // static row immediately, before any prompt commits the switch.
         expect(screen.captureCharFrame()).toContain('gemini-x');
         expect(screen.captureCharFrame()).not.toContain('glm-5.3');
+        expect(screen.captureCharFrame()).toMatch(/variant\s+high/);
 
         // Every leg starts from a root-a frame showing gemini-x, so each
         // route change below has an observable transition (no vacuous
@@ -824,24 +923,28 @@ describe('v2 tui preset plugin', () => {
           { type: 'session', sessionID: 'child-1' },
           'glm-5.3',
           'gemini-x',
+          'medium',
         );
         await assertRouteShows(
           'balanced',
           { type: 'session', sessionID: 'root-a' },
           'gemini-x',
           'glm-5.3',
+          'high',
         );
         await assertRouteShows(
           'cheap',
           { type: 'session', sessionID: 'root-b' },
           'glm-5.3',
           'gemini-x',
+          'medium',
         );
         await assertRouteShows(
           'balanced',
           { type: 'home', sessionID: '' },
           'glm-5.3',
           'gemini-x',
+          'medium',
         );
       } finally {
         cleanup?.();
@@ -901,6 +1004,151 @@ describe('v2 tui preset plugin', () => {
       cleanup?.();
     });
 
+    test('renders agent labels and models in categorical colors and the brand in the interactive hue', async () => {
+      const stub = makeSetupCtx();
+      writeUserConfig(makeConfig() as unknown as Record<string, unknown>);
+      recordTuiSessionParent('oracle-live', 'root', projectDir);
+      recordTuiAgentActivity(
+        {
+          sessionID: 'oracle-live',
+          agentName: 'oracle',
+          active: true,
+          details: { status: 'busy' },
+        },
+        projectDir,
+      );
+      recordTuiAgentModels(
+        {
+          agentModels: {
+            oracle: 'openai/gpt-5-mini',
+            explorer: 'anthropic/claude-haiku',
+          },
+          agentDisplayNames: { oracle: 'Oracle' },
+        },
+        projectDir,
+      );
+      let cleanup: (() => void) | undefined;
+      let screen: Awaited<ReturnType<typeof testRender>> | undefined;
+      try {
+        cleanup = (await tui2Plugin.setup(
+          stub.ctx as unknown as V2TuiPluginContext,
+        )) as (() => void) | undefined;
+        (stub.ctx.ui as { router: { current: () => unknown } }).router.current =
+          () => ({ type: 'session', sessionID: 'root' });
+        const sidebarSlot = stub.slotClaims.find(
+          (slot) => slot.append === 'sidebar.content',
+        );
+
+        expect(sidebarSlot).toBeDefined();
+        screen = await testRender(() => sidebarSlot?.render?.() as never, {
+          width: 160,
+          height: 24,
+        });
+        await screen.renderOnce();
+
+        const spans = screen.captureSpans().lines.flatMap((line) => line.spans);
+        const namedAgent = spans.find((span) => span.text.includes('Oracle'));
+        const secondAgent = spans.find((span) =>
+          span.text.includes('explorer'),
+        );
+        const model = spans.find((span) => span.text.includes('gpt-5-mini'));
+        const secondModel = spans.find((span) =>
+          span.text.includes('claude-haiku'),
+        );
+        const brand = spans.find((span) => span.text.includes('OMO-Slim'));
+        const activeIndicator = spans.find(
+          (span) =>
+            Math.abs(span.fg.g - 171 / 255) < 0.01 &&
+            Math.abs(span.fg.b - 52 / 255) < 0.01,
+        );
+        const mutedText = spans.find(
+          (span) =>
+            span.text.startsWith('v') && Math.abs(span.fg.r - 138 / 255) < 0.01,
+        );
+        expect(namedAgent).toBeDefined();
+        expect(secondAgent).toBeDefined();
+        expect(model).toBeDefined();
+        expect(secondModel).toBeDefined();
+        expect(brand).toBeDefined();
+        expect(activeIndicator).toBeDefined();
+        expect(mutedText).toBeDefined();
+        expect(namedAgent?.fg.r).toBeCloseTo(210 / 255);
+        expect(secondAgent?.fg.r).toBeCloseTo(80 / 255);
+        expect(model?.fg).toEqual(namedAgent?.fg);
+        expect(secondModel?.fg).toEqual(secondAgent?.fg);
+        expect(brand?.bg.b).toBeCloseTo(210 / 255);
+        expect(brand?.fg.r).toBeCloseTo(240 / 255);
+        expect(activeIndicator?.fg.g).toBeCloseTo(171 / 255);
+      } finally {
+        cleanup?.();
+        screen?.renderer.destroy();
+      }
+    });
+
+    test('renders retry indicators with the v2 warning token', async () => {
+      const stub = makeSetupCtx();
+      for (const sessionID of ['retrying', 'retrying2']) {
+        recordTuiSessionParent(sessionID, 'root', projectDir);
+        recordTuiAgentActivity(
+          {
+            sessionID,
+            agentName: 'oracle',
+            active: true,
+            details: { status: 'retry' },
+          },
+          projectDir,
+        );
+      }
+      recordTuiAgentModels(
+        { agentModels: { oracle: 'openai/gpt-5-mini' } },
+        projectDir,
+      );
+      (
+        stub.ctx.ui as {
+          router: { current: () => unknown; navigate?: unknown };
+        }
+      ).router.current = () => ({ type: 'session', sessionID: 'root' });
+      (stub.ctx.ui as { router: { navigate?: unknown } }).router.navigate =
+        () => {};
+      let cleanup: (() => void) | undefined;
+      let screen: Awaited<ReturnType<typeof testRender>> | undefined;
+      try {
+        cleanup = (await tui2Plugin.setup(
+          stub.ctx as unknown as V2TuiPluginContext,
+        )) as (() => void) | undefined;
+        const sidebarSlot = stub.slotClaims.find(
+          (slot) => slot.append === 'sidebar.content',
+        );
+        expect(sidebarSlot).toBeDefined();
+        screen = await testRender(() => sidebarSlot?.render?.() as never, {
+          width: 100,
+          height: 20,
+        });
+        await screen.renderOnce();
+        const initial = screen.captureSpans();
+        const agentLine = initial.lines.findIndex((line) =>
+          line.spans.some((span) => span.text.includes('oracle')),
+        );
+        expect(agentLine).toBeGreaterThanOrEqual(0);
+        await screen.mockMouse.click(10, agentLine);
+        await screen.flush();
+        const spans = screen.captureSpans().lines.flatMap((line) => line.spans);
+        const retryIndicator = spans.find(
+          (span) =>
+            Math.abs(span.fg.r - 222 / 255) < 0.01 &&
+            Math.abs(span.fg.g - 155 / 255) < 0.01 &&
+            Math.abs(span.fg.b - 33 / 255) < 0.01,
+        );
+        expect(retryIndicator).toBeDefined();
+        expect(retryIndicator?.fg.r).toBeCloseTo(222 / 255);
+        expect(retryIndicator?.fg.g).toBeCloseTo(155 / 255);
+        expect(retryIndicator?.fg.b).toBeCloseTo(33 / 255);
+      } finally {
+        cleanup?.();
+        screen?.renderer.destroy();
+      }
+    });
+
     test('re-invokes layer on every app slot render', async () => {
       const stub = makeSetupCtx();
       const cleanup = (await tui2Plugin.setup(
@@ -919,6 +1167,28 @@ describe('v2 tui preset plugin', () => {
         presets: { cheap: { orchestrator: { model: 'openai/gpt-5-mini' } } },
       });
       const stub = makeSetupCtx();
+      const applies: unknown[] = [];
+      (stub.ctx.ui as { router: { current: () => unknown } }).router.current =
+        () => ({ type: 'session', sessionID: 'root-a' });
+      stub.ctx.client = {
+        rpc: () => ({
+          read: async () => ({
+            sessionID: 'root-a',
+            status: 'unbound',
+            presetName: null,
+            affects: 'future-children-only',
+          }),
+          apply: async (input: unknown) => {
+            applies.push(input);
+            return {
+              sessionID: 'root-a',
+              status: 'bound',
+              presetName: (input as { presetName: string }).presetName,
+              affects: 'future-children-only',
+            };
+          },
+        }),
+      };
       const cleanup = (await tui2Plugin.setup(
         stub.ctx as unknown as V2TuiPluginContext,
       )) as (() => void) | undefined;
@@ -926,7 +1196,8 @@ describe('v2 tui preset plugin', () => {
       stub.renderAppSlot();
       await stub.layers[0]?.commands[0]?.run('cheap');
 
-      expect(readUserConfig().preset).toBe('cheap');
+      expect(applies).toEqual([{ sessionID: 'root-a', presetName: 'cheap' }]);
+      expect(readUserConfig().preset).toBeUndefined();
       cleanup?.();
     });
 

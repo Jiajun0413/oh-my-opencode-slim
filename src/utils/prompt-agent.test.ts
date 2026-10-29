@@ -441,9 +441,10 @@ const PROMPT_MEMBER_PATTERN =
 const WRAPPER_CALL_PATTERN = /\b(promptWithTimeout)\s*\(/g;
 
 /**
- * `const prompt = session.prompt.bind(session)` (src/tools/task-message.ts)
- * hides the call behind a local identifier that `PROMPT_CALL_PATTERN` cannot
- * see. Collect those aliases so calls through them are scanned too.
+ * Callers may bind `session.prompt` to a local identifier (e.g.
+ * `const prompt = session.prompt.bind(session)`), hiding the call behind a
+ * name that `PROMPT_CALL_PATTERN` cannot see. Collect those aliases so
+ * calls through them are scanned too.
  */
 const BOUND_ALIAS_PATTERN =
   /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*\s*\.\s*(?:prompt|promptAsync)\s*\.\s*bind\s*\(/g;
@@ -1153,8 +1154,8 @@ describe('agent-less prompt regression guard', () => {
     ]);
   });
 
-  // src/tools/task-message.ts builds `const body = {...}` and passes it as a
-  // shorthand property.
+  // A caller may build `const body = {...}` and pass it as a shorthand
+  // property (e.g. the v1 interview runtime's noReply prompts).
   test('scanner resolves a shorthand body property', () => {
     const compliant = [
       'const body = { agent: job.agent, parts: [] };',
@@ -1171,8 +1172,8 @@ describe('agent-less prompt regression guard', () => {
     ]);
   });
 
-  // src/tools/task-message.ts calls through `session.prompt.bind(session)`,
-  // which no member-expression pattern can see.
+  // A caller may route writes through `session.prompt.bind(session)`, which
+  // no member-expression pattern can see.
   test('scanner follows a bound prompt alias', () => {
     const violating = [
       'const prompt = session.prompt.bind(session);',
