@@ -658,7 +658,12 @@ export function createBackgroundJobTerminalGate(options: {
           verdict: 'gave-up',
           reason: refusal,
         });
-        options.onGiveUp?.(run.taskID, run.generation);
+        // A host that exposes `session.status` still owns the read: its
+        // reconciler keeps polling and publishes through `onTerminal`, so the
+        // slot is released there, once the task is actually terminal. Releasing
+        // here would admit a queued child while this one is still working.
+        if (refusal !== 'no-polling-capability')
+          options.onGiveUp?.(run.taskID, run.generation);
       }
     }
     return deferred(run, diagnostic);

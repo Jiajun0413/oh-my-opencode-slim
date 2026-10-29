@@ -2546,6 +2546,7 @@ describe('evidence re-arm behavior (#1561)', () => {
     const statusRead = mock(async () => ({
       data: { child: { type: 'idle' } },
     }));
+    const giveUps: string[] = [];
     const h = harness({
       baselineFor: () => undefined,
       readTerminalEvidence: async () => undefined,
@@ -2554,6 +2555,7 @@ describe('evidence re-arm behavior (#1561)', () => {
       input: {
         client: { session: { status: statusRead } },
       } as never,
+      onGiveUp: (taskID: string) => giveUps.push(taskID),
     });
     h.observe('busy', false, 100);
     h.advance(100);
@@ -2572,6 +2574,10 @@ describe('evidence re-arm behavior (#1561)', () => {
     for (let i = 0; i < 10; i++) await h.advanceBoth(5);
     expect(h.board.get(h.run.taskID)?.state).toBe('running');
     expect(h.timers.pending()).toBe(0);
+    // The host's sweeper still owns the read, so its publication — not this
+    // give-up — is what releases the slot: releasing here would admit a
+    // queued child while this one may still be working.
+    expect(giveUps).toEqual([]);
   });
 });
 
