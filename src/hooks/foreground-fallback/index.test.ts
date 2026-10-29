@@ -11,6 +11,7 @@ import {
 import { isInternalInitiatorPart } from '../../utils';
 import * as logger from '../../utils/logger';
 import { mapV2EventToV1 } from '../../v2/event-adapter';
+import { recordInternalAdmission } from '../../v2/internal-admissions';
 import { SessionLifecycle } from '../session-lifecycle';
 import type { FallbackNotice } from '../task-session-manager/revived-run-tracker';
 import {
@@ -1488,6 +1489,63 @@ describe('foreground fallback redo: host retry budget', () => {
     expect(mocks.promptAsync.mock.calls[0]?.[0]).toMatchObject({
       body: { model: { providerID: 'test', modelID: 'b' } },
     });
+  });
+
+  test('a native background-task notice keeps the pending initial-delay recovery', async () => {
+    const sid = 'native-info-only';
+    const { manager, mocks } = makeManager({
+      maxRetries: 0,
+      initialRetryDelayMs: 1_000,
+    });
+    manager.registerSessionAgent(sid, 'orchestrator');
+    await manager.handleEvent(redoEvents.assistant(sid));
+    await manager.handleEvent(redoEvents.error(sid));
+    // chat.message records the admission before info-only message.updated.
+    recordInternalAdmission(sid, 'native-notice');
+    const { info } = redoEvents.user(sid, 'native-notice', 'c').properties;
+    await manager.handleEvent({
+      type: 'message.updated',
+      properties: { info: { ...info, agent: 'orchestrator' } },
+    });
+    jest.advanceTimersByTime(1_000);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(mocks.abort).not.toHaveBeenCalled();
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    expect(mocks.promptAsync.mock.calls[0]?.[0]).toMatchObject({
+      body: { model: { providerID: 'test', modelID: 'b' } },
+    });
+  });
+
+  test('a native notice with inline parts keeps recovery pending until a real external turn cancels it', async () => {
+    const sid = 'native-inline';
+    const { manager, mocks } = makeManager({
+      maxRetries: 0,
+      initialRetryDelayMs: 1_000,
+    });
+    manager.registerSessionAgent(sid, 'orchestrator');
+    await manager.handleEvent(redoEvents.assistant(sid));
+    await manager.handleEvent(redoEvents.error(sid));
+    const notice = redoEvents.user(sid, 'native-notice');
+    const nativeNoticePart = {
+      type: 'text',
+      synthetic: true,
+      text: [
+        '<task id="ses_child" state="completed">',
+        '<summary>Background task completed: check availability</summary>',
+        '<task_result>',
+        'Availability check complete.',
+        '</task_result>',
+        '</task>',
+      ].join('\n'),
+    };
+    notice.properties.parts = [nativeNoticePart];
+    await manager.handleEvent(notice);
+    expect(manager.isFallbackInProgress(sid)).toBe(true);
+    await manager.handleEvent(redoEvents.user(sid, 'new-user'));
+    expect(manager.isFallbackInProgress(sid)).toBe(false);
+    jest.advanceTimersByTime(1_000);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(mocks.promptAsync).not.toHaveBeenCalled();
   });
 
   test('T-N3: an absorbed retry cancels a terminal delay before the next run', async () => {

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { RGBA } from '@opentui/core';
 import { testRender } from '@opentui/solid';
 import { createSignal } from 'solid-js';
 import type { PluginConfig } from '../config';
@@ -554,9 +555,53 @@ describe('v2 tui preset plugin', () => {
         location: { directory: projectDir },
         renderer: { requestRender: () => {} },
         theme: {
-          text: { default: '#f0f0f0', subdued: '#8a8a8a' },
-          background: { default: '#101010' },
-          border: { default: '#3a3a3a' },
+          categorical: [
+            {
+              100: '#001100',
+              200: '#002200',
+              300: '#003300',
+              400: '#004400',
+              500: RGBA.fromInts(210, 80, 90),
+              600: '#006600',
+              700: '#007700',
+              800: '#008800',
+              900: '#009900',
+            },
+            {
+              100: '#110000',
+              200: '#220000',
+              300: '#330000',
+              400: '#440000',
+              500: RGBA.fromInts(80, 170, 100),
+              600: '#660000',
+              700: '#770000',
+              800: '#880000',
+              900: '#990000',
+            },
+          ],
+          hue: {
+            interactive: {
+              100: '#111111',
+              200: RGBA.fromInts(70, 90, 210),
+              300: '#333333',
+              400: '#444444',
+              500: '#555555',
+              600: '#666666',
+              700: '#777777',
+              800: '#888888',
+              900: '#999999',
+            },
+          },
+          text: {
+            base: '#f0f0f0',
+            muted: '#8a8a8a',
+            feedback: {
+              success: { base: '#12ab34' },
+              warning: { base: '#de9b21' },
+            },
+          },
+          background: { base: '#101010', raised: { base: '#202020' } },
+          border: { base: '#3a3a3a' },
         },
         ui: {
           slot: (claim: { append?: string; render?: () => unknown }) => {
@@ -956,6 +1001,151 @@ describe('v2 tui preset plugin', () => {
       expect(stub.slotClaims).toHaveLength(0);
       expect(stub.layers).toHaveLength(0);
       expect(cleanup).toBeUndefined();
+    });
+
+    test('renders agent labels and models in categorical colors and the brand in the interactive hue', async () => {
+      const stub = makeSetupCtx();
+      writeUserConfig(makeConfig() as unknown as Record<string, unknown>);
+      recordTuiSessionParent('oracle-live', 'root', projectDir);
+      recordTuiAgentActivity(
+        {
+          sessionID: 'oracle-live',
+          agentName: 'oracle',
+          active: true,
+          details: { status: 'busy' },
+        },
+        projectDir,
+      );
+      recordTuiAgentModels(
+        {
+          agentModels: {
+            oracle: 'openai/gpt-5-mini',
+            explorer: 'anthropic/claude-haiku',
+          },
+          agentDisplayNames: { oracle: 'Oracle' },
+        },
+        projectDir,
+      );
+      let cleanup: (() => void) | undefined;
+      let screen: Awaited<ReturnType<typeof testRender>> | undefined;
+      try {
+        cleanup = (await tui2Plugin.setup(
+          stub.ctx as unknown as V2TuiPluginContext,
+        )) as (() => void) | undefined;
+        (stub.ctx.ui as { router: { current: () => unknown } }).router.current =
+          () => ({ type: 'session', sessionID: 'root' });
+        const sidebarSlot = stub.slotClaims.find(
+          (slot) => slot.append === 'sidebar.content',
+        );
+
+        expect(sidebarSlot).toBeDefined();
+        screen = await testRender(() => sidebarSlot?.render?.() as never, {
+          width: 160,
+          height: 24,
+        });
+        await screen.renderOnce();
+
+        const spans = screen.captureSpans().lines.flatMap((line) => line.spans);
+        const namedAgent = spans.find((span) => span.text.includes('Oracle'));
+        const secondAgent = spans.find((span) =>
+          span.text.includes('explorer'),
+        );
+        const model = spans.find((span) => span.text.includes('gpt-5-mini'));
+        const secondModel = spans.find((span) =>
+          span.text.includes('claude-haiku'),
+        );
+        const brand = spans.find((span) => span.text.includes('OMO-Slim'));
+        const activeIndicator = spans.find(
+          (span) =>
+            Math.abs(span.fg.g - 171 / 255) < 0.01 &&
+            Math.abs(span.fg.b - 52 / 255) < 0.01,
+        );
+        const mutedText = spans.find(
+          (span) =>
+            span.text.startsWith('v') && Math.abs(span.fg.r - 138 / 255) < 0.01,
+        );
+        expect(namedAgent).toBeDefined();
+        expect(secondAgent).toBeDefined();
+        expect(model).toBeDefined();
+        expect(secondModel).toBeDefined();
+        expect(brand).toBeDefined();
+        expect(activeIndicator).toBeDefined();
+        expect(mutedText).toBeDefined();
+        expect(namedAgent?.fg.r).toBeCloseTo(210 / 255);
+        expect(secondAgent?.fg.r).toBeCloseTo(80 / 255);
+        expect(model?.fg).toEqual(namedAgent?.fg);
+        expect(secondModel?.fg).toEqual(secondAgent?.fg);
+        expect(brand?.bg.b).toBeCloseTo(210 / 255);
+        expect(brand?.fg.r).toBeCloseTo(240 / 255);
+        expect(activeIndicator?.fg.g).toBeCloseTo(171 / 255);
+      } finally {
+        cleanup?.();
+        screen?.renderer.destroy();
+      }
+    });
+
+    test('renders retry indicators with the v2 warning token', async () => {
+      const stub = makeSetupCtx();
+      for (const sessionID of ['retrying', 'retrying2']) {
+        recordTuiSessionParent(sessionID, 'root', projectDir);
+        recordTuiAgentActivity(
+          {
+            sessionID,
+            agentName: 'oracle',
+            active: true,
+            details: { status: 'retry' },
+          },
+          projectDir,
+        );
+      }
+      recordTuiAgentModels(
+        { agentModels: { oracle: 'openai/gpt-5-mini' } },
+        projectDir,
+      );
+      (
+        stub.ctx.ui as {
+          router: { current: () => unknown; navigate?: unknown };
+        }
+      ).router.current = () => ({ type: 'session', sessionID: 'root' });
+      (stub.ctx.ui as { router: { navigate?: unknown } }).router.navigate =
+        () => {};
+      let cleanup: (() => void) | undefined;
+      let screen: Awaited<ReturnType<typeof testRender>> | undefined;
+      try {
+        cleanup = (await tui2Plugin.setup(
+          stub.ctx as unknown as V2TuiPluginContext,
+        )) as (() => void) | undefined;
+        const sidebarSlot = stub.slotClaims.find(
+          (slot) => slot.append === 'sidebar.content',
+        );
+        expect(sidebarSlot).toBeDefined();
+        screen = await testRender(() => sidebarSlot?.render?.() as never, {
+          width: 100,
+          height: 20,
+        });
+        await screen.renderOnce();
+        const initial = screen.captureSpans();
+        const agentLine = initial.lines.findIndex((line) =>
+          line.spans.some((span) => span.text.includes('oracle')),
+        );
+        expect(agentLine).toBeGreaterThanOrEqual(0);
+        await screen.mockMouse.click(10, agentLine);
+        await screen.flush();
+        const spans = screen.captureSpans().lines.flatMap((line) => line.spans);
+        const retryIndicator = spans.find(
+          (span) =>
+            Math.abs(span.fg.r - 222 / 255) < 0.01 &&
+            Math.abs(span.fg.g - 155 / 255) < 0.01 &&
+            Math.abs(span.fg.b - 33 / 255) < 0.01,
+        );
+        expect(retryIndicator).toBeDefined();
+        expect(retryIndicator?.fg.r).toBeCloseTo(222 / 255);
+        expect(retryIndicator?.fg.g).toBeCloseTo(155 / 255);
+        expect(retryIndicator?.fg.b).toBeCloseTo(33 / 255);
+      } finally {
+        cleanup?.();
+        screen?.renderer.destroy();
+      }
     });
 
     test('re-invokes layer on every app slot render', async () => {

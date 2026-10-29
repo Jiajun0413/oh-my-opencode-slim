@@ -16,4 +16,5 @@ export const MARKETPLACE_TOOL_NAMES = [
   'bash',
   'webfetch',
   'websearch',
+  'execute',
 ] as const;
