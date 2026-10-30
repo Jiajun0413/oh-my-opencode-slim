@@ -317,7 +317,6 @@ describe('PluginConfigSchema disabled_hooks and disabled_commands', () => {
     expect(DISABLED_HOOKS_VALUES).toEqual([
       'phase-reminder',
       'foreground-fallback',
-      'deepwork-guard',
       'deepwork-goal',
       'chat-headers',
       'cache-monitor',
