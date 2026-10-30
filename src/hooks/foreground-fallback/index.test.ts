@@ -2842,6 +2842,39 @@ describe('isFailoverError', () => {
   });
 });
 
+// hasDeterministic4xx status-code boundary (issue #1710): pins when a 4xx
+// is deterministic (reproduces on every replay) vs transient. Probe message
+// 'upstream error overload' matches only the transient path (no digits for
+// DETERMINISTIC_4XX_PATTERN, no provider pattern; keep it that way), so
+// the statusCode clauses decide; 400/499 also sit outside
+// PROVIDER_STATUS_CODES. No 429/500 rows: those inputs fail over through
+// other paths whatever the clauses say (transient wording, or
+// PROVIDER_STATUS_CODES once a clause flips) — nothing observable there.
+
+describe('hasDeterministic4xx status-code boundary (issue #1710)', () => {
+  const transientText = 'upstream error overload';
+
+  test.each([
+    [
+      'statusCode 300 (below 400): not a 4xx, transient carries failover',
+      300,
+      true,
+    ],
+    [
+      'statusCode 400 (lower bound): deterministic 4xx suppresses failover',
+      400,
+      false,
+    ],
+    ['statusCode 408 is exempt (request timeout is retriable)', 408, true],
+    ['statusCode 499 (upper bound): still a deterministic 4xx', 499, false],
+    ['statusCode 550 (5xx): not a 4xx, transient carries failover', 550, true],
+  ])('%s', (_label, status, expected) => {
+    expect(
+      isFailoverError({ data: { statusCode: status }, message: transientText }),
+    ).toBe(expected);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Spent allowance (issue #966): provider exhaustion, not a failover veto
 // ---------------------------------------------------------------------------
