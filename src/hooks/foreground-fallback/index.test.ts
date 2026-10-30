@@ -338,6 +338,19 @@ describe('foreground fallback redo harness', () => {
   });
   afterEach(() => jest.useRealTimers());
 
+  test('a replay reserves a msg_ id that sorts between v1 host ids', async () => {
+    // v1 host IDs at 999_000 and 1_001_000 ms; the harness is at 1_000_000.
+    const hostBefore = 'msg_0000f3e58001AbCdEfGhIjKlMn';
+    const hostAfter = 'msg_0000f4628001AbCdEfGhIjKlMn';
+    const { manager, mocks } = makeManager();
+    manager.registerSessionAgent('reserved-id', 'orchestrator');
+    await manager.handleEvent(redoEvents.assistant('reserved-id'));
+    await manager.handleEvent(redoEvents.error('reserved-id'));
+    const id: string = mocks.promptAsync.mock.calls[0]?.[0].body.messageID;
+    expect(id).toMatch(/^msg_[0-9a-f]{26}$/);
+    expect(hostBefore < id && id < hostAfter).toBe(true);
+  });
+
   test('host-ordered error replay selects the next model', async () => {
     const { manager, mocks } = makeManager();
     manager.registerSessionAgent('harness', 'orchestrator');
