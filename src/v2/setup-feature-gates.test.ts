@@ -403,6 +403,31 @@ describe('v2 setup feature gates', () => {
     }
   }, 20_000);
 
+  for (const mode of ['native', 'off'] as const) {
+    test(`backgroundJobs.mode "${mode}": no persistence and no structured-launch wrapper`, async () => {
+      await writeProjectConfig({
+        companion: { enabled: false },
+        backgroundJobs: { mode },
+      });
+      const { ctx, toolUpdates } = makeCtx(projectDir);
+      const cleanup = await createV2Setup()(ctx);
+      try {
+        expect(toolUpdates.map((u) => u.id)).not.toContain('subagent');
+        const stateDir = path.join(
+          fixtureRoot,
+          'xdg-data',
+          'opencode',
+          'plugins',
+          'oh-my-opencode-slim',
+          'storage',
+        );
+        expect(fs.existsSync(stateDir)).toBe(false);
+      } finally {
+        await cleanup();
+      }
+    }, 20_000);
+  }
+
   test('lifecycle-disabled project preserves live queued persistence writes', async () => {
     const persistence = createMemoryBackend();
     const tombstoneKey = 'omo/bgj/tombstone/ses_live_project';

@@ -24,6 +24,7 @@ import {
   AGENT_ALIASES,
   BUILTIN_OPENCODE_SUBAGENTS_TO_DISABLE,
 } from '../config/constants';
+import { resolveBackgroundJobsMode } from '../config/runtime';
 import { InterviewConfigSchema } from '../config/schema';
 import type { PluginConfigSnapshot } from '../config/snapshot';
 import { readPluginConfigSnapshot } from '../config/snapshot';
@@ -2202,7 +2203,11 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       hostFlavor: 'v2',
     });
     const preFlightConfig = startupConfigSnapshot.config;
-    const lifecycleEnabled = preFlightConfig.backgroundJobs?.enabled !== false;
+    // Resolve the same mode the v1 factory will resolve: `native` and `off`
+    // must not wire board persistence or the native-subagent executor
+    // wrapper, and only `managed` may claim the lifecycle.
+    const lifecycleEnabled =
+      resolveBackgroundJobsMode(preFlightConfig.backgroundJobs) === 'managed';
     if (lifecycleEnabled) {
       try {
         const storage = ctx.storage;
