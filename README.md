@@ -79,6 +79,41 @@ The main idea is simple: instead of forcing one model to do everything, the plug
 >
 > \- `xenstar1`
 
+### Merch · The Pantheon in gold
+
+The six agents as gold tarot artwork, on clothing, desk gear and prints.
+
+<table>
+  <tr>
+    <td width="25%" align="center" valign="top">
+      <a href="https://ohmyopencodeslim.com/merch/the-orchestrator-tee">
+        <img src="img/merch/the-orchestrator-tee.webp" alt="The Orchestrator in gold on a black tee" width="160"><br>
+        <sub><b>Tee</b></sub>
+      </a>
+    </td>
+    <td width="25%" align="center" valign="top">
+      <a href="https://ohmyopencodeslim.com/merch/the-oracle-hoodie">
+        <img src="img/merch/the-oracle-hoodie.webp" alt="The Oracle tarot card on the back of a black hoodie" width="160"><br>
+        <sub><b>Hoodie</b></sub>
+      </a>
+    </td>
+    <td width="25%" align="center" valign="top">
+      <a href="https://ohmyopencodeslim.com/merch/the-six-cards-framed-poster">
+        <img src="img/merch/the-six-cards-framed-poster.webp" alt="All six agent tarot cards in a black frame" width="160"><br>
+        <sub><b>Framed poster</b></sub>
+      </a>
+    </td>
+    <td width="25%" align="center" valign="top">
+      <a href="https://ohmyopencodeslim.com/merch/the-six-agents-mouse-pad">
+        <img src="img/merch/the-six-agents-mouse-pad.webp" alt="All six agents in gold on a black mouse pad" width="160"><br>
+        <sub><b>Mouse pad</b></sub>
+      </a>
+    </td>
+  </tr>
+</table>
+
+<p align="center"><a href="https://ohmyopencodeslim.com/merch"><b>Explore the collection →</b></a></p>
+
 ### Quick Start
 
 Copy and paste this prompt to your LLM agent (Claude Code, AmpCode, Cursor, etc.):
