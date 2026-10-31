@@ -3430,27 +3430,27 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
                 exactCallConfirmed: boolean;
               }) => Promise<unknown>)
             | undefined;
-          if (
-            before &&
-            lifecycleEnabled &&
-            (backgroundFlip || registerStructuredLaunch)
-          ) {
+          // The preset wrapper consumes the admission the bridge captures and
+          // the preset subsystem runs in every mode, so it installs with
+          // `before`; only the board halves below stay managed-only.
+          if (before) {
             try {
-              const wrapper = registerStructuredLaunch
-                ? createSubagentExecutorWrapper({
-                    register: (launch) =>
-                      registerStructuredLaunch({
-                        ...launch,
-                        exactCallConfirmed: launch.callID !== '',
-                      }),
-                  })
-                : undefined;
+              const wrapper =
+                lifecycleEnabled && registerStructuredLaunch
+                  ? createSubagentExecutorWrapper({
+                      register: (launch) =>
+                        registerStructuredLaunch({
+                          ...launch,
+                          exactCallConfirmed: launch.callID !== '',
+                        }),
+                    })
+                  : undefined;
               const wrapped = new WeakSet<object>();
               const reg = await ctx.tool.transform((draft) => {
                 nativePresetWrapperReady = false;
                 try {
                   draft.update(DELEGATION_TOOL_V2, (tool) => {
-                    if (backgroundFlip)
+                    if (lifecycleEnabled && backgroundFlip)
                       tool.description =
                         SUBAGENT_BACKGROUND_DEFAULT_DESCRIPTION;
                     if (tool.execute && wrapped.has(tool.execute)) {
@@ -3473,7 +3473,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
                       nativePresetWrapperReady = true;
                     }
                   });
-                  if (backgroundFlip) {
+                  if (lifecycleEnabled && backgroundFlip) {
                     const flipped = draft.get(DELEGATION_TOOL_V2);
                     if (
                       flipped?.description ===

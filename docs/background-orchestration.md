@@ -60,7 +60,10 @@ board, retention, terminal gate, watchdog, wake scheduler, or startup recovery
 runs. Native `task`/`subagent` delegation and host completion delivery keep
 working exactly as OpenCode provides them, so council seat assembly and
 ordinary background delegation still function — only the OMOS bookkeeping and
-control surface disappear. See [Configuration](configuration.md).
+control surface disappear. Session presets are a separate subsystem (they bind
+delegated children to the frozen inference snapshot and back `/preset`), so
+they keep applying in every mode; they are not board state. See
+[Configuration](configuration.md).
 
 `backgroundJobs.mode: "native"` keeps the managed layer off but registers the
 two thin host-read controls, because the native delegation surface has no
