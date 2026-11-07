@@ -331,6 +331,21 @@ describe('TUI feature gates', () => {
     }
   });
 
+  test('threads hostFlavor to feature gates during TUI gate probe', () => {
+    writeUserConfig({ backgroundJobs: { mode: 'managed' } });
+
+    // On v1 or unmarked host, probe succeeds with managed gates
+    const v1 = readTuiGates(env.projectDir, 'v1');
+    expect(v1.readFailed).toBe(false);
+    expect(v1.gates.tuiEnabled).toBe(true);
+
+    // On v2 host, explicit managed mode causes the config read to fail
+    // and probeTuiGates catches it, returning failOpen gates with readFailed: true
+    const v2 = readTuiGates(env.projectDir, 'v2');
+    expect(v2.readFailed).toBe(true);
+    expect(v2.gates.tuiEnabled).toBe(true);
+  });
+
   describe('sidebar polling intervals', () => {
     test('sidebar-on rendering keeps the fast 1s poll', async () => {
       writeUserConfig({});
