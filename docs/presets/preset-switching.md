@@ -46,6 +46,12 @@ The binding covers subagent inference settings: models, variants, temperature,
 provider options and fallback chains. The main-agent model uses OpenCode's
 native selection; prompts, tools, skills and MCPs follow normal host configuration.
 
+> **`backgroundJobs.mode: "off"` disables session bindings.** Session bindings
+> remain available in the V2 `native` default; `off` leaves
+> native delegation untouched: no session `/preset` command, RPC, or child
+> snapshot. Children use the registered agent configuration, and the `preset`
+> global default still selects those settings at startup.
+
 If creation succeeds but binding fails, the error includes the new session ID.
 Open that session and use **Apply preset → Current session**. A host shutdown
 between creation and binding can also leave an unbound empty session.
@@ -71,7 +77,7 @@ visible even if its preset definition has since been removed.
 ## Scope and when changes take effect
 
 On v2, a root work session captures its subagent inference configuration before
-its first managed prompt is admitted. Its new native subagents inherit their
+its first prompt is admitted. Its new native subagents inherit their
 direct parent's snapshot, including model variants, inference options and fallback
 chains. Changing the default does not change that snapshot, even for children
 the existing session creates later.

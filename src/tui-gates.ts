@@ -98,9 +98,12 @@ export function warningsMakeConfigInvalid(
 }
 
 /** Derive every gate from one snapshot. Pure; no file access. */
-function deriveTuiGates(snapshot: PluginConfigSnapshot): TuiGatesSnapshot {
+function deriveTuiGates(
+  snapshot: PluginConfigSnapshot,
+  hostFlavor?: string,
+): TuiGatesSnapshot {
   const config = snapshot.config;
-  const featureGates = resolveFeatureGates(config);
+  const featureGates = resolveFeatureGates(config, hostFlavor);
   return {
     tuiEnabled: featureGates.tui,
     sidebarEnabled: featureGates.sidebar,
@@ -144,7 +147,7 @@ export function probeTuiGates(
     const snapshot = readPluginConfigSnapshot(directory, { hostFlavor, fresh });
     return {
       read: {
-        gates: deriveTuiGates(snapshot),
+        gates: deriveTuiGates(snapshot, hostFlavor),
         fingerprint: snapshot.fingerprint,
         paneConfig: undefined,
         readFailed: false,

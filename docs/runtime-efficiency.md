@@ -28,9 +28,14 @@ Agent registration reuses merged overrides, model arrays and MCP inputs within
 each pass; a larger custom-agent roster no longer repeats those whole-table
 derivations. Health accounting comes from completed registrations.
 
-On v2, one prompt admission reuses its validated session identity and preset
-binding for profile capture; the next admission rechecks host identity and
-storage. Stored history is read for agent attribution only when a message lacks
+On v2 with session preset routing enabled, one prompt admission reuses its
+validated session identity and preset binding for profile capture; the next
+admission rechecks host identity and storage. `backgroundJobs.mode: "off"`
+constructs neither the preset store nor the child profile bridge, registers no
+session-preset RPC or server command, and leaves the native executor unchanged.
+Preset delegation, prompt and event paths perform no session reads or KV work
+in that mode; static agent inference settings still register with the host.
+Stored history is read for agent attribution only when a message lacks
 an agent. Message transforms use a request-local view of valid/user messages,
 rebuilt after structural edits, preserving phase/council anchors and the
 trailing goal pointer byte-for-byte.
@@ -41,9 +46,12 @@ The server entry keeps shared coordination in small leaf modules. Optional
 implementations load inside their existing activation gates instead of through
 hook, tool or utility barrels:
 
-- `backgroundJobs.mode: "managed"` loads the board, supervisor, admission state,
-  recovery and managed tools. `"native"` loads only the thin host-read controls;
-  `"off"` loads neither implementation. The v1 wake scheduler is separate from
+- `backgroundJobs.mode: "managed"` (V1 only) loads the board, supervisor,
+  admission state, recovery and managed tools. `"native"` (the V2 default) loads
+  only the thin host-read controls and, on V2, the queue-only report; `"off"`
+  loads neither implementation. On V2 the managed gates are structurally false,
+  so the board, persistence, recovery, adoption and wake modules are never
+  resolved, independent of configuration. The v1 wake scheduler is separate from
   the pure message helpers used on both hosts.
 - V2 skips the v1 server updater: the host owns package management and Slim's
   TUI owns its notice. The disabled `auto-update-checker` hook also stops that
