@@ -976,6 +976,43 @@ async function lifecycle(host: Host, mode: Mode, results: Evidence[]) {
       };
     },
   );
+  if (native) {
+    await checkCase(
+      results,
+      `${mode}: omitted background uses the activated default`,
+      async () => {
+        const parent = await host.create('Omitted background default');
+        const child = model.plan('child', [
+          { text: 'OMITTED_BACKGROUND_CHILD_TEXT', hold: `${mode}:omitted` },
+        ]);
+        await host.runTools(
+          parent.id,
+          [subagent(child)],
+          'OMITTED_BACKGROUND_PARENT_CONTINUED',
+        );
+        const target = await host.child(parent.id);
+        await model.wait(`${mode}:omitted`);
+        assert(
+          renderedText(await host.messages(parent.id)).includes(
+            'OMITTED_BACKGROUND_PARENT_CONTINUED',
+          ),
+          'Omitted background blocked the parent',
+        );
+        model.release(`${mode}:omitted`);
+        await host.contains(parent.id, 'OMITTED_BACKGROUND_CHILD_TEXT');
+        await host.idle(parent.id);
+        await poll('omitted background completion admission', async () =>
+          host.notices(parent.id, target).length === 1 ? true : undefined,
+        );
+        return {
+          parentID: parent.id,
+          childID: target,
+          notices: 1,
+          defaultedTo: 'background',
+        };
+      },
+    );
+  }
   await checkCase(
     results,
     `${mode}: running-child steer and busy-parent completion`,
