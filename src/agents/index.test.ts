@@ -3428,6 +3428,48 @@ describe('observer dispatch instruction injection', () => {
     const fixer = disabledSet.find((a) => a.name === 'fixer');
     expect(fixer?.config.prompt).not.toContain('dispatch @observer');
   });
+
+  test('vision-capable roles lose the dispatch line; text-only and unknown keep it', () => {
+    const base: PluginConfig = { disabled_agents: [] };
+
+    // Vision-capable chain heads must not be primed into delegating images
+    // they can read themselves.
+    const vision = createAgents(runtimeFor(base), {
+      hostFlavor: 'v2',
+      roleAcceptsImages: (role) => role === 'designer',
+    });
+    expect(
+      vision.find((a) => a.name === 'designer')?.config.prompt,
+    ).not.toContain('dispatch @observer');
+    expect(vision.find((a) => a.name === 'oracle')?.config.prompt).toContain(
+      'dispatch @observer with the file path',
+    );
+
+    // Text-only (false) keeps the instruction: the advisor has no other path
+    // to visual input.
+    const textOnly = createAgents(runtimeFor(base), {
+      hostFlavor: 'v2',
+      roleAcceptsImages: () => false,
+    });
+    expect(
+      textOnly.find((a) => a.name === 'designer')?.config.prompt,
+    ).toContain('dispatch @observer with the file path');
+
+    // Unknown capability is fail-open: the instruction stays.
+    const unknown = createAgents(runtimeFor(base), {
+      hostFlavor: 'v2',
+      roleAcceptsImages: () => undefined,
+    });
+    expect(unknown.find((a) => a.name === 'designer')?.config.prompt).toContain(
+      'dispatch @observer with the file path',
+    );
+
+    // Omitting the probe entirely keeps pre-existing behavior.
+    const omitted = createAgents(runtimeFor(base), { hostFlavor: 'v2' });
+    expect(omitted.find((a) => a.name === 'designer')?.config.prompt).toContain(
+      'dispatch @observer with the file path',
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

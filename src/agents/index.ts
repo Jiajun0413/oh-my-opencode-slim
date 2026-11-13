@@ -47,7 +47,7 @@ import { type AgentSkillGrants, renderScopedAgentsBlock } from './role-routing';
 import {
   appendObserverDispatchInstruction,
   appendTaskRejectionInstruction,
-  OBSERVER_DISPATCH_ROLES,
+  observerDispatchRolesFor,
 } from './task-rejection';
 
 export type { AgentDefinition } from './orchestrator';
@@ -1001,9 +1001,22 @@ const SUBAGENT_FACTORIES: Record<SubagentName, AgentFactory> = {
  * @param options - Optional options including projectDirectory and hostFlavor
  * @returns Array of agent definitions (orchestrator first, then subagents)
  */
+/** Per-role image-input capability resolved from the host's merged model
+ * catalog. `true` = the role's resolved model accepts image input; `false`
+ * = it does not; `undefined` = unknown (fail-open). */
+export type RoleAcceptsImages = (role: string) => boolean | undefined;
+
+export interface AgentViewOptions {
+  projectDirectory?: string;
+  hostFlavor?: string;
+  /** When provided, gates the observer dispatch instruction per role (see
+   * `observerDispatchRolesFor`). Omitted → fail-open for every role. */
+  roleAcceptsImages?: RoleAcceptsImages;
+}
+
 export function createAgents(
   runtime: RuntimeConfig,
-  options?: { projectDirectory?: string; hostFlavor?: string },
+  options?: AgentViewOptions,
 ): AgentDefinition[] {
   return createAgentViews(runtime, options, false);
 }
@@ -1011,7 +1024,7 @@ export function createAgents(
 /** Resolve the same roster and inference fields without constructing prompts. */
 export function createAgentInferenceViews(
   runtime: RuntimeConfig,
-  options?: { projectDirectory?: string; hostFlavor?: string },
+  options?: AgentViewOptions,
 ): Array<
   Pick<AgentDefinition, 'name' | 'displayName' | 'config' | '_modelArray'>
 > {
@@ -1020,7 +1033,7 @@ export function createAgentInferenceViews(
 
 function createAgentViews(
   runtime: RuntimeConfig,
-  options: { projectDirectory?: string; hostFlavor?: string } | undefined,
+  options: AgentViewOptions | undefined,
   inferenceOnly: boolean,
 ): AgentDefinition[] {
   const mergedAgents = runtime.agents();
@@ -1058,6 +1071,16 @@ function createAgentViews(
   // toolset for nothing.
   const nestedDispatchEnabled =
     options?.hostFlavor === 'v2' && !disabled.has('observer');
+  // Capability gate on the observer dispatch instruction: a vision-capable
+  // advisor must not be primed into delegating images it can read itself.
+  // `options.roleAcceptsImages` resolves per-role from the host's merged
+  // model catalog (chain-head approximation: prompts are static per
+  // generation, so mid-session model switches can't re-decide this).
+  // Unknown capability keeps the instruction — fail-open, as in the image
+  // routing hook.
+  const dispatchRoles = observerDispatchRolesFor(
+    options?.roleAcceptsImages ?? (() => undefined),
+  );
   // Explicitly disabling the council agent disables the whole chain: the
   // injected procedure dispatches seats and then delegates synthesis to
   // the council agent, so seats/pointer/hook without it would dangle.
@@ -1164,7 +1187,7 @@ function createAgentViews(
       const defaultPrompt = appendTaskRejectionInstruction(
         appendObserverDispatchInstruction(
           agent.config.prompt ?? '',
-          nestedDispatchEnabled && OBSERVER_DISPATCH_ROLES.has(name),
+          nestedDispatchEnabled && dispatchRoles.has(name),
         ),
       );
 
@@ -1738,7 +1761,7 @@ function createAgentViews(
  */
 export function getAgentConfigs(
   runtime: RuntimeConfig,
-  options?: { projectDirectory?: string; hostFlavor?: string },
+  options?: AgentViewOptions,
 ): Record<string, SDKAgentConfig> {
   const agents = createAgents(runtime, options);
 

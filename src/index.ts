@@ -24,6 +24,7 @@ import {
   type ResolvedAgentRegistry,
 } from './agents/registry';
 import type { RegistryFactoryBridge } from './agents/registry-bridge';
+import { OBSERVER_DISPATCH_ROLES } from './agents/task-rejection';
 import {
   getV1BundledSkillPaths,
   removeLegacySkillSyncState,
@@ -1005,9 +1006,37 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       const { createReflectCommandHook } = await import('./hooks/reflect');
       reflectCommandHook = createReflectCommandHook();
     }
+    // Capability gate for the observer dispatch instruction: a
+    // vision-capable advisor must not be primed into delegating images it
+    // can read itself. Resolve each advisory role's chain-head model against
+    // the same host catalog the request-time image routing reads (shared
+    // memo, one fetch per generation); unknown capability keeps the
+    // instruction (fail-open). Only probed when the instruction could be
+    // injected at all.
+    const roleImageCapability = new Map<string, boolean | undefined>();
+    if (hostFlavor === 'v2' && !runtime.disabledAgents.has('observer')) {
+      const capabilityDeps: ModelImageCapabilityDeps = {
+        client: ctx.client,
+        modelDomain: (
+          ctx as {
+            experimental_v2?: ModelImageCapabilityDeps;
+          }
+        ).experimental_v2?.modelDomain,
+        cache: imageCapabilityCache,
+      };
+      for (const role of OBSERVER_DISPATCH_ROLES) {
+        const headModel = runtime.modelArrays[role]?.[0]?.id;
+        const ref = headModel ? parseModelRef(headModel) : undefined;
+        roleImageCapability.set(
+          role,
+          ref ? await modelAcceptsImageInput(ref, capabilityDeps) : undefined,
+        );
+      }
+    }
     agentDefs = createAgents(runtime, {
       projectDirectory: ctx.directory,
       hostFlavor,
+      roleAcceptsImages: (role) => roleImageCapability.get(role),
     });
     primaryNames = collectPrimaryNames(agentDefs);
     agents = getAgentConfigsFromDefinitions(runtime, agentDefs);
